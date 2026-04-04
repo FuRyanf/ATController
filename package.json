@@ -1,7 +1,7 @@
 {
   "name": "atcontroller",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Native macOS desktop control plane for local Claude Code workflows.",
   "type": "module",
   "scripts": {
@@ -11,6 +11,8 @@
     "tauri": "tauri",
     "icons": "yarn generate:icons",
     "generate:icons": "bash scripts/generate-icons.sh",
+    "version:set": "node scripts/sync-version.mjs set",
+    "version:check": "node scripts/sync-version.mjs check",
     "test:ui": "NODE_OPTIONS=\"--require ./tests/polyfills.cjs\" vitest run",
     "verify": "node scripts/verify.mjs"
   },

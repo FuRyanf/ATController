@@ -47,6 +47,9 @@ jobs:
       - name: Install dependencies
         run: yarn install --frozen-lockfile
 
+      - name: Validate repo version alignment
+        run: node scripts/sync-version.mjs check
+
       - name: Import Developer ID certificate (optional)
         shell: bash
         env:
@@ -102,26 +105,14 @@ jobs:
           rm -f src-tauri/target/release/atcontroller
           rm -rf dist
 
-      - name: Stamp build version from tag
+      - name: Validate tag version matches repo version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          echo "Stamping version: ${VERSION}"
-
-          # Update tauri.conf.json (controls app bundle version + CARGO_PKG_VERSION via tauri-build)
-          node -e "const fs=require('fs'); const p='src-tauri/tauri.conf.json'; const cfg=JSON.parse(fs.readFileSync(p,'utf8')); cfg.version=process.argv[1]; fs.writeFileSync(p, JSON.stringify(cfg, null, 2)+'\n');" "$VERSION"
-
-          # Update Cargo.toml (controls CARGO_PKG_VERSION fallback in current_build_version())
-          sed -i '' "s/^version = \"[0-9][0-9.]*\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml
-
-          # Update package.json (keeps frontend version in sync)
-          node -e "const fs=require('fs'); const p='package.json'; const pkg=JSON.parse(fs.readFileSync(p,'utf8')); pkg.version=process.argv[1]; fs.writeFileSync(p, JSON.stringify(pkg, null, 2)+'\n');" "$VERSION"
-
-          echo "tauri.conf.json: $(node -e \"console.log(JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version)\")"
-          echo "Cargo.toml:      $(grep '^version' src-tauri/Cargo.toml | head -1)"
-          echo "package.json:    $(node -e \"console.log(require('./package.json').version)\")"
+          echo "Validating release tag version: ${VERSION}"
+          node scripts/sync-version.mjs check "$VERSION"
 
       - name: Build app
         env:

@@ -176,6 +176,28 @@ Built app output:
 - For `v*` tags, the same DMG and ZIP are attached to the GitHub Release automatically.
 - If signing secrets are not configured, builds are unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
 
+## Release Versioning
+
+ATController uses SemVer with the repository files as the source of truth:
+
+- App manifests store plain versions like `0.0.1`.
+- Git tags add the `v` prefix, like `v0.0.1`.
+- `0.0.0` should be treated as a local placeholder, not a real release.
+
+Suggested release flow:
+
+```bash
+node scripts/sync-version.mjs set 0.0.1
+yarn tauri build
+git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock
+git commit -m "Release 0.0.1"
+git push origin main
+git tag -a v0.0.1 -m "v0.0.1"
+git push origin v0.0.1
+```
+
+GitHub Actions validates that the tag matches the checked-in repo version before publishing the release, so future releases stay aligned.
+
 ## Developer ID Signing (GitHub Actions)
 
 The workflow supports optional macOS Developer ID signing and notarization when these repository secrets are configured:
