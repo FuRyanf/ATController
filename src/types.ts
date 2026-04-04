@@ -2,7 +2,7 @@ export type RunStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled'
 export type ContextPack = 'Minimal' | 'Git Diff' | 'Debug';
 export type TerminalSessionMode = 'resumed' | 'new' | 'forked';
 export type TerminalTurnCompletionMode = 'idle' | 'jsonl';
-export type WorkspaceKind = 'local' | 'ssh';
+export type WorkspaceKind = 'local' | 'rdev' | 'ssh';
 export type AppearanceMode = 'dark' | 'light' | 'system';
 
 export interface Workspace {
@@ -10,6 +10,7 @@ export interface Workspace {
   name: string;
   path: string;
   kind?: WorkspaceKind;
+  rdevSshCommand?: string | null;
   sshCommand?: string | null;
   remotePath?: string | null;
   gitPullOnMasterForNewThreads: boolean;

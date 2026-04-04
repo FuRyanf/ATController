@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => {
     name: 'Workspace',
     path: '/tmp/workspace',
     kind: 'local' as const,
+    rdevSshCommand: null,
     sshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
@@ -447,6 +448,55 @@ describe('Thread lifecycle integration', () => {
     });
   });
 
+  it('starts rdev workspace sessions with null initial cwd', async () => {
+    const remoteWorkspace = {
+      id: 'ws-rdev',
+      name: 'example-env',
+      path: 'rdev-workspace-1',
+      kind: 'rdev' as const,
+      rdevSshCommand: 'rdev ssh team/example-env',
+      sshCommand: null,
+      gitPullOnMasterForNewThreads: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const remoteThread = {
+      id: 'thread-rdev',
+      workspaceId: 'ws-rdev',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'Remote thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+
+    mocks.api.listWorkspaces.mockResolvedValueOnce([remoteWorkspace]);
+    mocks.api.listThreads.mockImplementation(async (workspaceId: string) =>
+      workspaceId === 'ws-rdev' ? [remoteThread] : []
+    );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Remote thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspacePath: 'rdev-workspace-1',
+          initialCwd: null,
+          threadId: 'thread-rdev'
+        })
+      );
+    });
+  });
+
   it('still auto-starts after delayed thread metadata hydration', async () => {
     const originalListThreads = mocks.api.listThreads.getMockImplementation();
     mocks.api.listThreads.mockImplementation(async (workspaceId: string) => {
@@ -566,6 +616,79 @@ describe('Thread lifecycle integration', () => {
     });
     expect(mocks.api.terminalStartSession).toHaveBeenLastCalledWith(
       expect.objectContaining({ threadId: 'thread-ssh-recover' })
+    );
+  });
+
+  it('auto-recovers the selected rdev thread session after focus when the previous session is gone', async () => {
+    const remoteWorkspace = {
+      id: 'ws-rdev-recover',
+      name: 'example-env',
+      path: 'rdev-workspace-recover',
+      kind: 'rdev' as const,
+      rdevSshCommand: 'rdev ssh team/example-env',
+      sshCommand: null,
+      gitPullOnMasterForNewThreads: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const remoteThread = {
+      id: 'thread-rdev-recover',
+      workspaceId: 'ws-rdev-recover',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'Remote recover thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+    mocks.api.listWorkspaces.mockResolvedValueOnce([remoteWorkspace]);
+    mocks.api.listThreads.mockImplementation(async (workspaceId: string) =>
+      workspaceId === remoteWorkspace.id ? [remoteThread] : []
+    );
+    mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+      sessionId: `session-${params.threadId}`,
+      sessionMode: 'new',
+      resumeSessionId: null,
+      thread: {
+        ...remoteThread,
+        id: params.threadId
+      }
+    }));
+
+    let disconnected = false;
+    mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
+      if (disconnected && sessionId === 'session-thread-rdev-recover') {
+        throw new Error('Terminal session not found');
+      }
+      return { text: '', startPosition: 0, endPosition: 0, truncated: false };
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-rdev-recover' })
+      );
+    });
+    const startCallsBefore = mocks.api.terminalStartSession.mock.calls.length;
+
+    disconnected = true;
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession.mock.calls.length).toBeGreaterThan(startCallsBefore);
+    });
+    expect(mocks.api.terminalStartSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ threadId: 'thread-rdev-recover' })
     );
   });
 

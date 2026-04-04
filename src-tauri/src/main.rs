@@ -95,6 +95,15 @@ fn add_workspace(path: String) -> Result<Workspace, String> {
 }
 
 #[tauri::command]
+fn add_rdev_workspace(
+    rdev_ssh_command: String,
+    display_name: Option<String>,
+) -> Result<Workspace, String> {
+    storage::add_rdev_workspace(&rdev_ssh_command, display_name.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn add_ssh_workspace(
     ssh_command: String,
     display_name: Option<String>,
@@ -845,6 +854,7 @@ fn main() {
             get_app_storage_root,
             list_workspaces,
             add_workspace,
+            add_rdev_workspace,
             add_ssh_workspace,
             set_workspace_order,
             remove_workspace,

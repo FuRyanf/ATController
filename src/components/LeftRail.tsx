@@ -57,7 +57,7 @@ const NEW_THREAD_CONTEXT_MENU_HEIGHT = 88;
 const CONTEXT_MENU_MARGIN = 8;
 
 function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
-  return kind === 'ssh';
+  return kind === 'rdev' || kind === 'ssh';
 }
 
 function clampMenuCoordinate(x: number, y: number, width: number, height: number) {
@@ -624,7 +624,7 @@ function LeftRailComponent({
                       setWorkspaceContextMenu(null);
                     }}
                   >
-                    Copy SSH command
+                    Copy {workspaceContextMenu.workspace.kind === 'rdev' ? 'rdev' : 'SSH'} command
                   </button>
                 )}
                 {workspaceContextMenu.workspace.kind === 'local' ? (

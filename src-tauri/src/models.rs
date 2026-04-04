@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum WorkspaceKind {
     #[default]
     Local,
+    Rdev,
     Ssh,
 }
 
@@ -17,6 +18,8 @@ pub struct Workspace {
     pub path: String,
     #[serde(default)]
     pub kind: WorkspaceKind,
+    #[serde(default)]
+    pub rdev_ssh_command: Option<String>,
     #[serde(default)]
     pub ssh_command: Option<String>,
     #[serde(default)]

@@ -169,6 +169,64 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
             .unwrap_or_else(|| "Workspace".to_string()),
         path: canonical,
         kind: WorkspaceKind::Local,
+        rdev_ssh_command: None,
+        ssh_command: None,
+        remote_path: None,
+        git_pull_on_master_for_new_threads: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    workspaces.push(workspace.clone());
+    save_workspaces(&workspaces)?;
+    fs::create_dir_all(thread_workspace_dir(&workspace.id)?)?;
+
+    Ok(workspace)
+}
+
+pub fn add_rdev_workspace(rdev_ssh_command: &str, display_name: Option<&str>) -> Result<Workspace> {
+    let normalized_command = rdev_ssh_command.trim();
+    if normalized_command.is_empty() {
+        return Err(anyhow!("Please enter an rdev ssh command."));
+    }
+
+    if !normalized_command.starts_with("rdev ssh") {
+        return Err(anyhow!(
+            "rdev command must start with `rdev ssh` (example: rdev ssh <workspace>/<env>)"
+        ));
+    }
+
+    let mut workspaces = load_workspaces()?;
+    if let Some(existing) = workspaces.iter().find(|workspace| {
+        workspace.kind == WorkspaceKind::Rdev
+            && workspace.rdev_ssh_command.as_deref() == Some(normalized_command)
+    }) {
+        return Ok(existing.clone());
+    }
+
+    let now = Utc::now();
+    let trimmed_display_name = display_name.unwrap_or_default().trim().to_string();
+    let fallback_name = normalized_command
+        .split_whitespace()
+        .skip(2)
+        .find(|segment| !segment.starts_with('-'))
+        .unwrap_or("rdev")
+        .split('/')
+        .next_back()
+        .unwrap_or("rdev")
+        .to_string();
+    let workspace_name = if trimmed_display_name.is_empty() {
+        fallback_name
+    } else {
+        trimmed_display_name
+    };
+
+    let workspace = Workspace {
+        id: Uuid::new_v4().to_string(),
+        name: workspace_name,
+        path: format!("rdev-workspace-{}", Uuid::new_v4()),
+        kind: WorkspaceKind::Rdev,
+        rdev_ssh_command: Some(normalized_command.to_string()),
         ssh_command: None,
         remote_path: None,
         git_pull_on_master_for_new_threads: false,
@@ -237,6 +295,7 @@ pub fn add_ssh_workspace(
         name: workspace_name,
         path: format!("ssh-workspace-{}", Uuid::new_v4()),
         kind: WorkspaceKind::Ssh,
+        rdev_ssh_command: None,
         ssh_command: Some(normalized_command.to_string()),
         remote_path: trimmed_remote_path,
         git_pull_on_master_for_new_threads: false,
@@ -1179,6 +1238,34 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, added.id);
         assert_eq!(loaded[0].kind, WorkspaceKind::Ssh);
+
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn add_rdev_workspace_persists_command_and_kind() {
+        let _guard = test_env_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-rdev-workspace-test-{}",
+            Uuid::new_v4()
+        ));
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
+
+        let added = add_rdev_workspace("rdev ssh team/example-env", Some("example-env"))
+            .expect("rdev workspace should be added");
+        assert_eq!(added.kind, WorkspaceKind::Rdev);
+        assert_eq!(added.rdev_ssh_command.as_deref(), Some("rdev ssh team/example-env"));
+        assert!(
+            added.path.starts_with("rdev-workspace-"),
+            "rdev workspace path should use deterministic non-filesystem marker"
+        );
+
+        let loaded = load_workspaces().expect("workspaces should load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, added.id);
+        assert_eq!(loaded[0].kind, WorkspaceKind::Rdev);
 
         std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);

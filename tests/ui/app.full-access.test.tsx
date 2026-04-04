@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => {
     name: 'Workspace',
     path: '/tmp/workspace',
     kind: 'local' as const,
+    rdevSshCommand: null,
     sshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
@@ -78,6 +79,7 @@ const mocks = vi.hoisted(() => {
     getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
+    addRdevWorkspace: vi.fn(async () => workspace),
     addSshWorkspace: vi.fn(async () => workspace),
     removeWorkspace: vi.fn(async () => true),
     setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async () => workspace),
@@ -235,7 +237,7 @@ const mocks = vi.hoisted(() => {
     api,
     reset,
     ...helperMocks,
-    setWorkspaceKind: (kind: 'local' | 'ssh') => {
+    setWorkspaceKind: (kind: 'local' | 'rdev' | 'ssh') => {
       workspace = { ...workspace, kind };
     },
     openDialog: vi.fn(async () => null),
@@ -751,6 +753,63 @@ describe('Terminal launch flags', () => {
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
   });
 
+  it('keeps rdev new threads blocked until the first submitted prompt, then reconnects without in-place resume', async () => {
+    mocks.setWorkspaceKind('rdev');
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
+    await user.click(await screen.findByRole('button', { name: 'Normal thread' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-2',
+          fullAccessFlag: false
+        })
+      );
+    });
+
+    const toggle = screen.getByTestId('full-access-toggle');
+    expect(toggle).toHaveAttribute('aria-disabled', 'true');
+    expect(toggle).toHaveAttribute('title', REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON);
+
+    await user.click(toggle);
+    expect(mocks.api.setThreadFullAccess).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Submit prompt' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-2', 'ship it\r');
+    });
+    await waitFor(() => {
+      expect(toggle).not.toHaveAttribute('aria-disabled');
+    });
+
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadFullAccess).toHaveBeenCalledWith('ws-1', 'thread-2', true);
+    });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-2',
+          fullAccessFlag: true
+        })
+      );
+    });
+
+    expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-2');
+    expect(mocks.api.terminalWrite).not.toHaveBeenCalledWith(
+      'session-2',
+      expect.stringContaining("claude --resume '")
+    );
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('drops stale terminal data after full-access restart replaces the session', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -918,6 +977,45 @@ describe('Terminal launch flags', () => {
     expect(mocks.api.terminalReadOutput.mock.invocationCallOrder[replacementReadIndex]).toBeLessThan(
       mocks.api.terminalWrite.mock.invocationCallOrder[replayIndex]
     );
+  });
+
+  it('toggles full access in-place for rdev without reconnecting', async () => {
+    mocks.setWorkspaceKind('rdev');
+    mocks.api.terminalReadOutput.mockResolvedValue({
+      text: '[dev@remote-host workspace]$ ',
+      startPosition: 0,
+      endPosition: '[dev@remote-host workspace]$ '.length,
+      truncated: false
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Submit prompt' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-1', 'ship it\r');
+    });
+
+    await user.click(screen.getByTestId('full-access-toggle'));
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadFullAccess).toHaveBeenCalledWith('ws-1', 'thread-1', false);
+      expect(mocks.api.terminalSendSignal).toHaveBeenCalledWith('session-1', 'SIGINT');
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith(
+        'session-1',
+        "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= claude --resume '123e4567-e89b-12d3-a456-426614174000'\r"
+      );
+    });
+
+    expect(mocks.api.terminalKill).not.toHaveBeenCalled();
+    expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'false');
   });
 
 });

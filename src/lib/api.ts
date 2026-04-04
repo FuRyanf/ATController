@@ -47,6 +47,8 @@ export const api = {
   getAppStorageRoot: () => invoke<string>('get_app_storage_root'),
   listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
+  addRdevWorkspace: (rdevSshCommand: string, displayName?: string | null) =>
+    invoke<Workspace>('add_rdev_workspace', { rdevSshCommand, displayName }),
   addSshWorkspace: (sshCommand: string, displayName?: string | null, remotePath?: string | null) =>
     invoke<Workspace>('add_ssh_workspace', { sshCommand, displayName, remotePath }),
   removeWorkspace: (workspaceId: string) => invoke<boolean>('remove_workspace', { workspaceId }),

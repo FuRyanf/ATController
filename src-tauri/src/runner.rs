@@ -1258,6 +1258,7 @@ fn build_claude_shell_command(
 
 fn build_terminal_shell_command(
     workspace_kind: WorkspaceKind,
+    rdev_ssh_command: Option<&str>,
     ssh_command: Option<&str>,
     remote_path: Option<&str>,
     claude_shell_command: &str,
@@ -1266,11 +1267,21 @@ fn build_terminal_shell_command(
         return Ok((claude_shell_command.to_string(), None));
     }
 
-    let remote_command = ssh_command
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("Missing ssh command for remote workspace"))?
-        .to_string();
+    let remote_command = match workspace_kind {
+        WorkspaceKind::Rdev => {
+            let command = rdev_ssh_command
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("Missing rdev ssh command for remote workspace"))?;
+            ensure_rdev_non_tmux(command)
+        }
+        WorkspaceKind::Ssh => ssh_command
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("Missing ssh command for remote workspace"))?
+            .to_string(),
+        WorkspaceKind::Local => unreachable!(),
+    };
     let base_exec_claude_command = format!("exec {claude_shell_command}");
 
     if remote_command.contains("{CLAUDE_CMD}") {
@@ -1280,12 +1291,16 @@ fn build_terminal_shell_command(
         ));
     }
 
-    let exec_claude_command = if let Some(path) = remote_path.map(str::trim).filter(|value| !value.is_empty()) {
-        format!(
-            "cd {} && exec {}",
-            shell_escape_arg(path),
-            claude_shell_command
-        )
+    let exec_claude_command = if workspace_kind == WorkspaceKind::Ssh {
+        if let Some(path) = remote_path.map(str::trim).filter(|value| !value.is_empty()) {
+            format!(
+                "cd {} && exec {}",
+                shell_escape_arg(path),
+                claude_shell_command
+            )
+        } else {
+            base_exec_claude_command
+        }
     } else {
         base_exec_claude_command
     };
@@ -1296,11 +1311,19 @@ fn build_terminal_shell_command(
 fn build_workspace_shell_command(
     workspace_kind: WorkspaceKind,
     shell_path: &str,
+    rdev_ssh_command: Option<&str>,
     ssh_command: Option<&str>,
     remote_path: Option<&str>,
 ) -> Result<(Option<String>, Option<String>)> {
     match workspace_kind {
         WorkspaceKind::Local => Ok((None, None)),
+        WorkspaceKind::Rdev => {
+            let remote_command = rdev_ssh_command
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("Missing rdev ssh command for remote workspace"))?;
+            Ok((Some(ensure_rdev_non_tmux(remote_command)), None))
+        }
         WorkspaceKind::Ssh => {
             let remote_command = ssh_command
                 .map(str::trim)
@@ -1326,12 +1349,26 @@ fn resolve_claude_command_for_workspace(
     workspace_kind: WorkspaceKind,
     settings: &Settings,
 ) -> Result<String> {
-    if workspace_kind == WorkspaceKind::Ssh {
+    if workspace_kind == WorkspaceKind::Rdev || workspace_kind == WorkspaceKind::Ssh {
         return Ok("claude".to_string());
     }
 
     detect_claude_cli_path(settings)
         .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))
+}
+
+fn ensure_rdev_non_tmux(remote_command: &str) -> String {
+    let trimmed = remote_command.trim();
+    let has_explicit_tmux_mode = trimmed
+        .split_whitespace()
+        .any(|token| matches!(token, "--tmux" | "--non-tmux" | "-d"));
+    if has_explicit_tmux_mode {
+        trimmed.to_string()
+    } else if trimmed.contains("{CLAUDE_CMD}") {
+        trimmed.replacen("{CLAUDE_CMD}", "--non-tmux {CLAUDE_CMD}", 1)
+    } else {
+        format!("{trimmed} --non-tmux")
+    }
 }
 
 fn trim_prompt_probe_buffer(buffer: &mut String) {
@@ -2980,6 +3017,7 @@ pub async fn terminal_start_session(
     );
     let (shell_command, post_connect_command) = build_terminal_shell_command(
         workspace.kind,
+        workspace.rdev_ssh_command.as_deref(),
         workspace.ssh_command.as_deref(),
         workspace.remote_path.as_deref(),
         &claude_shell_command,
@@ -3014,6 +3052,7 @@ pub async fn terminal_start_session(
             ,
             "workspaceKind": match workspace.kind {
                 WorkspaceKind::Local => "local",
+                WorkspaceKind::Rdev => "rdev",
                 WorkspaceKind::Ssh => "ssh"
             },
             "postConnectCommand": post_connect_command.clone()
@@ -3439,6 +3478,7 @@ pub async fn workspace_shell_start_session(
     let (shell_command, post_connect_command) = build_workspace_shell_command(
         workspace.kind,
         &shell_path,
+        workspace.rdev_ssh_command.as_deref(),
         workspace.ssh_command.as_deref(),
         workspace.remote_path.as_deref(),
     )?;
@@ -3500,6 +3540,7 @@ pub async fn workspace_shell_start_session(
             "mode": "workspace-shell-terminal",
             "workspaceKind": match workspace.kind {
                 WorkspaceKind::Local => "local",
+                WorkspaceKind::Rdev => "rdev",
                 WorkspaceKind::Ssh => "ssh",
             },
             "postConnectCommand": post_connect_command,
@@ -5767,6 +5808,14 @@ mod tests {
     }
 
     #[test]
+    fn resolve_claude_command_for_rdev_uses_remote_binary() {
+        let settings = Settings::default();
+        let command = resolve_claude_command_for_workspace(WorkspaceKind::Rdev, &settings)
+            .expect("rdev command should resolve");
+        assert_eq!(command, "claude");
+    }
+
+    #[test]
     fn resolve_claude_command_for_ssh_uses_remote_binary() {
         let settings = Settings::default();
         let command = resolve_claude_command_for_workspace(WorkspaceKind::Ssh, &settings)
@@ -5826,6 +5875,61 @@ mod tests {
     }
 
     #[test]
+    fn build_terminal_shell_command_defaults_rdev_to_non_tmux_post_connect_handoff() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            TerminalSessionMode::New,
+            false,
+            false,
+        );
+        let (shell_command, post_connect_command) = build_terminal_shell_command(
+            WorkspaceKind::Rdev,
+            Some("rdev ssh team/example-env"),
+            None,
+            Some("~/projects/ignored-for-rdev"),
+            &claude_command,
+        )
+        .expect("rdev command should build");
+
+        assert_eq!(shell_command, "rdev ssh team/example-env --non-tmux");
+        assert_eq!(
+            post_connect_command,
+            Some(
+                "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_terminal_shell_command_preserves_explicit_tmux_mode() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            TerminalSessionMode::Resumed,
+            true,
+            false,
+        );
+        let (shell_command, post_connect_command) = build_terminal_shell_command(
+            WorkspaceKind::Rdev,
+            Some("rdev ssh team/example-env --tmux"),
+            None,
+            Some("~/projects/ignored-for-rdev"),
+            &claude_command,
+        )
+        .expect("rdev command should build");
+
+        assert_eq!(shell_command, "rdev ssh team/example-env --tmux");
+        assert_eq!(
+            post_connect_command,
+            Some(
+                "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/claude' --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn build_terminal_shell_command_for_ssh_dispatches_post_connect_handoff() {
         let claude_command = build_claude_shell_command(
             "/usr/local/bin/claude",
@@ -5836,6 +5940,7 @@ mod tests {
         );
         let (shell_command, post_connect_command) = build_terminal_shell_command(
             WorkspaceKind::Ssh,
+            None,
             Some("ssh dev@remote-host"),
             Some("~/projects/example"),
             &claude_command,
@@ -5864,6 +5969,7 @@ mod tests {
 
         let (_, without_path) = build_terminal_shell_command(
             WorkspaceKind::Ssh,
+            None,
             Some("ssh dev@remote-host"),
             None,
             &claude_command,
@@ -5879,6 +5985,7 @@ mod tests {
 
         let (_, with_empty_path) = build_terminal_shell_command(
             WorkspaceKind::Ssh,
+            None,
             Some("ssh dev@remote-host"),
             Some("   "),
             &claude_command,
@@ -5898,6 +6005,7 @@ mod tests {
         );
         let (shell_command, post_connect_command) = build_terminal_shell_command(
             WorkspaceKind::Ssh,
+            None,
             Some("ssh dev@remote-host {CLAUDE_CMD}"),
             Some("~/projects/should-not-be-applied"),
             &claude_command,
@@ -5907,6 +6015,31 @@ mod tests {
         assert_eq!(
             shell_command,
             "ssh dev@remote-host exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
+        );
+        assert_eq!(post_connect_command, None);
+    }
+
+    #[test]
+    fn build_terminal_shell_command_for_rdev_placeholder_skips_remote_path_prefix() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            TerminalSessionMode::New,
+            false,
+            false,
+        );
+        let (shell_command, post_connect_command) = build_terminal_shell_command(
+            WorkspaceKind::Rdev,
+            Some("rdev ssh team/example-env {CLAUDE_CMD}"),
+            None,
+            Some("~/projects/ignored-for-rdev"),
+            &claude_command,
+        )
+        .expect("placeholder command should build");
+
+        assert_eq!(
+            shell_command,
+            "rdev ssh team/example-env --non-tmux exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
         );
         assert_eq!(post_connect_command, None);
     }
@@ -5926,6 +6059,13 @@ mod tests {
     #[test]
     fn looks_like_shell_prompt_detects_unicode_arrow_prompt() {
         assert!(looks_like_shell_prompt("dev in workspace on main ❯ "));
+    }
+
+    #[test]
+    fn looks_like_shell_prompt_ignores_rdev_bootstrap_lines() {
+        assert!(!looks_like_shell_prompt(
+            "Uploading auth token to rdev\nStarting ssh connection to team/example-env\n"
+        ));
     }
 
     #[test]

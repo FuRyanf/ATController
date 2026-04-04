@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => {
     name: 'workspace-added',
     path: '/tmp/workspace-added',
     kind: 'local' as const,
+    rdevSshCommand: null,
     sshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
@@ -18,6 +19,18 @@ const mocks = vi.hoisted(() => {
     name: 'workspace-second',
     path: '/tmp/workspace-second',
     kind: 'local' as const,
+    rdevSshCommand: null,
+    sshCommand: null,
+    gitPullOnMasterForNewThreads: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspaceRdev = {
+    id: 'ws-rdev',
+    name: 'example-env',
+    path: 'rdev-workspace-1',
+    kind: 'rdev' as const,
+    rdevSshCommand: 'rdev ssh team/example-env',
     sshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
@@ -28,6 +41,7 @@ const mocks = vi.hoisted(() => {
     name: 'remote-host',
     path: 'ssh-workspace-1',
     kind: 'ssh' as const,
+    rdevSshCommand: null,
     sshCommand: 'ssh dev@remote-host',
     remotePath: '~/projects/example',
     gitPullOnMasterForNewThreads: false,
@@ -35,7 +49,7 @@ const mocks = vi.hoisted(() => {
     updatedAt: new Date().toISOString()
   };
 
-  type WorkspaceFixture = typeof workspaceOne | typeof workspaceSsh;
+  type WorkspaceFixture = typeof workspaceOne | typeof workspaceRdev | typeof workspaceSsh;
   let workspaceState: WorkspaceFixture[] = [];
 
   const api = {
@@ -44,6 +58,10 @@ const mocks = vi.hoisted(() => {
     addWorkspace: vi.fn(async () => {
       workspaceState = [workspaceOne];
       return workspaceOne;
+    }),
+    addRdevWorkspace: vi.fn(async () => {
+      workspaceState = [workspaceRdev];
+      return workspaceRdev;
     }),
     addSshWorkspace: vi.fn(async () => {
       workspaceState = [workspaceSsh];
@@ -393,6 +411,20 @@ describe('Workspace add flow', () => {
       '~/projects/example'
     );
     expect(await screen.findByRole('button', { name: /remote-host/i })).toBeInTheDocument();
+  });
+
+  it('adds an rdev workspace from the add-project modal', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    await user.click(screen.getByRole('tab', { name: 'rdev' }));
+    await user.type(screen.getByLabelText('rdev ssh command'), 'rdev ssh team/example-env');
+    await user.type(screen.getByLabelText('Display name (optional)'), 'example-env');
+    await user.click(screen.getByRole('button', { name: 'Add rdev project' }));
+
+    expect(mocks.api.addRdevWorkspace).toHaveBeenCalledWith('rdev ssh team/example-env', 'example-env');
+    expect(await screen.findByRole('button', { name: /example-env/i })).toBeInTheDocument();
   });
 
   it('copies terminal diagnostics through the native clipboard bridge for a selected local workspace', async () => {

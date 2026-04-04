@@ -124,6 +124,8 @@ const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
 const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
 const SESSION_SNAPSHOT_LATE_REFRESH_DELAYS_MS = [2200, 4200];
 const CLAUDE_IN_PLACE_RESTART_DELAY_MS = 120;
+const RDEV_SHELL_PROMPT_POLL_INTERVAL_MS = 120;
+const RDEV_SHELL_PROMPT_MAX_POLLS = 12;
 const AUTO_RECOVER_SESSION_TIMEOUT_MS = 900;
 const AUTO_RECOVER_RETRY_COOLDOWN_MS = 1200;
 const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
@@ -1419,8 +1421,9 @@ export default function App() {
   const [blockingError, setBlockingError] = useState<string | null>(null);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
-  const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'ssh'>('local');
+  const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev' | 'ssh'>('local');
   const [addWorkspacePath, setAddWorkspacePath] = useState('');
+  const [addWorkspaceRdevCommand, setAddWorkspaceRdevCommand] = useState('');
   const [addWorkspaceSshCommand, setAddWorkspaceSshCommand] = useState('');
   const [addWorkspaceSshRemotePath, setAddWorkspaceSshRemotePath] = useState('');
   const [addWorkspaceDisplayName, setAddWorkspaceDisplayName] = useState('');
@@ -4209,6 +4212,28 @@ export default function App() {
     [ensureLocalWorkspaceByPath]
   );
 
+  const addRdevWorkspaceByCommand = useCallback(
+    async (rdevSshCommand: string, displayName: string) => {
+      const command = rdevSshCommand.trim();
+      if (!command) {
+        throw new Error('Please enter an rdev ssh command.');
+      }
+
+      const workspace = await api.addRdevWorkspace(command, displayName.trim() || null);
+      setWorkspaces((current) => {
+        if (current.some((item) => item.id === workspace.id)) {
+          return current;
+        }
+        return [...current, workspace];
+      });
+      setSelectedWorkspace(workspace.id);
+      setSelectedThread(undefined);
+      await refreshThreadsForWorkspace(workspace.id);
+      return workspace;
+    },
+    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
+  );
+
   const addSshWorkspaceByCommand = useCallback(
     async (sshCommand: string, displayName: string, remotePath: string) => {
       const command = sshCommand.trim();
@@ -4238,6 +4263,7 @@ export default function App() {
   const openWorkspacePicker = useCallback(() => {
     setAddWorkspaceMode('local');
     setAddWorkspacePath('');
+    setAddWorkspaceRdevCommand('');
     setAddWorkspaceSshCommand('');
     setAddWorkspaceSshRemotePath('');
     setAddWorkspaceDisplayName('');
@@ -4277,12 +4303,14 @@ export default function App() {
       setAddWorkspaceError(null);
       setAddWorkspaceMode('local');
       setAddWorkspacePath(path);
+      setAddWorkspaceRdevCommand('');
       setAddWorkspaceSshCommand('');
       setAddWorkspaceSshRemotePath('');
       try {
         await addWorkspaceByPath(path);
         setAddWorkspaceOpen(false);
         setAddWorkspacePath('');
+        setAddWorkspaceRdevCommand('');
         setAddWorkspaceSshCommand('');
         setAddWorkspaceSshRemotePath('');
         setAddWorkspaceError(null);
@@ -4295,6 +4323,34 @@ export default function App() {
       }
     },
     [addWorkspaceByPath, pushToast]
+  );
+
+  const confirmRdevWorkspace = useCallback(
+    async (rdevSshCommand: string, displayName: string) => {
+      setAddingWorkspace(true);
+      setAddWorkspaceError(null);
+      setAddWorkspaceMode('rdev');
+      setAddWorkspaceRdevCommand(rdevSshCommand);
+      setAddWorkspaceSshCommand('');
+      setAddWorkspaceSshRemotePath('');
+      setAddWorkspaceDisplayName(displayName);
+      try {
+        await addRdevWorkspaceByCommand(rdevSshCommand, displayName);
+        setAddWorkspaceOpen(false);
+        setAddWorkspaceRdevCommand('');
+        setAddWorkspaceSshCommand('');
+        setAddWorkspaceSshRemotePath('');
+        setAddWorkspaceDisplayName('');
+        setAddWorkspaceError(null);
+      } catch (error) {
+        const message = String(error);
+        setAddWorkspaceError(message);
+        pushToast(message, 'error');
+      } finally {
+        setAddingWorkspace(false);
+      }
+    },
+    [addRdevWorkspaceByCommand, pushToast]
   );
 
   const confirmSshWorkspace = useCallback(
@@ -5899,6 +5955,49 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
 
+  const waitForRdevShellPrompt = useCallback(async (sessionId: string) => {
+    for (let attempt = 0; attempt < RDEV_SHELL_PROMPT_MAX_POLLS; attempt += 1) {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(() => resolve(), RDEV_SHELL_PROMPT_POLL_INTERVAL_MS);
+      });
+      const snapshot = await api.terminalReadOutput(sessionId).catch(() => null);
+      if (hasShellPromptInSnapshot(snapshot?.text ?? '')) {
+        return true;
+      }
+    }
+    return false;
+  }, []);
+
+  const restartRdevClaudeInPlace = useCallback(
+    async (thread: ThreadMetadata) => {
+      const sessionId =
+        activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
+      const resumeSessionId = thread.claudeSessionId?.trim() ?? '';
+      if (!sessionId || !isUuidLike(resumeSessionId)) {
+        return false;
+      }
+
+      const command = buildClaudeInPlaceRestartCommand(resumeSessionId, thread.fullAccess);
+
+      await api.terminalSendSignal(sessionId, 'SIGINT').catch(() => undefined);
+      let ready = await waitForRdevShellPrompt(sessionId);
+      if (!ready) {
+        await api.terminalWrite(sessionId, '/exit\r').catch(() => false);
+        await new Promise<void>((resolve) => {
+          window.setTimeout(() => resolve(), CLAUDE_IN_PLACE_RESTART_DELAY_MS);
+        });
+        ready = await waitForRdevShellPrompt(sessionId);
+      }
+      if (!ready) {
+        return false;
+      }
+
+      const wrote = await api.terminalWrite(sessionId, `${command}\r`).catch(() => false);
+      return wrote;
+    },
+    [runStore, waitForRdevShellPrompt]
+  );
+
   const selectThread = useCallback(
     (workspaceId: string, threadId: string) => {
       void switchToThread(workspaceId, threadId);
@@ -5945,6 +6044,23 @@ export default function App() {
         updatedThread = await api.clearThreadClaudeSession(updatedThread.workspaceId, updatedThread.id);
         applyThreadUpdate(updatedThread);
       }
+      const canRestartRdevInPlace =
+        workspace?.kind === 'rdev' && isUuidLike(updatedThread.claudeSessionId?.trim() ?? '');
+      if (canRestartRdevInPlace) {
+        const switchedInPlace = await restartRdevClaudeInPlace(updatedThread);
+        if (switchedInPlace) {
+          const sessionId =
+            activeRunsByThreadRef.current[updatedThread.id]?.sessionId ?? runStore.sessionForThread(updatedThread.id) ?? null;
+          await replayThreadDraftInput(sessionId, draftInput);
+          if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
+            setSelectedWorkspace(updatedThread.workspaceId);
+          }
+          setSelectedThread(updatedThread.id);
+          pushToast(`Full access ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
+          return;
+        }
+        pushToast('Could not switch in-place for remote workspace; reconnecting session.', 'info');
+      }
       await stopThreadSession(updatedThread.id);
       if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
         setSelectedWorkspace(updatedThread.workspaceId);
@@ -5971,6 +6087,7 @@ export default function App() {
     primeRemoteThreadStartupOnSelection,
     pushToast,
     replayThreadDraftInput,
+    restartRdevClaudeInPlace,
     runStore,
     sessionMetaBySessionIdRef,
     selectedThread,
@@ -5996,7 +6113,8 @@ export default function App() {
   const launchWorkspaceInTerminal = useCallback(
     async (workspace: Workspace): Promise<boolean> => {
       if (isRemoteWorkspaceKind(workspace.kind)) {
-        const command = workspace.sshCommand?.trim();
+        const command =
+          workspace.kind === 'rdev' ? workspace.rdevSshCommand?.trim() : workspace.sshCommand?.trim();
         if (!command) {
           pushToast('Missing remote shell command for this workspace.', 'error');
           return false;
@@ -6058,7 +6176,9 @@ export default function App() {
 
   const copyWorkspaceCommand = useCallback(
     (workspace: Workspace) => {
-      const command = workspace.sshCommand?.trim();
+      const command = (
+        workspace.kind === 'rdev' ? workspace.rdevSshCommand : workspace.sshCommand
+      )?.trim();
       if (!command) {
         pushToast('No remote command configured for this workspace.', 'error');
         return;
@@ -6923,6 +7043,7 @@ export default function App() {
         open={addWorkspaceOpen}
         initialMode={addWorkspaceMode}
         initialPath={addWorkspacePath}
+        initialRdevCommand={addWorkspaceRdevCommand}
         initialSshCommand={addWorkspaceSshCommand}
         initialSshRemotePath={addWorkspaceSshRemotePath}
         initialDisplayName={addWorkspaceDisplayName}
@@ -6931,11 +7052,13 @@ export default function App() {
         onClose={() => {
           setAddWorkspaceOpen(false);
           setAddWorkspaceError(null);
+          setAddWorkspaceRdevCommand('');
           setAddWorkspaceSshCommand('');
           setAddWorkspaceSshRemotePath('');
         }}
         onPickDirectory={() => void pickWorkspaceDirectory()}
         onConfirmLocal={(path) => void confirmManualWorkspace(path)}
+        onConfirmRdev={(command, displayName) => void confirmRdevWorkspace(command, displayName)}
         onConfirmSsh={(command, displayName, remotePath) =>
           void confirmSshWorkspace(command, displayName, remotePath)
         }
