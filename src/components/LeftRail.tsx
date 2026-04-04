@@ -994,14 +994,12 @@ function LeftRailComponent({
       </div>
 
       <div className="left-rail-footer">
-        <div className="left-rail-footer-links">
-          <button type="button" className="rail-footer-button" onClick={onOpenSettings}>
-            <span className="rail-footer-icon" aria-hidden="true">
-              <GearIcon />
-            </span>
-            <span>Settings</span>
-          </button>
-        </div>
+        <button type="button" className="rail-footer-button" onClick={onOpenSettings}>
+          <span className="rail-footer-icon" aria-hidden="true">
+            <GearIcon />
+          </span>
+          <span>Settings</span>
+        </button>
       </div>
       {menuLayer}
     </aside>

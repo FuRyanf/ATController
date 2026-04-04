@@ -376,7 +376,7 @@ Conceptual structure:
 |                   | Release prep            |                                    |
 |                   |                         | Main Output Surface                 |
 |                   | Recent                  |                                    |
-|                   | Write wiki              |                                    |
+|                   | Draft follow-up         |                                    |
 |                   | Refactor eval           |                                    |
 |                   |                         |                                    |
 +-------------------+-------------------------+------------------------------------+
