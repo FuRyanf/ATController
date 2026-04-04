@@ -1,0 +1,220 @@
+name: Build macOS
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Yarn (classic)
+        run: npm install -g yarn@1.22.10
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Import Developer ID certificate (optional)
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${APPLE_CERTIFICATE:-}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ] || [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "Signing certificate secrets not configured; continuing with unsigned build."
+            exit 0
+          fi
+
+          CERT_PATH="$RUNNER_TEMP/developer_id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASS="${KEYCHAIN_PASSWORD:-temporary-build-keychain-password}"
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/productbuild
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Ensure Tauri CLI is available
+        shell: bash
+        run: |
+          if yarn tauri --version; then
+            echo "Using project-local Tauri CLI"
+          else
+            npm install -g @tauri-apps/cli@2.1.0
+            tauri --version
+          fi
+
+      - name: Clean stale bundle artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf src-tauri/target/release/bundle
+          rm -f src-tauri/target/release/claudex
+          rm -rf dist
+
+      - name: Stamp build version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Stamping version: ${VERSION}"
+
+          # Update tauri.conf.json (controls app bundle version + CARGO_PKG_VERSION via tauri-build)
+          node -e "const fs=require('fs'); const p='src-tauri/tauri.conf.json'; const cfg=JSON.parse(fs.readFileSync(p,'utf8')); cfg.version=process.argv[1]; fs.writeFileSync(p, JSON.stringify(cfg, null, 2)+'\n');" "$VERSION"
+
+          # Update Cargo.toml (controls CARGO_PKG_VERSION fallback in current_build_version())
+          sed -i '' "s/^version = \"[0-9][0-9.]*\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml
+
+          # Update package.json (keeps frontend version in sync)
+          node -e "const fs=require('fs'); const p='package.json'; const pkg=JSON.parse(fs.readFileSync(p,'utf8')); pkg.version=process.argv[1]; fs.writeFileSync(p, JSON.stringify(pkg, null, 2)+'\n');" "$VERSION"
+
+          echo "tauri.conf.json: $(node -e \"console.log(JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version)\")"
+          echo "Cargo.toml:      $(grep '^version' src-tauri/Cargo.toml | head -1)"
+          echo "package.json:    $(node -e \"console.log(require('./package.json').version)\")"
+
+      - name: Build app
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Keep unsigned builds healthy when signing/notarization secrets are absent.
+          for var_name in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!var_name:-}" ]; then
+              unset "$var_name"
+            fi
+          done
+
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "Developer ID signing enabled for this build."
+          else
+            echo "No signing identity configured; building unsigned artifact."
+          fi
+
+          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            echo "Notarization credentials detected."
+          else
+            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID || true
+            echo "Notarization credentials incomplete; skipping notarization."
+          fi
+
+          yarn tauri build
+        # If Developer ID + notarization secrets are configured, Tauri signs/notarizes the app.
+        # Otherwise this remains an unsigned build.
+
+      - name: Collect build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg_dir="src-tauri/target/release/bundle/dmg"
+          app_dir="src-tauri/target/release/bundle/macos"
+
+          shopt -s nullglob
+          dmg_files=("${dmg_dir}"/*.dmg)
+          app_bundles=("${app_dir}"/*.app)
+
+          if [ ${#dmg_files[@]} -eq 0 ]; then
+            echo "No .dmg file found in ${dmg_dir}" >&2
+            exit 1
+          fi
+
+          if [ ${#app_bundles[@]} -eq 0 ]; then
+            echo "No .app bundle found in ${app_dir}" >&2
+            exit 1
+          fi
+
+          latest_dmg="$(ls -t "${dmg_files[@]}" | head -n 1)"
+          latest_app_bundle="$(ls -dt "${app_bundles[@]}" | head -n 1)"
+
+          mkdir -p dist
+          cp "$latest_dmg" "dist/Claudex.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$latest_app_bundle" "dist/Claudex.app.zip"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Claudex.dmg
+          path: dist/Claudex.dmg
+          if-no-files-found: error
+
+      - name: Upload app zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Claudex.app.zip
+          path: dist/Claudex.app.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Claudex.dmg
+            dist/Claudex.app.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+      - name: Cleanup temporary keychain
+        if: always()
+        shell: bash
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
