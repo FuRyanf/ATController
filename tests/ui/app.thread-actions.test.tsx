@@ -38,7 +38,7 @@ const mocks = vi.hoisted(() => {
   let threadState = [{ ...baseThread }];
 
   const api = {
-    getAppStorageRoot: vi.fn(async () => '/tmp/Claudex'),
+    getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
     removeWorkspace: vi.fn(async () => true),

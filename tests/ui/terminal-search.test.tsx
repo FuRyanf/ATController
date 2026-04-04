@@ -162,7 +162,7 @@ import { TerminalPanel } from '../../src/components/TerminalPanel';
 
 describe('TerminalPanel search', () => {
   beforeEach(() => {
-    (globalThis as { __CLAUDEX_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDEX_ENABLE_XTERM_TESTS__ = true;
+    (globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__ = true;
     mocks.fit.mockClear();
     mocks.searchAddons.length = 0;
     mocks.terminals.length = 0;
@@ -175,7 +175,7 @@ describe('TerminalPanel search', () => {
   });
 
   afterEach(() => {
-    delete (globalThis as { __CLAUDEX_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDEX_ENABLE_XTERM_TESTS__;
+    delete (globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__;
   });
 
   it('toggles search UI and drives the xterm search addon', async () => {

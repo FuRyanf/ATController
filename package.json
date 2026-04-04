@@ -1,7 +1,8 @@
 {
-  "name": "claudex",
+  "name": "atcontroller",
   "private": true,
   "version": "0.1.64",
+  "description": "Native macOS desktop control plane for local Claude Code workflows.",
   "type": "module",
   "scripts": {
     "dev": "vite",

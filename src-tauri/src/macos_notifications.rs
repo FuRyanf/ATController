@@ -11,9 +11,9 @@ use tokio::time::{timeout, Duration};
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
-    fn claudex_notifications_init() -> bool;
-    fn claudex_set_dock_badge_label(label_utf8: *const c_char) -> bool;
-    fn claudex_send_notification_async(
+    fn atcontroller_notifications_init() -> bool;
+    fn atcontroller_set_dock_badge_label(label_utf8: *const c_char) -> bool;
+    fn atcontroller_send_notification_async(
         title: *const c_char,
         body: *const c_char,
         context: *mut c_void,
@@ -23,7 +23,7 @@ unsafe extern "C" {
 
 #[cfg(target_os = "macos")]
 pub fn initialize() -> Result<(), String> {
-    let initialized = unsafe { claudex_notifications_init() };
+    let initialized = unsafe { atcontroller_notifications_init() };
     if initialized {
         Ok(())
     } else {
@@ -47,7 +47,7 @@ pub fn set_badge_count(count: Option<i64>) -> Result<bool, String> {
         .transpose()
         .map_err(|error| error.to_string())?;
     let success = unsafe {
-        claudex_set_dock_badge_label(
+        atcontroller_set_dock_badge_label(
             label
                 .as_ref()
                 .map_or(std::ptr::null(), |value| value.as_ptr()),
@@ -116,7 +116,7 @@ pub async fn send_notification(title: &str, body: &str) -> Result<bool, String> 
     let title = CString::new(title).map_err(|error| error.to_string())?;
     let body = CString::new(body).map_err(|error| error.to_string())?;
     await_native_result(|context, completion| unsafe {
-        claudex_send_notification_async(title.as_ptr(), body.as_ptr(), context, completion);
+        atcontroller_send_notification_async(title.as_ptr(), body.as_ptr(), context, completion);
     })
     .await
 }

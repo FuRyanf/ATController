@@ -42,11 +42,11 @@ describe('task completion alerts', () => {
       body: 'Claude is ready.'
     });
     expect(coreMocks.invoke).toHaveBeenNthCalledWith(2, 'send_desktop_notification', {
-      title: 'Claudex alerts enabled',
+      title: 'ATController alerts enabled',
       body: 'You will now get a notification when Claude finishes a task.'
     });
     expect(coreMocks.invoke).toHaveBeenNthCalledWith(3, 'send_desktop_notification', {
-      title: 'Claudex test alert',
+      title: 'ATController test alert',
       body: 'If you can see and hear this, alerts are working.'
     });
   });

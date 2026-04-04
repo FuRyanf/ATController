@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="Claudex.app"
-DMG_PATH="${1:-$HOME/Downloads/Claudex.dmg}"
+APP_NAME="ATController.app"
+DMG_PATH="${1:-$HOME/Downloads/ATController.dmg}"
 
 if [[ ! -f "$DMG_PATH" ]]; then
   echo "DMG not found: $DMG_PATH"
-  echo "Usage: scripts/install-unsigned-macos.sh /path/to/Claudex.dmg"
+  echo "Usage: scripts/install-unsigned-macos.sh /path/to/ATController.dmg"
   exit 1
 fi
 

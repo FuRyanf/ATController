@@ -105,7 +105,7 @@ export function SettingsModal({
 
         <div className="settings-panel settings-panel-columns">
           <div className="settings-panel-column">
-            <SettingsSection title="Appearance" description="Choose how Claudex appears. System follows macOS by default.">
+            <SettingsSection title="Appearance" description="Choose how ATController appears. System follows macOS by default.">
               <SettingsRow
                 align="start"
                 label="Mode"

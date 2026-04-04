@@ -324,7 +324,7 @@ function setViewportMetrics(
 
 describe('TerminalPanel manual repair', () => {
   beforeEach(() => {
-    (globalThis as { __CLAUDEX_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDEX_ENABLE_XTERM_TESTS__ = true;
+    (globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__ = true;
     mocks.fit.mockClear();
     mocks.terminals.length = 0;
     resizeObserverCallback = null;
@@ -339,7 +339,7 @@ describe('TerminalPanel manual repair', () => {
   });
 
   afterEach(() => {
-    delete (globalThis as { __CLAUDEX_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDEX_ENABLE_XTERM_TESTS__;
+    delete (globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__;
   });
 
   it('rebuilds the xterm buffer from the latest content when a repair is requested', async () => {

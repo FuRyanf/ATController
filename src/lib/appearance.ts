@@ -1,6 +1,6 @@
 import type { AppearanceMode } from '../types';
 
-export const APPEARANCE_MODE_STORAGE_KEY = 'claudex:appearance-mode';
+export const APPEARANCE_MODE_STORAGE_KEY = 'atcontroller:appearance-mode';
 export const DEFAULT_APPEARANCE_MODE: AppearanceMode = 'system';
 
 export function normalizeAppearanceMode(value: unknown): AppearanceMode {

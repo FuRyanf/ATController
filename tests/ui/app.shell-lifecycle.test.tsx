@@ -132,7 +132,7 @@ const mocks = vi.hoisted(() => {
   const terminalReadOutputImpl = async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false });
 
   const api = {
-    getAppStorageRoot: vi.fn(async () => '/tmp/Claudex'),
+    getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(async () => workspaces),
     addWorkspace: vi.fn(async () => workspaces[0]),
     addSshWorkspace: vi.fn(async () => workspaces[0]),
@@ -635,7 +635,7 @@ describe('Workspace shell lifecycle', () => {
     });
 
     expect(mocks.api.terminalKill.mock.calls.length).toBe(killCallCountAfterRemoval);
-    expect(screen.queryByText('Claudex supports keys-only SSH')).not.toBeInTheDocument();
+    expect(screen.queryByText('ATController supports keys-only SSH')).not.toBeInTheDocument();
   });
 
   it('keeps the workspace shell session running during branch checkout', async () => {
@@ -805,18 +805,18 @@ describe('Workspace shell lifecycle', () => {
       });
     });
 
-    expect(await screen.findByText('Claudex supports keys-only SSH')).toBeInTheDocument();
+    expect(await screen.findByText('ATController supports keys-only SSH')).toBeInTheDocument();
     await waitFor(() => {
       expect(mocks.api.terminalKill).toHaveBeenCalledWith('shell-session-ssh-1');
     });
     expect(screen.getByTestId('workspace-shell-blocked-message')).toHaveTextContent(
-      'SSH setup blocked. Claudex requires key-based auth via macOS Keychain or ssh-agent.'
+      'SSH setup blocked. ATController requires key-based auth via macOS Keychain or ssh-agent.'
     );
 
     await user.click(screen.getByRole('button', { name: 'Close' }));
 
     await waitFor(() => {
-      expect(screen.queryByText('Claudex supports keys-only SSH')).not.toBeInTheDocument();
+      expect(screen.queryByText('ATController supports keys-only SSH')).not.toBeInTheDocument();
       expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledTimes(2);
       expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ssh-2');
     });
@@ -853,7 +853,7 @@ describe('Workspace shell lifecycle', () => {
       });
     });
 
-    expect(screen.queryByText('Claudex supports keys-only SSH')).not.toBeInTheDocument();
+    expect(screen.queryByText('ATController supports keys-only SSH')).not.toBeInTheDocument();
 
     await act(async () => {
       resolveShellStart?.({
@@ -861,12 +861,12 @@ describe('Workspace shell lifecycle', () => {
       });
     });
 
-    expect(await screen.findByText('Claudex supports keys-only SSH')).toBeInTheDocument();
+    expect(await screen.findByText('ATController supports keys-only SSH')).toBeInTheDocument();
     await waitFor(() => {
       expect(mocks.api.terminalKill).toHaveBeenCalledWith('shell-session-prebind');
     });
     expect(screen.getByTestId('workspace-shell-blocked-message')).toHaveTextContent(
-      'SSH setup blocked. Claudex requires key-based auth via macOS Keychain or ssh-agent.'
+      'SSH setup blocked. ATController requires key-based auth via macOS Keychain or ssh-agent.'
     );
   });
 });

@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const THREAD_ATTENTION_STATE_V2_KEY = 'claudex:thread-attention-v2';
+const THREAD_ATTENTION_STATE_V2_KEY = 'atcontroller:thread-attention-v2';
 
 function seedThreadAttentionState(stateByThread: Record<string, unknown>) {
   window.localStorage.setItem(THREAD_ATTENTION_STATE_V2_KEY, JSON.stringify(stateByThread));
@@ -70,7 +70,7 @@ const mocks = vi.hoisted(() => {
   const terminalPositions = new Map<string, number>();
 
   const api = {
-    getAppStorageRoot: vi.fn(async () => '/tmp/Claudex'),
+    getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
     removeWorkspace: vi.fn(async () => true),
@@ -413,7 +413,7 @@ describe('Left rail recency and sorting semantics', () => {
     vi.setSystemTime(nowMs);
     try {
       window.localStorage.setItem(
-        'claudex:last-user-input-at',
+        'atcontroller:last-user-input-at',
         JSON.stringify({
           'thread-older': nowMs - 20_000
         })
@@ -572,7 +572,7 @@ describe('Left rail recency and sorting semantics', () => {
   });
 
   it('reconciles a persisted local running turn exactly once on resumed attach when completion already exists', async () => {
-    window.localStorage.setItem('claudex:selected-thread:ws-1', 'thread-newer');
+    window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-newer');
     seedThreadAttentionState({
       'thread-newer': {
         activeTurnId: 1,
@@ -631,7 +631,7 @@ describe('Left rail recency and sorting semantics', () => {
   });
 
   it('does not falsely reconcile a resumed local running turn when no completion exists yet', async () => {
-    window.localStorage.setItem('claudex:selected-thread:ws-1', 'thread-newer');
+    window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-newer');
     seedThreadAttentionState({
       'thread-newer': {
         activeTurnId: 1,
@@ -676,7 +676,7 @@ describe('Left rail recency and sorting semantics', () => {
   });
 
   it('does not request local reattach reconciliation when there is no persisted running turn', async () => {
-    window.localStorage.setItem('claudex:selected-thread:ws-1', 'thread-newer');
+    window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-newer');
 
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
@@ -832,8 +832,8 @@ describe('Left rail recency and sorting semantics', () => {
   });
 
   it('does not duplicate unread or notifications when reconciliation is followed by the same completion event', async () => {
-    window.localStorage.setItem('claudex:selected-thread:ws-1', 'thread-older');
-    window.localStorage.setItem('claudex:task-completion-alerts-bootstrap-v1', '1');
+    window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-older');
+    window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
     seedThreadAttentionState({
       'thread-newer': {
         activeTurnId: 1,
@@ -1191,7 +1191,7 @@ describe('Left rail recency and sorting semantics', () => {
         expect(mocks.api.terminalReadOutput).toHaveBeenCalledWith('session-thread-newer');
       });
       await waitFor(() => {
-        const raw = window.localStorage.getItem('claudex:visible-output-guard') ?? '{}';
+        const raw = window.localStorage.getItem('atcontroller:visible-output-guard') ?? '{}';
         const parsed = JSON.parse(raw) as Record<string, { tail?: unknown }>;
         expect(parsed['thread-newer']).toMatchObject({ tail: 'assistant output' });
       });
@@ -1225,7 +1225,7 @@ describe('Left rail recency and sorting semantics', () => {
   it('fires an alert when a background thread first turns unread', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      window.localStorage.setItem('claudex:task-completion-alerts-bootstrap-v1', '1');
+      window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
       mocks.api.getSettings.mockResolvedValueOnce({
         claudeCliPath: '/usr/local/bin/claude',
         taskCompletionAlerts: true
@@ -1364,7 +1364,7 @@ describe('Left rail recency and sorting semantics', () => {
   it('marks a second identical reply as unread after a new prompt is submitted', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      window.localStorage.setItem('claudex:task-completion-alerts-bootstrap-v1', '1');
+      window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
       mocks.api.getSettings.mockResolvedValueOnce({
         claudeCliPath: '/usr/local/bin/claude',
         taskCompletionAlerts: true
@@ -1501,7 +1501,7 @@ describe('Left rail recency and sorting semantics', () => {
   it('fires a failed alert when a background run exits before the idle unread timer fires', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      window.localStorage.setItem('claudex:task-completion-alerts-bootstrap-v1', '1');
+      window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
       mocks.api.getSettings.mockResolvedValueOnce({
         claudeCliPath: '/usr/local/bin/claude',
         taskCompletionAlerts: true
@@ -1538,7 +1538,7 @@ describe('Left rail recency and sorting semantics', () => {
   it('upgrades an existing background success alert to failed if the run exits non-zero later', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      window.localStorage.setItem('claudex:task-completion-alerts-bootstrap-v1', '1');
+      window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
       mocks.api.getSettings.mockResolvedValueOnce({
         claudeCliPath: '/usr/local/bin/claude',
         taskCompletionAlerts: true
@@ -1663,7 +1663,7 @@ describe('Left rail recency and sorting semantics', () => {
     });
 
     await waitFor(() => {
-      const raw = window.localStorage.getItem('claudex:last-read-at') ?? '{}';
+      const raw = window.localStorage.getItem('atcontroller:last-read-at') ?? '{}';
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       expect(typeof parsed['thread-newer']).toBe('number');
     });

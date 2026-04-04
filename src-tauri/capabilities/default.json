@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for Claudex main window",
+  "description": "Default capability for ATController main window",
   "windows": ["main"],
   "permissions": ["core:default", "core:app:allow-set-app-theme", "dialog:default"]
 }

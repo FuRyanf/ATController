@@ -118,7 +118,7 @@ function TerminalPanelComponent({
   const [fallback, setFallback] = useState(
     () =>
       import.meta.env.MODE === 'test' &&
-      !(globalThis as { __CLAUDEX_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDEX_ENABLE_XTERM_TESTS__
+      !(globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__
   );
   const [followOutputPaused, setFollowOutputPaused] = useState(false);
   const [terminalDebugLines, setTerminalDebugLines] = useState<string[]>([]);

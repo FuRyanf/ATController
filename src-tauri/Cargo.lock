@@ -68,6 +68,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "atcontroller"
+version = "0.1.64"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "cc",
+ "chrono",
+ "dirs 5.0.1",
+ "image",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "atk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -323,27 +344,6 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "claudex"
-version = "0.1.64"
-dependencies = [
- "anyhow",
- "arboard",
- "cc",
- "chrono",
- "dirs 5.0.1",
- "image",
- "libc",
- "portable-pty",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tokio",
- "uuid",
 ]
 
 [[package]]

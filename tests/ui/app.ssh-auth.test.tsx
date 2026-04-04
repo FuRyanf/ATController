@@ -59,7 +59,7 @@ const mocks = vi.hoisted(() => {
     null;
 
   const api = {
-    getAppStorageRoot: vi.fn(async () => '/tmp/Claudex'),
+    getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
     addSshWorkspace: vi.fn(async () => workspace),
@@ -314,14 +314,14 @@ describe('App SSH auth flow', () => {
       });
     });
 
-    expect(await screen.findByText('Claudex supports keys-only SSH')).toBeInTheDocument();
+    expect(await screen.findByText('ATController supports keys-only SSH')).toBeInTheDocument();
     expect(screen.getByText(/Configure SSH keys with macOS Keychain or ssh-agent/i)).toBeInTheDocument();
     await waitFor(() => {
       expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-1');
     });
     expect(screen.getByTestId('terminal-input-enabled')).toHaveTextContent('false');
     expect(screen.getByTestId('terminal-overlay')).toHaveTextContent(
-      'SSH setup blocked. Claudex requires key-based auth via macOS Keychain or ssh-agent.'
+      'SSH setup blocked. ATController requires key-based auth via macOS Keychain or ssh-agent.'
     );
     expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
   });
@@ -347,11 +347,11 @@ describe('App SSH auth flow', () => {
       });
     });
 
-    expect(await screen.findByText('Claudex supports keys-only SSH')).toBeInTheDocument();
+    expect(await screen.findByText('ATController supports keys-only SSH')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Close' }));
 
     await waitFor(() => {
-      expect(screen.queryByText('Claudex supports keys-only SSH')).not.toBeInTheDocument();
+      expect(screen.queryByText('ATController supports keys-only SSH')).not.toBeInTheDocument();
       expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(2);
     });
 
@@ -420,7 +420,7 @@ describe('App SSH auth flow', () => {
       });
     });
 
-    expect(await screen.findByText('Claudex supports keys-only SSH')).toBeInTheDocument();
+    expect(await screen.findByText('ATController supports keys-only SSH')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Retry' }));
 
     await waitFor(() => {
@@ -437,7 +437,7 @@ describe('App SSH auth flow', () => {
       });
     });
 
-    expect(screen.queryByText('Claudex supports keys-only SSH')).not.toBeInTheDocument();
+    expect(screen.queryByText('ATController supports keys-only SSH')).not.toBeInTheDocument();
 
     act(() => {
       resolveRetryStart?.({
@@ -675,7 +675,7 @@ describe('App SSH auth flow', () => {
       });
     });
 
-    expect(screen.queryByText('Claudex supports keys-only SSH')).not.toBeInTheDocument();
+    expect(screen.queryByText('ATController supports keys-only SSH')).not.toBeInTheDocument();
 
     act(() => {
       resolveStart?.({
@@ -702,7 +702,7 @@ describe('App SSH auth flow', () => {
       });
     });
 
-    expect(await screen.findByText('Claudex supports keys-only SSH')).toBeInTheDocument();
+    expect(await screen.findByText('ATController supports keys-only SSH')).toBeInTheDocument();
     await waitFor(() => {
       expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-prebind');
     });

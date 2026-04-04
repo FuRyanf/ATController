@@ -64,7 +64,7 @@ const mocks = vi.hoisted(() => {
   };
 
   const api = {
-    getAppStorageRoot: vi.fn(async () => '/tmp/Claudex'),
+    getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(async () => workspaces),
     addWorkspace: vi.fn(async () => workspaces[0]),
     removeWorkspace: vi.fn(async () => true),

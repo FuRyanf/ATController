@@ -48,9 +48,9 @@ export function isTerminalDebugEnabled(): boolean {
   if (
     (
       globalThis as {
-        __CLAUDEX_TERMINAL_DEBUG__?: boolean;
+        __ATCONTROLLER_TERMINAL_DEBUG__?: boolean;
       }
-    ).__CLAUDEX_TERMINAL_DEBUG__ === true
+    ).__ATCONTROLLER_TERMINAL_DEBUG__ === true
   ) {
     return true;
   }
@@ -58,7 +58,7 @@ export function isTerminalDebugEnabled(): boolean {
     return false;
   }
   try {
-    return window.localStorage.getItem('claudeDeskTerminalDebug') === '1';
+    return window.localStorage.getItem('atcontroller:terminal-debug') === '1';
   } catch {
     return false;
   }

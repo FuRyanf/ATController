@@ -264,12 +264,12 @@ mod tests {
             .lock()
             .expect("failed to lock HOME environment");
         let fake_home = std::env::temp_dir().join(format!(
-            "claudex-workspace-home-test-{}",
+            "atcontroller-workspace-home-test-{}",
             uuid::Uuid::new_v4()
         ));
         let _home_guard = HomeEnvGuard::set(&fake_home);
         let workspace =
-            std::env::temp_dir().join(format!("claudex-skills-test-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-skills-test-{}", uuid::Uuid::new_v4()));
         let skill_dir = workspace.join(".claude").join("skills").join("refactor");
         fs::create_dir_all(&fake_home).expect("failed to create fake HOME directory");
         fs::create_dir_all(&skill_dir).expect("failed to create fixture skill directory");
@@ -304,12 +304,12 @@ mod tests {
             .lock()
             .expect("failed to lock HOME environment");
         let fake_home = std::env::temp_dir().join(format!(
-            "claudex-legacy-home-test-{}",
+            "atcontroller-legacy-home-test-{}",
             uuid::Uuid::new_v4()
         ));
         let _home_guard = HomeEnvGuard::set(&fake_home);
         let workspace = std::env::temp_dir().join(format!(
-            "claudex-legacy-skills-test-{}",
+            "atcontroller-legacy-skills-test-{}",
             uuid::Uuid::new_v4()
         ));
         let skill_dir = workspace.join("skills").join("review");
@@ -340,12 +340,12 @@ mod tests {
             .lock()
             .expect("failed to lock HOME environment");
         let fake_home = std::env::temp_dir().join(format!(
-            "claudex-global-home-test-{}",
+            "atcontroller-global-home-test-{}",
             uuid::Uuid::new_v4()
         ));
         let _home_guard = HomeEnvGuard::set(&fake_home);
         let workspace = std::env::temp_dir().join(format!(
-            "claudex-global-skill-workspace-{}",
+            "atcontroller-global-skill-workspace-{}",
             uuid::Uuid::new_v4()
         ));
         let skill_dir = fake_home
@@ -390,12 +390,12 @@ mod tests {
             .lock()
             .expect("failed to lock HOME environment");
         let fake_home = std::env::temp_dir().join(format!(
-            "claudex-global-priority-home-test-{}",
+            "atcontroller-global-priority-home-test-{}",
             uuid::Uuid::new_v4()
         ));
         let _home_guard = HomeEnvGuard::set(&fake_home);
         let workspace = std::env::temp_dir().join(format!(
-            "claudex-global-priority-workspace-test-{}",
+            "atcontroller-global-priority-workspace-test-{}",
             uuid::Uuid::new_v4()
         ));
         let global_skill_dir = fake_home.join(".claude").join("skills").join("review");

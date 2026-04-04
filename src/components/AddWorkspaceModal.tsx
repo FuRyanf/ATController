@@ -119,7 +119,7 @@ export function AddWorkspaceModal({
           </>
         ) : (
           <>
-            <p>Paste an ssh command that authenticates with an SSH key. Claudex does not store credentials.</p>
+            <p>Paste an ssh command that authenticates with an SSH key. ATController does not store credentials.</p>
             <p className="muted">
               Unlock your key with macOS Keychain or <code>ssh-agent</code>, and verify{' '}
               <code>ssh user@host</code> works in Terminal before adding the project.

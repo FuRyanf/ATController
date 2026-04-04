@@ -139,7 +139,7 @@ fn sanitize_claude_project_dir_name(value: &str) -> String {
 }
 
 fn claude_projects_root() -> Result<PathBuf> {
-    if let Ok(override_root) = env::var("CLAUDEX_CLAUDE_PROJECTS_ROOT") {
+    if let Ok(override_root) = env::var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT") {
         if !override_root.trim().is_empty() {
             return Ok(PathBuf::from(override_root));
         }
@@ -3999,7 +3999,7 @@ pub fn install_latest_update() -> Result<()> {
     let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
     let downloads_dir = home_dir.join("Downloads");
     fs::create_dir_all(&downloads_dir)?;
-    let dmg_path = downloads_dir.join("Claudex.dmg");
+    let dmg_path = downloads_dir.join("ATController.dmg");
     let dmg_path_string = dmg_path.to_string_lossy().to_string();
 
     let mut download_command = StdCommand::new("curl");
@@ -4007,12 +4007,12 @@ pub fn install_latest_update() -> Result<()> {
         "-L",
         "-o",
         &dmg_path_string,
-        "https://github.com/FuRyanf/Claudex/releases/latest/download/Claudex.dmg",
+        "https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg",
     ]);
     let download_output = run_std_command_with_timeout(
         download_command,
         Duration::from_secs(300),
-        "Claudex DMG download",
+        "ATController DMG download",
     )?;
     if !download_output.status.success() {
         let stderr = String::from_utf8_lossy(&download_output.stderr);
@@ -4034,15 +4034,15 @@ pub fn install_latest_update() -> Result<()> {
         .or_else(|| extract_mounted_volume_path(&attach_stderr))
         .ok_or_else(|| anyhow!("Unable to locate mounted DMG volume path"))?;
 
-    let source_app = Path::new(&mount_path).join("Claudex.app");
+    let source_app = Path::new(&mount_path).join("ATController.app");
     if !source_app.exists() {
         let _ = StdCommand::new("hdiutil")
             .args(["detach", &mount_path, "-quiet"])
             .status();
-        return Err(anyhow!("Mounted DMG does not contain Claudex.app"));
+        return Err(anyhow!("Mounted DMG does not contain ATController.app"));
     }
 
-    let target_app = PathBuf::from("/Applications/Claudex.app");
+    let target_app = PathBuf::from("/Applications/ATController.app");
 
     let install_result = (|| -> Result<()> {
         let copy_status = StdCommand::new("ditto")
@@ -4050,7 +4050,7 @@ pub fn install_latest_update() -> Result<()> {
             .arg(&target_app)
             .status()?;
         if !copy_status.success() {
-            return Err(anyhow!("Failed to copy Claudex.app into /Applications"));
+            return Err(anyhow!("Failed to copy ATController.app into /Applications"));
         }
 
         let _ = StdCommand::new("xattr")
@@ -4590,7 +4590,7 @@ mod tests {
     #[test]
     fn latest_claude_turn_completion_after_returns_newer_completion_only() {
         let dir = std::env::temp_dir().join(format!(
-            "claudex-turn-completion-after-{}",
+            "atcontroller-turn-completion-after-{}",
             Uuid::new_v4()
         ));
         fs::create_dir_all(&dir).expect("should create temp dir");
@@ -4619,7 +4619,7 @@ mod tests {
     #[test]
     fn latest_claude_turn_completion_after_returns_none_when_no_newer_completion_exists() {
         let dir = std::env::temp_dir().join(format!(
-            "claudex-turn-completion-none-{}",
+            "atcontroller-turn-completion-none-{}",
             Uuid::new_v4()
         ));
         fs::create_dir_all(&dir).expect("should create temp dir");
@@ -4638,7 +4638,7 @@ mod tests {
     #[test]
     fn read_log_snapshot_returns_full_small_logs() {
         let dir =
-            std::env::temp_dir().join(format!("claudex-runner-log-small-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-runner-log-small-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("should create temp dir");
         let path = dir.join("output.log");
 
@@ -4652,7 +4652,7 @@ mod tests {
     #[test]
     fn read_log_snapshot_truncates_large_logs() {
         let dir =
-            std::env::temp_dir().join(format!("claudex-runner-log-large-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-runner-log-large-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("should create temp dir");
         let path = dir.join("output.log");
 
@@ -4689,12 +4689,12 @@ mod tests {
     #[test]
     fn sanitize_claude_project_dir_name_matches_cli_storage_shape() {
         assert_eq!(
-            sanitize_claude_project_dir_name("/private/tmp/claudex-smoke-secondary"),
-            "-private-tmp-claudex-smoke-secondary"
+            sanitize_claude_project_dir_name("/private/tmp/atcontroller-smoke-secondary"),
+            "-private-tmp-atcontroller-smoke-secondary"
         );
         assert_eq!(
-            sanitize_claude_project_dir_name("/Users/you/Claudex"),
-            "-Users-rfu-Claudex"
+            sanitize_claude_project_dir_name("/Users/you/project-root"),
+            "-Users-you-project-root"
         );
     }
 
@@ -4705,15 +4705,15 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-import-discovery-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-import-discovery-{}", Uuid::new_v4()));
         let app_support_root = temp_root.join("app-support");
         let projects_root = temp_root.join("projects");
         let workspace_path = temp_root.join("workspace-one");
         fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
         fs::create_dir_all(&projects_root).expect("should create projects root");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &app_support_root);
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &app_support_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let workspace = storage::add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be stored");
@@ -4775,8 +4775,8 @@ mod tests {
             vec!["session-newer", "session-older"]
         );
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -4787,7 +4787,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-import-discovery-jsonl-{}",
+            "atcontroller-import-discovery-jsonl-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -4795,7 +4795,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
         fs::create_dir_all(&projects_root).expect("should create projects root");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let project_dir = projects_root.join("fallback-project");
         fs::create_dir_all(&project_dir).expect("should create claude project dir");
@@ -4834,7 +4834,7 @@ mod tests {
             Some("feature/jsonl")
         );
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -4845,7 +4845,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-import-discovery-worktree-overlay-{}",
+            "atcontroller-import-discovery-worktree-overlay-{}",
             Uuid::new_v4()
         ));
         let app_support_root = temp_root.join("app-support");
@@ -4855,8 +4855,8 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace root");
         fs::create_dir_all(&projects_root).expect("should create projects root");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &app_support_root);
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &app_support_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         StdCommand::new("git")
             .arg("init")
@@ -4864,12 +4864,12 @@ mod tests {
             .output()
             .expect("should initialize git repo");
         StdCommand::new("git")
-            .args(["config", "user.name", "Claudex"])
+            .args(["config", "user.name", "ATController"])
             .current_dir(&workspace_path)
             .output()
             .expect("should configure git user name");
         StdCommand::new("git")
-            .args(["config", "user.email", "claudex@example.com"])
+            .args(["config", "user.email", "atcontroller@example.com"])
             .current_dir(&workspace_path)
             .output()
             .expect("should configure git user email");
@@ -4921,8 +4921,8 @@ mod tests {
         assert_eq!(project.path, workspace.path);
         assert_eq!(project.workspace_id.as_deref(), Some(workspace.id.as_str()));
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -4933,7 +4933,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-import-normalize-subdir-{}",
+            "atcontroller-import-normalize-subdir-{}",
             Uuid::new_v4()
         ));
         let workspace_root = temp_root.join("workspace-root");
@@ -4946,12 +4946,12 @@ mod tests {
             .output()
             .expect("should initialize git repo");
         StdCommand::new("git")
-            .args(["config", "user.name", "Claudex"])
+            .args(["config", "user.name", "ATController"])
             .current_dir(&workspace_root)
             .output()
             .expect("should configure git user name");
         StdCommand::new("git")
-            .args(["config", "user.email", "claudex@example.com"])
+            .args(["config", "user.email", "atcontroller@example.com"])
             .current_dir(&workspace_root)
             .output()
             .expect("should configure git user email");
@@ -4981,7 +4981,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-import-normalize-dead-worktree-{}",
+            "atcontroller-import-normalize-dead-worktree-{}",
             Uuid::new_v4()
         ));
         let workspace_root = temp_root.join("workspace-root");
@@ -5005,7 +5005,7 @@ mod tests {
     #[test]
     fn resolve_terminal_workspace_context_path_collapses_removed_worktree_path_to_repo_workspace() {
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-terminal-context-dead-worktree-{}",
+            "atcontroller-terminal-context-dead-worktree-{}",
             Uuid::new_v4()
         ));
         let workspace_root = temp_root.join("workspace-root");
@@ -5028,7 +5028,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-session-cwd-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-session-cwd-{}", Uuid::new_v4()));
         let projects_root = temp_root.join("projects");
         let workspace_path = temp_root.join("workspace-root");
         let worktree_path = workspace_path.join(".claude/worktrees/feature1");
@@ -5036,7 +5036,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace root");
         fs::create_dir_all(&worktree_path).expect("should create worktree path");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let claude_session_id = "11111111-1111-1111-1111-111111111111";
         let project_dir = projects_root.join(claude_project_dir_for_workspace(
@@ -5067,7 +5067,7 @@ mod tests {
         let expected_cwd = canonicalize_path_or_original(worktree_path.to_string_lossy().as_ref());
         assert_eq!(latest_cwd.as_deref(), Some(expected_cwd.as_str()));
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5078,7 +5078,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-session-cwd-fallback-{}",
+            "atcontroller-session-cwd-fallback-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -5088,7 +5088,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace root");
         fs::create_dir_all(&worktree_path).expect("should create worktree path");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let claude_session_id = "22222222-2222-2222-2222-222222222222";
         let project_dir = projects_root.join(claude_project_dir_for_workspace(
@@ -5119,7 +5119,7 @@ mod tests {
         let expected_cwd = canonicalize_path_or_original(worktree_path.to_string_lossy().as_ref());
         assert_eq!(latest_cwd.as_deref(), Some(expected_cwd.as_str()));
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5130,7 +5130,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-session-cwd-removed-worktree-{}",
+            "atcontroller-session-cwd-removed-worktree-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -5145,7 +5145,7 @@ mod tests {
             .output()
             .expect("should initialize git repo");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let claude_session_id = "deadbeef-dead-beef-dead-beefdeadbeef";
         let project_dir = projects_root.join(claude_project_dir_for_workspace(
@@ -5171,7 +5171,7 @@ mod tests {
         let expected_cwd = canonicalize_path_or_original(workspace_path.to_string_lossy().as_ref());
         assert_eq!(latest_cwd.as_deref(), Some(expected_cwd.as_str()));
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5182,7 +5182,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-session-cwd-index-fallback-{}",
+            "atcontroller-session-cwd-index-fallback-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -5192,7 +5192,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace root");
         fs::create_dir_all(&worktree_path).expect("should create worktree path");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let claude_session_id = "33333333-3333-3333-3333-333333333333";
 
@@ -5237,7 +5237,7 @@ mod tests {
         let expected_cwd = canonicalize_path_or_original(worktree_path.to_string_lossy().as_ref());
         assert_eq!(latest_cwd.as_deref(), Some(expected_cwd.as_str()));
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5248,7 +5248,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-session-launch-mode-{}",
+            "atcontroller-session-launch-mode-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -5258,7 +5258,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace root");
         fs::create_dir_all(&worktree_path).expect("should create worktree path");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let claude_session_id = "44444444-4444-4444-4444-444444444444";
         let workspace_project_dir = projects_root.join(claude_project_dir_for_workspace(
@@ -5284,7 +5284,7 @@ mod tests {
 
         assert!(requires_session_id);
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5295,7 +5295,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-session-launch-mode-missing-{}",
+            "atcontroller-session-launch-mode-missing-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -5305,7 +5305,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace root");
         fs::create_dir_all(&worktree_path).expect("should create worktree path");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let requires_session_id = resumed_session_requires_session_id_launch(
             workspace_path.to_string_lossy().as_ref(),
@@ -5316,7 +5316,7 @@ mod tests {
 
         assert!(!requires_session_id);
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5327,11 +5327,11 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-fork-resolver-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-fork-resolver-{}", Uuid::new_v4()));
         let projects_root = temp_root.join("projects");
         let project_dir = projects_root.join("fork-project");
         fs::create_dir_all(&project_dir).expect("should create project dir");
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let parent_session_id = "11111111-1111-1111-1111-111111111111";
         let old_child_session_id = "22222222-2222-2222-2222-222222222222";
@@ -5373,7 +5373,7 @@ mod tests {
         .expect("resolver should succeed");
         assert_eq!(resolved.as_deref(), Some(new_child_session_id));
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5384,11 +5384,11 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-fork-requested-at-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-fork-requested-at-{}", Uuid::new_v4()));
         let projects_root = temp_root.join("projects");
         let project_dir = projects_root.join("fork-project");
         fs::create_dir_all(&project_dir).expect("should create project dir");
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let parent_session_id = "11111111-1111-1111-1111-111111111111";
         let first_child_session_id = "22222222-2222-2222-2222-222222222222";
@@ -5430,7 +5430,7 @@ mod tests {
         .expect("resolver should succeed");
         assert_eq!(resolved.as_deref(), Some(second_child_session_id));
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5441,11 +5441,11 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-fork-index-gap-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-fork-index-gap-{}", Uuid::new_v4()));
         let projects_root = temp_root.join("projects");
         let project_dir = projects_root.join("fork-project");
         fs::create_dir_all(&project_dir).expect("should create project dir");
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let parent_session_id = "11111111-1111-1111-1111-111111111111";
         let indexed_child_session_id = "22222222-2222-2222-2222-222222222222";
@@ -5485,7 +5485,7 @@ mod tests {
         .expect("resolver should succeed");
         assert_eq!(resolved.as_deref(), Some(new_child_session_id));
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5496,11 +5496,11 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-fork-clone-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-fork-clone-{}", Uuid::new_v4()));
         let projects_root = temp_root.join("projects");
         let project_dir = projects_root.join("fork-project-clone");
         fs::create_dir_all(&project_dir).expect("should create project dir");
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let parent_session_id = "11111111-1111-1111-1111-111111111111";
         let child_session_id = "22222222-2222-2222-2222-222222222222";
@@ -5541,7 +5541,7 @@ mod tests {
         .expect("resolver should succeed");
         assert_eq!(resolved.as_deref(), Some(child_session_id));
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5552,13 +5552,13 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-fork-resolver-jsonl-{}",
+            "atcontroller-fork-resolver-jsonl-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
         let project_dir = projects_root.join("fork-project-jsonl");
         fs::create_dir_all(&project_dir).expect("should create project dir");
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let parent_session_id = "44444444-4444-4444-4444-444444444444";
         let child_session_id = "55555555-5555-5555-5555-555555555555";
@@ -5580,7 +5580,7 @@ mod tests {
             known_fork_child_session_ids(parent_session_id).expect("lookup should succeed");
         assert_eq!(known_children, vec![child_session_id.to_string()]);
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5591,7 +5591,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-validate-importable-session-index-{}",
+            "atcontroller-validate-importable-session-index-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -5599,7 +5599,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
         fs::create_dir_all(&projects_root).expect("should create projects root");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let project_dir = projects_root.join(claude_project_dir_for_workspace(
             workspace_path.to_string_lossy().as_ref(),
@@ -5631,7 +5631,7 @@ mod tests {
         )
         .expect("validation should accept indexed session");
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5642,7 +5642,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-validate-importable-session-stale-index-{}",
+            "atcontroller-validate-importable-session-stale-index-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -5650,7 +5650,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
         fs::create_dir_all(&projects_root).expect("should create projects root");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         let stale_project_dir = projects_root.join("stale-index-project");
         fs::create_dir_all(&stale_project_dir).expect("should create stale project dir");
@@ -5681,7 +5681,7 @@ mod tests {
             "unexpected error: {error}"
         );
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5692,7 +5692,7 @@ mod tests {
             .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-validate-importable-session-worktree-overlay-{}",
+            "atcontroller-validate-importable-session-worktree-overlay-{}",
             Uuid::new_v4()
         ));
         let projects_root = temp_root.join("projects");
@@ -5701,7 +5701,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).expect("should create workspace root");
         fs::create_dir_all(&projects_root).expect("should create projects root");
 
-        std::env::set_var("CLAUDEX_CLAUDE_PROJECTS_ROOT", &projects_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
 
         StdCommand::new("git")
             .arg("init")
@@ -5709,12 +5709,12 @@ mod tests {
             .output()
             .expect("should initialize git repo");
         StdCommand::new("git")
-            .args(["config", "user.name", "Claudex"])
+            .args(["config", "user.name", "ATController"])
             .current_dir(&workspace_path)
             .output()
             .expect("should configure git user name");
         StdCommand::new("git")
-            .args(["config", "user.email", "claudex@example.com"])
+            .args(["config", "user.email", "atcontroller@example.com"])
             .current_dir(&workspace_path)
             .output()
             .expect("should configure git user email");
@@ -5762,7 +5762,7 @@ mod tests {
         )
         .expect("validation should accept same-repo worktree session");
 
-        std::env::remove_var("CLAUDEX_CLAUDE_PROJECTS_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -5777,7 +5777,7 @@ mod tests {
     #[test]
     fn resolve_claude_command_for_local_uses_detected_path() {
         let tmp_dir =
-            std::env::temp_dir().join(format!("claudex-cli-detect-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-cli-detect-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&tmp_dir).expect("should create temp directory");
         let cli_path = tmp_dir.join("claude");
         fs::write(&cli_path, "#!/bin/sh\nexit 0\n").expect("should create fake cli");

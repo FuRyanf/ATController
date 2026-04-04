@@ -99,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf src-tauri/target/release/bundle
-          rm -f src-tauri/target/release/claudex
+          rm -f src-tauri/target/release/atcontroller
           rm -rf dist
 
       - name: Stamp build version from tag
@@ -183,21 +183,21 @@ jobs:
           latest_app_bundle="$(ls -dt "${app_bundles[@]}" | head -n 1)"
 
           mkdir -p dist
-          cp "$latest_dmg" "dist/Claudex.dmg"
-          ditto -c -k --sequesterRsrc --keepParent "$latest_app_bundle" "dist/Claudex.app.zip"
+          cp "$latest_dmg" "dist/ATController.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$latest_app_bundle" "dist/ATController.app.zip"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Claudex.dmg
-          path: dist/Claudex.dmg
+          name: ATController.dmg
+          path: dist/ATController.dmg
           if-no-files-found: error
 
       - name: Upload app zip artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Claudex.app.zip
-          path: dist/Claudex.app.zip
+          name: ATController.app.zip
+          path: dist/ATController.app.zip
           if-no-files-found: error
 
       - name: Create GitHub Release (tags only)
@@ -205,8 +205,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/Claudex.dmg
-            dist/Claudex.app.zip
+            dist/ATController.dmg
+            dist/ATController.app.zip
           fail_on_unmatched_files: true
           generate_release_notes: true
 

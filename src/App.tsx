@@ -102,13 +102,13 @@ const onTerminalTurnCompleted =
   apiModule.onTerminalTurnCompleted ??
   (async (_handler: (event: TerminalTurnCompletedEvent) => void) => () => undefined);
 
-const SELECTED_WORKSPACE_KEY = 'claudex:selected-workspace';
-const SIDEBAR_WIDTH_KEY = 'claudex:sidebar-width';
-const SHELL_DRAWER_HEIGHT_KEY = 'claudex:shell-drawer-height';
-const THREAD_LAST_READ_AT_KEY = 'claudex:last-read-at';
-const THREAD_VISIBLE_OUTPUT_GUARD_KEY = 'claudex:visible-output-guard';
-const THREAD_ATTENTION_STATE_V2_KEY = 'claudex:thread-attention-v2';
-const TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY = 'claudex:task-completion-alerts-bootstrap-v1';
+const SELECTED_WORKSPACE_KEY = 'atcontroller:selected-workspace';
+const SIDEBAR_WIDTH_KEY = 'atcontroller:sidebar-width';
+const SHELL_DRAWER_HEIGHT_KEY = 'atcontroller:shell-drawer-height';
+const THREAD_LAST_READ_AT_KEY = 'atcontroller:last-read-at';
+const THREAD_VISIBLE_OUTPUT_GUARD_KEY = 'atcontroller:visible-output-guard';
+const THREAD_ATTENTION_STATE_V2_KEY = 'atcontroller:thread-attention-v2';
+const TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY = 'atcontroller:task-completion-alerts-bootstrap-v1';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
@@ -242,9 +242,9 @@ function sshStartupBlockHeading(reason: TerminalSshAuthStatusReason): string {
     case 'host-verification-required':
       return 'Finish SSH setup in Terminal first';
     case 'password-auth-unsupported':
-      return 'Claudex supports keys-only SSH';
+      return 'ATController supports keys-only SSH';
     case 'interactive-auth-unsupported':
-      return 'SSH must be unlocked outside Claudex';
+      return 'SSH must be unlocked outside ATController';
   }
 }
 
@@ -264,9 +264,9 @@ function sshStartupBlockOverlayMessage(reason: TerminalSshAuthStatusReason): str
     case 'host-verification-required':
       return 'SSH setup blocked. Accept the host key in Terminal, then retry.';
     case 'password-auth-unsupported':
-      return 'SSH setup blocked. Claudex requires key-based auth via macOS Keychain or ssh-agent.';
+      return 'SSH setup blocked. ATController requires key-based auth via macOS Keychain or ssh-agent.';
     case 'interactive-auth-unsupported':
-      return 'SSH setup blocked. Unlock your key or MFA outside Claudex, then retry.';
+      return 'SSH setup blocked. Unlock your key or MFA outside ATController, then retry.';
   }
 }
 
@@ -687,7 +687,7 @@ function shouldNotifyAttentionTurn(state?: ThreadAttentionState): boolean {
 }
 
 function threadSelectionKey(workspaceId: string) {
-  return `claudex:selected-thread:${workspaceId}`;
+  return `atcontroller:selected-thread:${workspaceId}`;
 }
 
 function todayId() {
@@ -1034,7 +1034,7 @@ function buildAttachmentPrompt(paths: string[]): string {
   const hasImages = limited.some(isImageAttachmentPath);
 
   const parts = [
-    'Attachments from Claudex:',
+    'Attachments from ATController:',
     ...limited.map((path) => `- ${quotePathForPrompt(path)}`),
     '',
     hasImages ? 'Inspect image and screenshot files visually.' : 'Read the attached files directly.',
@@ -3020,7 +3020,7 @@ export default function App() {
         if (options?.notifyOnTimeout && !forkResolutionTimeoutNotifiedByThreadRef.current[threadId]) {
           forkResolutionTimeoutNotifiedByThreadRef.current[threadId] = true;
           pushToast(
-            'Claudex could not confirm the forked child session, so fork tracking was cleared for this thread.',
+            'ATController could not confirm the forked child session, so fork tracking was cleared for this thread.',
             'error'
           );
         }
@@ -4865,7 +4865,7 @@ export default function App() {
         return;
       }
       pushToast(
-        'Claudex could not queue a desktop notification. Check macOS notification settings after the first alert.',
+        'ATController could not queue a desktop notification. Check macOS notification settings after the first alert.',
         'info'
       );
     });
@@ -5833,7 +5833,7 @@ export default function App() {
           window.localStorage.setItem(TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY, '1');
         } else {
           pushToast(
-            'Claudex could not queue a desktop notification. Check macOS notification settings after the first alert.',
+            'ATController could not queue a desktop notification. Check macOS notification settings after the first alert.',
             'info'
           );
         }
@@ -5858,7 +5858,7 @@ export default function App() {
     }
 
     pushToast(
-      'Claudex could not queue a desktop notification. Check macOS notification settings after the first alert.',
+      'ATController could not queue a desktop notification. Check macOS notification settings after the first alert.',
       'info'
     );
   }, [pushToast, settings.taskCompletionAlerts]);
@@ -6318,7 +6318,7 @@ export default function App() {
     }
 
     setInstallingUpdate(true);
-    pushToast('Downloading and installing the latest Claudex release…', 'info');
+    pushToast('Downloading and installing the latest ATController release…', 'info');
     try {
       await api.installLatestUpdate();
     } catch (error) {
@@ -6332,11 +6332,11 @@ export default function App() {
     async (workspace: Workspace) => {
       const detail =
         isRemoteWorkspaceKind(workspace.kind)
-          ? 'This removes its saved threads in Claudex.'
-          : 'This keeps your local folder intact but removes its saved threads in Claudex.';
-      const message = `Remove "${workspace.name}" from Claudex?\n\n${detail}`;
+          ? 'This removes its saved threads in ATController.'
+          : 'This keeps your local folder intact but removes its saved threads in ATController.';
+      const message = `Remove "${workspace.name}" from ATController?\n\n${detail}`;
       const confirmed = await confirm(message, {
-        title: 'Claudex',
+        title: 'ATController',
         kind: 'warning',
         okLabel: 'OK',
         cancelLabel: 'Cancel'
@@ -7028,7 +7028,7 @@ export default function App() {
         <div className="modal-backdrop">
           <section className="modal">
             <h3>Failed to confirm forked session. Start fresh?</h3>
-            <p>Claudex could not confirm the child session for this forked thread.</p>
+            <p>ATController could not confirm the child session for this forked thread.</p>
             <footer className="modal-actions">
               <button
                 type="button"
@@ -7067,7 +7067,7 @@ export default function App() {
             <h3>{sshStartupBlockHeading(sshStartupBlockModal.reason)}</h3>
             <p>{sshStartupBlockBody(sshStartupBlockModal.reason)}</p>
             <p className="muted">
-              Claudex only supports key-based SSH here. Expected macOS SSH config:{' '}
+              ATController only supports key-based SSH here. Expected macOS SSH config:{' '}
               <code>AddKeysToAgent yes</code> <code>UseKeychain yes</code>
             </p>
             <footer className="modal-actions">

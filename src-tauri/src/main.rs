@@ -25,7 +25,7 @@ struct AppState {
 }
 
 const GITHUB_LATEST_RELEASE_API_URL: &str =
-    "https://api.github.com/repos/FuRyanf/Claudex/releases/latest";
+    "https://api.github.com/repos/FuRyanf/ATController/releases/latest";
 
 #[derive(Debug, Deserialize)]
 struct GitHubLatestRelease {
@@ -70,7 +70,7 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
 }
 
 fn current_build_version() -> String {
-    option_env!("CLAUDEX_BUILD_VERSION")
+    option_env!("ATCONTROLLER_BUILD_VERSION")
         .unwrap_or(env!("CARGO_PKG_VERSION"))
         .trim()
         .trim_start_matches('v')
@@ -446,7 +446,7 @@ fn check_for_update() -> Result<AppUpdateInfo, String> {
             "-H",
             "Accept: application/vnd.github+json",
             "-H",
-            "User-Agent: Claudex",
+            "User-Agent: ATController",
             GITHUB_LATEST_RELEASE_API_URL,
         ])
         .output()
@@ -479,7 +479,7 @@ async fn install_latest_update(app: tauri::AppHandle) -> Result<bool, String> {
     // Always relaunch the installed /Applications bundle so updates work even
     // when the current process was launched from an older app copy/location.
     let launch_status = std::process::Command::new("open")
-        .args(["-n", "/Applications/Claudex.app"])
+        .args(["-n", "/Applications/ATController.app"])
         .status()
         .map_err(|error| format!("Installed update, but failed to relaunch app: {error}"))?;
     if !launch_status.success() {
@@ -816,13 +816,13 @@ fn main() {
                     let _ = storage::cleanup_stale_running_threads(&ws.id);
                 }
             }
-            if std::env::var_os("CLAUDEX_SEND_STARTUP_TEST_ALERT").is_some() {
-                let result_path = std::env::var("CLAUDEX_STARTUP_TEST_ALERT_RESULT_FILE")
-                    .unwrap_or_else(|_| "/tmp/claudex-startup-alert-result.txt".to_string());
+            if std::env::var_os("ATCONTROLLER_SEND_STARTUP_TEST_ALERT").is_some() {
+                let result_path = std::env::var("ATCONTROLLER_STARTUP_TEST_ALERT_RESULT_FILE")
+                    .unwrap_or_else(|_| "/tmp/atcontroller-startup-alert-result.txt".to_string());
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     let result = macos_notifications::send_notification(
-                        "Claudex startup test alert",
+                        "ATController startup test alert",
                         "If you can see and hear this, the native alert bridge is working.",
                     )
                     .await;
@@ -911,5 +911,5 @@ fn main() {
             write_image_to_clipboard
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Claudex");
+        .expect("error while running ATController");
 }

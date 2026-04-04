@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_IMAGE="${ROOT_DIR}/app icon.jpg"
 BASE_ICON="${ROOT_DIR}/assets/icon.png"
 MAC_ICON_DIR="${ROOT_DIR}/src-tauri/icons/macos"
-ICONSET_DIR="${ROOT_DIR}/src-tauri/icons/Claudex.iconset"
+ICONSET_DIR="${ROOT_DIR}/src-tauri/icons/ATController.iconset"
 
 if [[ ! -f "${SOURCE_IMAGE}" ]]; then
   echo "Source icon not found at ${SOURCE_IMAGE}" >&2

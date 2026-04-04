@@ -47,7 +47,7 @@ const mocks = vi.hoisted(() => {
   const terminalSequencePositions = new Map<string, { startPosition: number; endPosition: number }>();
 
   const api = {
-    getAppStorageRoot: vi.fn(async () => '/tmp/Claudex'),
+    getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
     removeWorkspace: vi.fn(async () => true),

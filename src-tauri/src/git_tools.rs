@@ -577,12 +577,12 @@ mod tests {
     #[test]
     fn detects_git_branch_and_dirty_state() {
         let temp_repo =
-            std::env::temp_dir().join(format!("claudex-git-test-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-git-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
 
         git(&temp_repo, &["init"]);
         git(&temp_repo, &["config", "user.email", "test@example.com"]);
-        git(&temp_repo, &["config", "user.name", "Claudex Test"]);
+        git(&temp_repo, &["config", "user.name", "ATController Test"]);
 
         fs::write(temp_repo.join("README.md"), "initial\n").expect("failed to write file");
         git(&temp_repo, &["add", "README.md"]);
@@ -611,12 +611,12 @@ mod tests {
     #[test]
     fn tracked_workspace_change_detection_ignores_untracked_files() {
         let temp_repo =
-            std::env::temp_dir().join(format!("claudex-git-test-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-git-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
 
         git(&temp_repo, &["init"]);
         git(&temp_repo, &["config", "user.email", "test@example.com"]);
-        git(&temp_repo, &["config", "user.name", "Claudex Test"]);
+        git(&temp_repo, &["config", "user.name", "ATController Test"]);
 
         fs::write(temp_repo.join("README.md"), "initial\n").expect("failed to write file");
         git(&temp_repo, &["add", "README.md"]);
@@ -655,12 +655,12 @@ mod tests {
     #[test]
     fn skips_auto_pull_when_not_on_master() {
         let temp_repo =
-            std::env::temp_dir().join(format!("claudex-git-test-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-git-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
 
         git(&temp_repo, &["init"]);
         git(&temp_repo, &["config", "user.email", "test@example.com"]);
-        git(&temp_repo, &["config", "user.name", "Claudex Test"]);
+        git(&temp_repo, &["config", "user.name", "ATController Test"]);
         fs::write(temp_repo.join("README.md"), "initial\n").expect("failed to write file");
         git(&temp_repo, &["add", "README.md"]);
         git(&temp_repo, &["commit", "-m", "initial"]);
@@ -676,14 +676,14 @@ mod tests {
     #[test]
     fn detects_linked_worktree_context() {
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-git-test-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-git-test-{}", uuid::Uuid::new_v4()));
         let temp_repo = temp_root.join("main");
         let linked_worktree = temp_root.join("feature-auth");
         fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
 
         git(&temp_repo, &["init"]);
         git(&temp_repo, &["config", "user.email", "test@example.com"]);
-        git(&temp_repo, &["config", "user.name", "Claudex Test"]);
+        git(&temp_repo, &["config", "user.name", "ATController Test"]);
 
         fs::write(temp_repo.join("README.md"), "initial\n").expect("failed to write file");
         git(&temp_repo, &["add", "README.md"]);

@@ -12,7 +12,7 @@ use crate::models::{
     ThreadRunStatus, TranscriptEntry, Workspace, WorkspaceKind,
 };
 
-const APP_SUPPORT_SUBDIR: &str = "Library/Application Support/Claudex";
+const APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ATController";
 
 fn thread_metadata_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -88,7 +88,7 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
 }
 
 pub fn app_support_root() -> Result<PathBuf> {
-    if let Ok(override_root) = std::env::var("CLAUDEX_APP_SUPPORT_ROOT") {
+    if let Ok(override_root) = std::env::var("ATCONTROLLER_APP_SUPPORT_ROOT") {
         if !override_root.trim().is_empty() {
             return Ok(PathBuf::from(override_root));
         }
@@ -1133,11 +1133,11 @@ mod tests {
     fn add_workspace_persists_across_loads() {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
-        let temp_root = std::env::temp_dir().join(format!("claudex-test-{}", Uuid::new_v4()));
+        let temp_root = std::env::temp_dir().join(format!("atcontroller-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let added = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1149,7 +1149,7 @@ mod tests {
         assert_eq!(first_load[0].id, added.id);
         assert_eq!(first_load[0].path, second_load[0].path);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1158,8 +1158,8 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-ssh-workspace-test-{}", Uuid::new_v4()));
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+            std::env::temp_dir().join(format!("atcontroller-ssh-workspace-test-{}", Uuid::new_v4()));
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let added = add_ssh_workspace(
             "ssh dev@remote-host",
@@ -1180,7 +1180,7 @@ mod tests {
         assert_eq!(loaded[0].id, added.id);
         assert_eq!(loaded[0].kind, WorkspaceKind::Ssh);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1189,10 +1189,10 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-ssh-remote-path-test-{}",
+            "atcontroller-ssh-remote-path-test-{}",
             Uuid::new_v4()
         ));
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let added = add_ssh_workspace("ssh dev@remote-host", Some("remote-host"), None)
             .expect("ssh workspace should be added");
@@ -1206,7 +1206,7 @@ mod tests {
             set_workspace_remote_path(&added.id, Some("   ")).expect("should clear remote path");
         assert!(cleared.remote_path.is_none());
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1215,13 +1215,13 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-remove-workspace-test-{}",
+            "atcontroller-remove-workspace-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1246,7 +1246,7 @@ mod tests {
         let remaining = load_workspaces().expect("workspaces should still load");
         assert!(remaining.is_empty(), "workspace registry should be empty");
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1255,11 +1255,11 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-thread-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-thread-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1274,7 +1274,7 @@ mod tests {
             read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
         assert!(reloaded.full_access);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1283,13 +1283,13 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-create-thread-full-access-test-{}",
+            "atcontroller-create-thread-full-access-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1302,7 +1302,7 @@ mod tests {
             read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
         assert!(reloaded.full_access);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1311,11 +1311,11 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-session-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-session-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1356,7 +1356,7 @@ mod tests {
             clear_thread_claude_session(&workspace.id, &thread.id).expect("clear should succeed");
         assert!(cleared.claude_session_id.is_none());
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1365,11 +1365,11 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-force-session-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-force-session-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1402,7 +1402,7 @@ mod tests {
             .expect("clear should succeed");
         assert!(cleared.claude_session_id.is_none());
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1411,13 +1411,13 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-invalid-thread-id-test-{}",
+            "atcontroller-invalid-thread-id-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
 
@@ -1428,7 +1428,7 @@ mod tests {
             "unexpected error: {error}"
         );
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1437,11 +1437,11 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-session-race-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-session-race-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1482,7 +1482,7 @@ mod tests {
             .expect("session id should be stored");
         assert_eq!(stored, captured[0]);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1491,10 +1491,10 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-fork-thread-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-fork-thread-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1537,7 +1537,7 @@ mod tests {
         );
         assert!(!forked.pending_fork_launch_consumed);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1546,12 +1546,12 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-ui-fork-thread-test-{}",
+            "atcontroller-ui-fork-thread-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1613,7 +1613,7 @@ mod tests {
             .iter()
             .any(|item| item.id == forked.forked_thread.id));
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1622,12 +1622,12 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-finalize-native-fork-test-{}",
+            "atcontroller-finalize-native-fork-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1703,7 +1703,7 @@ mod tests {
             .join("output.log")
             .is_file());
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1712,12 +1712,12 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-clear-pending-fork-test-{}",
+            "atcontroller-clear-pending-fork-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1750,7 +1750,7 @@ mod tests {
         assert!(cleared.pending_fork_requested_at.is_none());
         assert!(!cleared.pending_fork_launch_consumed);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1759,12 +1759,12 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-consume-pending-fork-test-{}",
+            "atcontroller-consume-pending-fork-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1784,7 +1784,7 @@ mod tests {
 
         assert!(consumed.pending_fork_launch_consumed);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1793,12 +1793,12 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-commit-prepared-pending-fork-test-{}",
+            "atcontroller-commit-prepared-pending-fork-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1827,7 +1827,7 @@ mod tests {
         );
         assert!(committed.pending_fork_launch_consumed);
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1836,12 +1836,12 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-duplicate-session-claim-test-{}",
+            "atcontroller-duplicate-session-claim-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1867,7 +1867,7 @@ mod tests {
             .to_string()
             .contains("already claimed by another thread"));
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1876,12 +1876,12 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
-            "claudex-archived-session-claim-test-{}",
+            "atcontroller-archived-session-claim-test-{}",
             Uuid::new_v4()
         ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
@@ -1910,7 +1910,7 @@ mod tests {
             Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         );
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 
@@ -1919,10 +1919,10 @@ mod tests {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
-            std::env::temp_dir().join(format!("claudex-fork-unclaim-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atcontroller-fork-unclaim-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("create workspace");
-        std::env::set_var("CLAUDEX_APP_SUPPORT_ROOT", &temp_root);
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let workspace =
             add_workspace(workspace_path.to_string_lossy().as_ref()).expect("add workspace");
@@ -1963,7 +1963,7 @@ mod tests {
                 .expect("import source session should succeed");
         assert_eq!(imported.claude_session_id.as_deref(), Some(source_session));
 
-        std::env::remove_var("CLAUDEX_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
     }
 }

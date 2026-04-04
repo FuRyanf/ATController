@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Claudex",
+  "productName": "ATController",
   "version": "0.1.64",
-  "identifier": "com.claudex.app",
+  "identifier": "com.atcontroller.app",
   "build": {
     "beforeDevCommand": "yarn dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Claudex",
+        "title": "ATController",
         "width": 1320,
         "height": 860,
         "minWidth": 1024,

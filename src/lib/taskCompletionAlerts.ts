@@ -40,14 +40,14 @@ export async function sendTaskCompletionAlert({
 
 export async function sendTaskCompletionAlertsEnabledConfirmation(): Promise<boolean> {
   return await sendDesktopNotification(
-    'Claudex alerts enabled',
+    'ATController alerts enabled',
     'You will now get a notification when Claude finishes a task.'
   );
 }
 
 export async function sendTaskCompletionAlertsTestNotification(): Promise<boolean> {
   return await sendDesktopNotification(
-    'Claudex test alert',
+    'ATController test alert',
     'If you can see and hear this, alerts are working.'
   );
 }

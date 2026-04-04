@@ -1,6 +1,6 @@
-# Claudex
+# ATController
 
-Claudex is a native macOS desktop app that wraps the local Claude Code CLI in a purpose-built control plane.
+ATController is a native macOS desktop app that wraps the local Claude Code CLI in a purpose-built control plane.
 
 The app does not call Anthropic APIs directly. It launches your local `claude` binary in a real PTY, renders terminal output in-app, and keeps thread/session state on your machine.
 
@@ -17,12 +17,12 @@ Most UI actions map directly to local CLI or git behavior. The main exception is
 
 ## Security Model
 
-Claudex is a local wrapper around the existing Claude CLI, not a remote execution service.
+ATController is a local wrapper around the existing Claude CLI, not a remote execution service.
 
 - Runs `claude` locally under your current macOS user account and permissions.
-- Does not proxy requests through a Claudex backend service.
+- Does not proxy requests through an ATController backend service.
 - Keeps `Full access` explicit and per-thread (default is off).
-- Stores app data locally under `~/Library/Application Support/Claudex/`.
+- Stores app data locally under `~/Library/Application Support/ATController/`.
 
 Security boundary note: this app is **not** an OS sandbox for Claude. If Claude (or shell commands it runs) can access something in your normal terminal session, the same access level applies here.
 
@@ -37,7 +37,7 @@ Using Claude only in Terminal works well for one repo/thread, but gets painful w
 - Project operations (switching branches, opening folders, jumping threads) are fragmented.
 - Per-thread runtime controls (like `Full access`) are harder to manage consistently.
 
-Claudex solves this by keeping Claude CLI local while adding a desktop control plane:
+ATController solves this by keeping Claude CLI local while adding a desktop control plane:
 
 - Workspace + thread management in one left rail.
 - Local and remote workspaces in one UI, with SSH sessions scoped to each thread.
@@ -60,7 +60,7 @@ Supported workspace types:
 - `local`
 - `ssh`
 
-Remote workspaces store connection details in Claudex, but Claude still runs in the shell environment you connect to.
+Remote workspaces store connection details in ATController, but Claude still runs in the shell environment you connect to.
 
 ### Thread
 
@@ -73,7 +73,7 @@ Each thread stores thread-scoped metadata such as:
 - enabled skills
 - last activity timestamps
 
-Deleting a thread removes Claudex metadata and logs. It does not delete the underlying Claude conversation if you still know the session id.
+Deleting a thread removes ATController metadata and logs. It does not delete the underlying Claude conversation if you still know the session id.
 
 ### Run
 
@@ -91,13 +91,13 @@ You do **not** need Node.js, Yarn, or Rust for this install flow.
 Download the latest DMG:
 
 ```bash
-curl -L -o "$HOME/Downloads/Claudex.dmg" "https://github.com/FuRyanf/Claudex/releases/latest/download/Claudex.dmg"
+curl -L -o "$HOME/Downloads/ATController.dmg" "https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg"
 ```
 
 Then install + trust + launch:
 
 ```bash
-bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/Claudex.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/Claudex.app" "/Applications/Claudex.app"; xattr -dr com.apple.quarantine "/Applications/Claudex.app" || true; open "/Applications/Claudex.app"'
+bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/ATController.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/ATController.app" "/Applications/ATController.app"; xattr -dr com.apple.quarantine "/Applications/ATController.app" || true; open "/Applications/ATController.app"'
 ```
 
 Prebuilt release note:
@@ -109,7 +109,7 @@ Prebuilt release note:
 
 ### Import Existing Sessions
 
-Claudex supports two import flows:
+ATController supports two import flows:
 
 - Manual import by Claude session id from a workspace context menu.
 - Bulk import from local Claude history under `~/.claude/projects`.
@@ -118,13 +118,13 @@ Bulk import can automatically add missing local projects first, skip already-imp
 
 ### Alerts, Dock Badge, and Updates
 
-Claudex can surface background thread completion through:
+ATController can surface background thread completion through:
 
 - unread dots in the left rail
 - macOS task completion alerts
 - Dock badge counts for unread threads
 
-When a newer release is available, Claudex can also install updates in place from inside the app.
+When a newer release is available, ATController can also install updates in place from inside the app.
 
 ### Settings
 
@@ -169,16 +169,16 @@ yarn tauri build
 
 Built app output:
 
-- `/Users/you/Claudex/src-tauri/target/release/bundle/macos/Claudex.app`
+- `/Users/you/project-root/src-tauri/target/release/bundle/macos/ATController.app`
 
 ## Downloads
 
 - Latest public build:
-  - [Latest release](https://github.com/FuRyanf/Claudex/releases/latest)
-  - [Direct DMG download](https://github.com/FuRyanf/Claudex/releases/latest/download/Claudex.dmg)
+  - [Latest release](https://github.com/FuRyanf/ATController/releases/latest)
+  - [Direct DMG download](https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg)
 - CI build runs (every push to `master`/`main`, every PR targeting `master`/`main`, and every `v*` tag push):
-  - [Build workflow runs](https://github.com/FuRyanf/Claudex/actions/workflows/build-macos.yml)
-  - Each run publishes `Claudex.dmg` and `Claudex.app.zip` as artifacts (artifact retention is time-limited by GitHub Actions).
+  - [Build workflow runs](https://github.com/FuRyanf/ATController/actions/workflows/build-macos.yml)
+  - Each run publishes `ATController.dmg` and `ATController.app.zip` as artifacts (artifact retention is time-limited by GitHub Actions).
 - For `v*` tags, the same DMG and ZIP are attached to the GitHub Release automatically.
 - If signing secrets are not configured, builds are unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
 
@@ -199,9 +199,9 @@ When they are absent, CI still builds unsigned artifacts.
 
 ## Data Storage
 
-Claudex stores data under:
+ATController stores data under:
 
-- `~/Library/Application Support/Claudex/`
+- `~/Library/Application Support/ATController/`
 
 Important files/directories:
 
@@ -211,7 +211,7 @@ Important files/directories:
 - `threads/<workspaceId>/<threadId>/runs/<runId>/output.log`
 - `threads/<workspaceId>/<threadId>/runs/<runId>/metadata.json`
 
-Backing up this directory preserves Claudex metadata, thread state, and local run logs.
+Backing up this directory preserves ATController metadata, thread state, and local run logs.
 
 ## Security Notes (Detailed)
 
@@ -226,7 +226,7 @@ Current controls:
 
 Known limitations:
 
-- Claudex is not a sandbox and does not reduce the privileges of your local user account.
+- ATController is not a sandbox and does not reduce the privileges of your local user account.
 - Thread transcripts, run manifests, and terminal logs are local plaintext files; sensitive content may be persisted.
 - If `Full access` is enabled, Claude launches with `--dangerously-skip-permissions`.
 - App-level hardening can be improved further (for example, tightening CSP and narrowing exposed command surface over time).
@@ -241,7 +241,7 @@ Known limitations:
 
 ## Technology
 
-Claudex is a three-layer local architecture:
+ATController is a three-layer local architecture:
 
 - Frontend (`React` + `TypeScript`): manages workspace/thread UX and terminal hydration state.
 - Backend (`Tauri` + `Rust`): exposes command handlers for thread persistence, PTY control, git, and settings.
@@ -271,7 +271,7 @@ Why it stays fast:
 - State is structured by thread/workspace maps (`threadStore` for persisted metadata, `runStore` for live sessions) with refs for hot paths to avoid broad rerenders.
 - Rendering avoids jitter through memoized sidebar components, resize/input debouncing, and imperative terminal writes instead of React-driven text repainting.
 
-Local app data lives at `~/Library/Application Support/Claudex/` (workspaces, settings, thread metadata, run logs/manifests).
+Local app data lives at `~/Library/Application Support/ATController/` (workspaces, settings, thread metadata, run logs/manifests).
 
 ## Resume Behavior (High Level)
 
@@ -286,11 +286,11 @@ Local app data lives at `~/Library/Application Support/Claudex/` (workspaces, se
 
 Canonical source image:
 
-- `/Users/you/Claudex/app icon.jpg`
+- `/Users/you/project-root/app icon.jpg`
 
 Generated base icon:
 
-- `/Users/you/Claudex/assets/icon.png`
+- `/Users/you/project-root/assets/icon.png`
 
 Regenerate all icons:
 
@@ -300,8 +300,8 @@ yarn generate:icons
 
 This updates platform icons under:
 
-- `/Users/you/Claudex/src-tauri/icons`
-- `/Users/you/Claudex/src-tauri/icons/macos`
+- `/Users/you/project-root/src-tauri/icons`
+- `/Users/you/project-root/src-tauri/icons/macos`
 
 ## Verification
 
@@ -334,10 +334,10 @@ It also writes a summary report to `artifacts/last_diagnosis.txt`.
 - Set `Claude CLI Path` explicitly (for example `/usr/local/bin/claude` or your local install path).
 - Re-open a thread to start a new PTY session.
 
-### MCP works in Terminal but not in Claudex
+### MCP works in Terminal but not in ATController
 
-- Confirm Claudex launches via login shell path (`$SHELL -lic`) by using the in-app diagnostics copy action.
-- Compare PATH/env output between Claudex diagnostics and native Terminal.
+- Confirm ATController launches via login shell path (`$SHELL -lic`) by using the in-app diagnostics copy action.
+- Compare PATH/env output between ATController diagnostics and native Terminal.
 - Ensure shell startup files that initialize MCP dependencies are valid (`~/.zprofile`, `~/.zshrc`, etc.).
 
 ### Permissions and Full Access mode
@@ -349,7 +349,7 @@ It also writes a summary report to `artifacts/last_diagnosis.txt`.
 ### Remote workspaces (ssh)
 
 - Add a remote project with a direct `ssh <host>` command.
-- Claudex opens SSH, then launches/resumes `claude` inside the remote shell for each thread.
+- ATController opens SSH, then launches/resumes `claude` inside the remote shell for each thread.
 - Remote sessions use the remote machine's `claude` binary and environment; verify that command works directly in your terminal if startup fails.
 
 ### Workspace add or picker issues

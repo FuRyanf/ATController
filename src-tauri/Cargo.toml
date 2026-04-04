@@ -1,8 +1,8 @@
 [package]
-name = "claudex"
+name = "atcontroller"
 version = "0.1.64"
-description = "Claudex"
-authors = ["Claudex"]
+description = "Native macOS desktop control plane for local Claude Code workflows."
+authors = ["ATController contributors"]
 license = "MIT"
 repository = ""
 edition = "2021"

@@ -148,24 +148,24 @@ function summarizeRootCause(stepId) {
   if (stepId.includes('ui-tests')) {
     return [
       '- UI behavior regressed against expected interactions.',
-      '- Check `/Users/you/Claudex/src/App.tsx`, `/Users/you/Claudex/src/components/LeftRail.tsx`, and `/Users/you/Claudex/src/components/TerminalPanel.tsx`.'
+      '- Check `/Users/you/project-root/src/App.tsx`, `/Users/you/project-root/src/components/LeftRail.tsx`, and `/Users/you/project-root/src/components/TerminalPanel.tsx`.'
     ];
   }
   if (stepId.includes('rust-tests')) {
     return [
       '- Backend persistence or git detection behavior regressed.',
-      '- Check `/Users/you/Claudex/src-tauri/src/storage.rs`, `/Users/you/Claudex/src-tauri/src/git_tools.rs`, and `/Users/you/Claudex/src-tauri/src/skills.rs`.'
+      '- Check `/Users/you/project-root/src-tauri/src/storage.rs`, `/Users/you/project-root/src-tauri/src/git_tools.rs`, and `/Users/you/project-root/src-tauri/src/skills.rs`.'
     ];
   }
   if (stepId.includes('claude-pty-smoke')) {
     return [
       '- Claude interactive PTY behavior regressed.',
-      '- Check `/Users/you/Claudex/src-tauri/src/runner.rs` and `/Users/you/Claudex/src/components/TerminalPanel.tsx` for key forwarding or streaming issues.'
+      '- Check `/Users/you/project-root/src-tauri/src/runner.rs` and `/Users/you/project-root/src/components/TerminalPanel.tsx` for key forwarding or streaming issues.'
     ];
   }
   return [
     '- Build pipeline regression detected.',
-    '- Check frontend dependency or compile errors in `/Users/you/Claudex/package.json` and `/Users/you/Claudex/src`.'
+    '- Check frontend dependency or compile errors in `/Users/you/project-root/package.json` and `/Users/you/project-root/src`.'
   ];
 }
 

@@ -1,10 +1,10 @@
-# Claudex Technology Notes
+# ATController Technology Notes
 
 This file documents the current implementation as of v0.1.10.
 
 ## Architecture
 
-Claudex has three layers:
+ATController has three layers:
 
 - Frontend: React + TypeScript (`src/`)
 - Backend bridge: Tauri commands (`src-tauri/src/main.rs`)
@@ -50,7 +50,7 @@ Important behavior:
 
 Stored at:
 
-- `~/Library/Application Support/Claudex/`
+- `~/Library/Application Support/ATController/`
 
 Important files:
 

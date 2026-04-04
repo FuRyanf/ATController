@@ -39,7 +39,7 @@ const mocks = vi.hoisted(() => {
   let workspaceState: WorkspaceFixture[] = [];
 
   const api = {
-    getAppStorageRoot: vi.fn(async () => '/tmp/Claudex'),
+    getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(async () => workspaceState),
     addWorkspace: vi.fn(async () => {
       workspaceState = [workspaceOne];
@@ -378,7 +378,7 @@ describe('Workspace add flow', () => {
     await user.click(screen.getByRole('tab', { name: 'ssh' }));
     const modal = screen.getByText('Add Project').closest('section');
     expect(
-      screen.getByText('Paste an ssh command that authenticates with an SSH key. Claudex does not store credentials.')
+      screen.getByText('Paste an ssh command that authenticates with an SSH key. ATController does not store credentials.')
     ).toBeInTheDocument();
     expect(modal?.textContent).toContain('Unlock your key with macOS Keychain or ssh-agent');
     expect(modal?.textContent).toContain('Recommended ~/.ssh/config: AddKeysToAgent yes UseKeychain yes');

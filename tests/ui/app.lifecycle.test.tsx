@@ -147,7 +147,7 @@ const mocks = vi.hoisted(() => {
   });
 
   const api = {
-    getAppStorageRoot: vi.fn(async () => '/tmp/Claudex'),
+    getAppStorageRoot: vi.fn(async () => '/tmp/ATController'),
     listWorkspaces: vi.fn(listWorkspacesImpl),
     addWorkspace: vi.fn(async () => workspaceState),
     addSshWorkspace: vi.fn(async () => workspaceState),
@@ -372,7 +372,7 @@ describe('Thread lifecycle integration', () => {
 
     await waitFor(() => {
       expect(coreMocks.invoke).toHaveBeenCalledWith('send_desktop_notification', {
-        title: 'Claudex alerts enabled',
+        title: 'ATController alerts enabled',
         body: 'You will now get a notification when Claude finishes a task.'
       });
     });
@@ -384,7 +384,7 @@ describe('Thread lifecycle integration', () => {
       currentVersion: '0.1.12',
       latestVersion: '0.1.14',
       updateAvailable: true,
-      releaseUrl: 'https://github.com/FuRyanf/Claudex/releases/tag/v0.1.14'
+      releaseUrl: 'https://github.com/FuRyanf/ATController/releases/tag/v0.1.14'
     });
 
     render(<App />);

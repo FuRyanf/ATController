@@ -65,4 +65,4 @@ The remaining compatibility path in `TerminalPanel` is limited to static `conten
   - `yarn build`
   - `yarn test:ui`
   - real app scenarios: long stream, thread switching during output, resize during stream, scroll-up follow pause + resume, refresh-display repair, delayed bursts, and immediate exit after final output
-- For live validation, a disposable `CLAUDEX_APP_SUPPORT_ROOT` plus a fake Claude CLI is the fastest way to stress the actual Tauri app without touching real user data.
+- For live validation, a disposable `ATCONTROLLER_APP_SUPPORT_ROOT` plus a fake Claude CLI is the fastest way to stress the actual Tauri app without touching real user data.

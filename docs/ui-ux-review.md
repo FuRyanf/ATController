@@ -1,4 +1,4 @@
-# Claudex UI/UX Review
+# ATController UI/UX Review
 
 Review date: March 6, 2026
 
@@ -10,11 +10,11 @@ Basis for review:
 
 Blunt summary:
 
-Claudex has the right product thesis and the right technical core. The UI does not yet match that ambition. It still feels like an internal wrapper around Claude CLI rather than a polished developer workstation. The biggest problem is structural: project navigation, thread management, terminal interaction, and utility controls are all competing at the same visual level. That creates constant micro-friction for exactly the user who is least tolerant of it: a fast, keyboard-heavy engineer juggling multiple contexts.
+ATController has the right product thesis and the right technical core. The UI does not yet match that ambition. It still feels like an internal wrapper around Claude CLI rather than a polished developer workstation. The biggest problem is structural: project navigation, thread management, terminal interaction, and utility controls are all competing at the same visual level. That creates constant micro-friction for exactly the user who is least tolerant of it: a fast, keyboard-heavy engineer juggling multiple contexts.
 
 ## Section 1 - Product Understanding
 
-Claudex appears to be a local macOS control plane for Claude CLI sessions. It lets an engineer group AI work by project, persist thread/session history, reopen workspaces, attach files, and interact with Claude through an embedded terminal rather than raw Terminal.app tabs.
+ATController appears to be a local macOS control plane for Claude CLI sessions. It lets an engineer group AI work by project, persist thread/session history, reopen workspaces, attach files, and interact with Claude through an embedded terminal rather than raw Terminal.app tabs.
 
 The primary user is a software engineer running several AI-assisted coding tasks across multiple repositories. This is not a casual chat user. It is a power user who wants persistent context, fast switching, low ceremony, and strong control over execution state.
 
@@ -181,7 +181,7 @@ Improvement:
 
 ## Section 5 - macOS Native Design Quality
 
-Claudex is recognizably a custom desktop app, but it does not yet feel fully macOS-native.
+ATController is recognizably a custom desktop app, but it does not yet feel fully macOS-native.
 
 Where it misses:
 
@@ -311,7 +311,7 @@ The bottom bar should become a proper composer area:
 
 ## Section 8 - Power User Features
 
-These are the kinds of features that would move Claudex toward Raycast/Cursor-class usefulness:
+These are the kinds of features that would move ATController toward Raycast/Cursor-class usefulness:
 
 - Global command palette
 - Recent thread switcher
@@ -344,7 +344,7 @@ The current footer mixes unrelated concerns. A dedicated composer would make pro
 
 Why it matters:
 
-This product is for engineers. Keyboard-first navigation is not a bonus feature here; it is table stakes. Without it, Claudex will always feel slower than Terminal tabs, Raycast, or Cursor.
+This product is for engineers. Keyboard-first navigation is not a bonus feature here; it is table stakes. Without it, ATController will always feel slower than Terminal tabs, Raycast, or Cursor.
 
 ### 4. Add a review-oriented output mode alongside the terminal
 
@@ -395,7 +395,7 @@ Key layout decisions:
 
 ## Closing Assessment
 
-Claudex already has a credible product core because it solves a real pain: persistent, multi-project AI coding work on top of local Claude CLI. The launch risk is not the idea. The launch risk is that the UI still makes users think too hard about structure and state.
+ATController already has a credible product core because it solves a real pain: persistent, multi-project AI coding work on top of local Claude CLI. The launch risk is not the idea. The launch risk is that the UI still makes users think too hard about structure and state.
 
 If the product wants to feel competitive with Raycast, Cursor, or Linear-grade tools, the next design pass should focus less on incremental polish and more on hierarchy surgery:
 

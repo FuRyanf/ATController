@@ -1,6 +1,6 @@
 import type { SkillInfo } from '../types';
 
-const SKILL_USAGE_STORAGE_KEY = 'claudex:skill-usage';
+const SKILL_USAGE_STORAGE_KEY = 'atcontroller:skill-usage';
 
 export interface SkillUsageStats {
   lastUsedAt: number;

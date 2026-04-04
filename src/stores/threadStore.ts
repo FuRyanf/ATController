@@ -3,7 +3,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { CreateThreadOptions, RunStatus, ThreadMetadata } from '../types';
 
-const LAST_USER_INPUT_AT_STORAGE_KEY = 'claudex:last-user-input-at';
+const LAST_USER_INPUT_AT_STORAGE_KEY = 'atcontroller:last-user-input-at';
 
 function parseIsoTimestampMs(value?: string | null): number {
   if (!value) {
