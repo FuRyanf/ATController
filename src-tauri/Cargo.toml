@@ -4,7 +4,7 @@ version = "0.1.64"
 description = "Native macOS desktop control plane for local Claude Code workflows."
 authors = ["ATController contributors"]
 license = "MIT"
-repository = ""
+repository = "https://github.com/FuRyanf/ATController"
 edition = "2021"
 rust-version = "1.77"
 

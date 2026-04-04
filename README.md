@@ -88,16 +88,10 @@ This path is for end users. You only need:
 
 You do **not** need Node.js, Yarn, or Rust for this install flow.
 
-Download the latest DMG:
+Download, install, trust, and launch the latest build in one command:
 
 ```bash
-curl -L -o "$HOME/Downloads/ATController.dmg" "https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg"
-```
-
-Then install + trust + launch:
-
-```bash
-bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/ATController.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/ATController.app" "/Applications/ATController.app"; xattr -dr com.apple.quarantine "/Applications/ATController.app" || true; open "/Applications/ATController.app"'
+bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/ATController.dmg"; curl -fL -o "$DMG" "https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/ATController.app" "/Applications/ATController.app"; xattr -dr com.apple.quarantine "/Applications/ATController.app" || true; open "/Applications/ATController.app"'
 ```
 
 Prebuilt release note:
