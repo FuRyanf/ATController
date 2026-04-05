@@ -2690,6 +2690,27 @@ export default function App() {
     [threadAttentionVersion]
   );
 
+  const threadStatusById = useMemo(() => {
+    const statusById: Record<string, { isWorking: boolean; hasUnreadOutput: boolean }> = {};
+    for (const thread of allThreads) {
+      statusById[thread.id] = {
+        isWorking: runStore.isThreadWorking(thread.id),
+        hasUnreadOutput: hasUnreadAttentionTurn(threadAttentionByThreadRef.current[thread.id])
+      };
+    }
+    return statusById;
+  }, [allThreads, runStore, threadAttentionVersion]);
+
+  const isThreadWorking = useCallback(
+    (threadId: string) => threadStatusById[threadId]?.isWorking ?? false,
+    [threadStatusById]
+  );
+
+  const hasUnreadThreadOutput = useCallback(
+    (threadId: string) => threadStatusById[threadId]?.hasUnreadOutput ?? false,
+    [threadStatusById]
+  );
+
   useEffect(() => {
     const nextBadgeCount = unreadThreadCount > 0 ? unreadThreadCount : null;
     if (lastAppBadgeCountRef.current === nextBadgeCount) {
@@ -6881,8 +6902,8 @@ export default function App() {
         onSetWorkspaceGitPullOnMasterForNewThreads={onSetWorkspaceGitPullOnMasterForNewThreads}
         onReorderWorkspaces={onReorderWorkspaces}
         onRemoveWorkspace={onRemoveWorkspace}
-        isThreadWorking={runStore.isThreadWorking}
-        hasUnreadThreadOutput={(threadId) => hasUnreadAttentionTurn(threadAttentionByThreadRef.current[threadId])}
+        isThreadWorking={isThreadWorking}
+        hasUnreadThreadOutput={hasUnreadThreadOutput}
         getThreadDisplayTimestampMs={threadStore.getThreadDisplayTimestampMs}
         getSearchTextForThread={getSearchTextForThread}
         onCopyResumeCommand={copyResumeCommand}
