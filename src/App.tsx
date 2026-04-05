@@ -6963,7 +6963,7 @@ export default function App() {
         <section className="terminal-region">
           {selectedThread ? (
             <TerminalPanel
-              key={`${selectedThread.id}:${selectedSessionId ?? 'pending'}`}
+              key={selectedThread.id}
               sessionId={selectedSessionId}
               streamState={selectedTerminalStream}
               contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
