@@ -681,12 +681,15 @@ function hasCompletedAttentionTurn(state?: ThreadAttentionState): boolean {
   return state.activeTurnId !== null && state.activeTurnStatus === 'completed';
 }
 
-function getThreadAttentionDisplayState(state?: ThreadAttentionState): 'idle' | 'working' | 'completed' | 'unread' {
+function getThreadAttentionDisplayState(
+  state: ThreadAttentionState | undefined,
+  options: { isWorking: boolean }
+): 'idle' | 'working' | 'completed' | 'unread' {
+  if (options.isWorking) {
+    return 'working';
+  }
   if (!state) {
     return 'idle';
-  }
-  if (state.activeTurnId !== null && state.activeTurnStatus === 'running') {
-    return 'working';
   }
   if (hasUnreadAttentionTurn(state)) {
     return 'unread';
@@ -2719,9 +2722,10 @@ export default function App() {
     const statusById: Record<string, { isWorking: boolean; hasUnreadOutput: boolean; displayState: 'idle' | 'working' | 'completed' | 'unread' }> = {};
     for (const thread of allThreads) {
       const attentionState = threadAttentionByThreadRef.current[thread.id];
-      const displayState = getThreadAttentionDisplayState(attentionState);
+      const isWorking = runStore.isThreadWorking(thread.id);
+      const displayState = getThreadAttentionDisplayState(attentionState, { isWorking });
       statusById[thread.id] = {
-        isWorking: displayState === 'working' || runStore.isThreadWorking(thread.id),
+        isWorking,
         hasUnreadOutput: displayState === 'unread',
         displayState
       };
