@@ -681,25 +681,7 @@ function hasCompletedAttentionTurn(state?: ThreadAttentionState): boolean {
   return state.activeTurnId !== null && state.activeTurnStatus === 'completed';
 }
 
-function getThreadAttentionDisplayState(
-  state: ThreadAttentionState | undefined,
-  options: { isWorking: boolean }
-): 'idle' | 'working' | 'completed' | 'unread' {
-  if (options.isWorking) {
-    return 'working';
-  }
-  if (!state) {
-    return 'idle';
-  }
-  if (hasUnreadAttentionTurn(state)) {
-    return 'unread';
-  }
-  if (hasCompletedAttentionTurn(state)) {
-    return 'completed';
-  }
-  return 'idle';
-}
-
+<<<<<<< HEAD
 function shouldNotifyAttentionTurn(state?: ThreadAttentionState): boolean {
   if (!state || !state.lastCompletedTurnStatus || !hasUnreadAttentionTurn(state)) {
     return false;
@@ -2719,27 +2701,23 @@ export default function App() {
   );
 
   const threadStatusById = useMemo(() => {
-    const statusById: Record<string, { isWorking: boolean; hasUnreadOutput: boolean; displayState: 'idle' | 'working' | 'completed' | 'unread' }> = {};
+    const statusById: Record<string, { isWorking: boolean; hasUnreadOutput: boolean }> = {};
     for (const thread of allThreads) {
-      const attentionState = threadAttentionByThreadRef.current[thread.id];
-      const isWorking = runStore.isThreadWorking(thread.id);
-      const displayState = getThreadAttentionDisplayState(attentionState, { isWorking });
       statusById[thread.id] = {
-        isWorking,
-        hasUnreadOutput: displayState === 'unread',
-        displayState
+        isWorking: runStore.isThreadWorking(thread.id),
+        hasUnreadOutput: hasUnreadAttentionTurn(threadAttentionByThreadRef.current[thread.id])
       };
     }
     return statusById;
   }, [allThreads, runStore, threadAttentionVersion]);
 
   const isThreadWorking = useCallback(
-    (threadId: string) => threadStatusById[threadId]?.displayState === 'working',
+    (threadId: string) => threadStatusById[threadId]?.isWorking ?? false,
     [threadStatusById]
   );
 
   const hasUnreadThreadOutput = useCallback(
-    (threadId: string) => threadStatusById[threadId]?.displayState === 'unread',
+    (threadId: string) => threadStatusById[threadId]?.hasUnreadOutput ?? false,
     [threadStatusById]
   );
 
