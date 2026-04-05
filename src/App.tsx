@@ -674,6 +674,13 @@ function hasUnreadAttentionTurn(state?: ThreadAttentionState): boolean {
   return state.lastCompletedTurnLastOutputAtMs > (state.lastViewedAtMs ?? 0);
 }
 
+function hasCompletedAttentionTurn(state?: ThreadAttentionState): boolean {
+  if (!state) {
+    return false;
+  }
+  return state.activeTurnId !== null && state.activeTurnStatus === 'completed';
+}
+
 function shouldNotifyAttentionTurn(state?: ThreadAttentionState): boolean {
   if (!state || !state.lastCompletedTurnStatus || !hasUnreadAttentionTurn(state)) {
     return false;
@@ -1993,12 +2000,14 @@ export default function App() {
 
       const completedStatus: ThreadAttentionCompletionStatus | null =
         status === 'Succeeded' || status === 'Failed' ? status : null;
+      const isAlreadyCompleted = currentState.activeTurnStatus === 'completed';
+      const shouldPersistCompletion = currentState.activeTurnHasMeaningfulOutput && completedStatus !== null;
       const nextState: ThreadAttentionState = {
         ...currentState,
         activeTurnStatus: 'completed'
       };
 
-      if (currentState.activeTurnHasMeaningfulOutput && completedStatus) {
+      if (shouldPersistCompletion) {
         nextState.lastCompletedTurnIdWithOutput = currentState.activeTurnId;
         nextState.lastCompletedTurnStatus = completedStatus;
         nextState.lastCompletedTurnAtMs = completedAtMs;
@@ -2007,7 +2016,7 @@ export default function App() {
 
       return commitThreadAttentionState(threadId, nextState, {
         persistNow: true,
-        render: currentState.activeTurnHasMeaningfulOutput && completedStatus !== null
+        render: shouldPersistCompletion || !isAlreadyCompleted
       });
     },
     [commitThreadAttentionState]
@@ -2734,13 +2743,15 @@ export default function App() {
           if (workingByThreadRef.current[threadId]) {
             return;
           }
-          const previousCompletedTurnId =
-            (threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState()).lastCompletedTurnIdWithOutput;
+          const previousAttentionState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+          if (hasCompletedAttentionTurn(previousAttentionState)) {
+            return;
+          }
           const completedAttentionState = completeTurn(threadId, 'Succeeded');
           if (
-            completedAttentionState.lastCompletedTurnIdWithOutput > previousCompletedTurnId ||
+            completedAttentionState.lastCompletedTurnIdWithOutput > previousAttentionState.lastCompletedTurnIdWithOutput ||
             (
-              completedAttentionState.lastCompletedTurnIdWithOutput === previousCompletedTurnId &&
+              completedAttentionState.lastCompletedTurnIdWithOutput === previousAttentionState.lastCompletedTurnIdWithOutput &&
               completedAttentionState.lastCompletedTurnStatus === 'Succeeded' &&
               shouldNotifyAttentionTurn(completedAttentionState)
             )
