@@ -681,7 +681,6 @@ function hasCompletedAttentionTurn(state?: ThreadAttentionState): boolean {
   return state.activeTurnId !== null && state.activeTurnStatus === 'completed';
 }
 
-<<<<<<< HEAD
 function shouldNotifyAttentionTurn(state?: ThreadAttentionState): boolean {
   if (!state || !state.lastCompletedTurnStatus || !hasUnreadAttentionTurn(state)) {
     return false;
@@ -2097,8 +2096,6 @@ export default function App() {
   focusedTerminalKindRef.current = focusedTerminalKind;
   shellTerminalSessionIdRef.current = shellTerminalSessionId;
   shellTerminalWorkspaceIdRef.current = shellTerminalWorkspaceId;
-  activeRunsByThreadRef.current = runStore.activeRunsByThread;
-  workingByThreadRef.current = runStore.workingByThread;
   readyByThreadRef.current = readyByThread;
   sshStartupBlockedByThreadRef.current = sshStartupBlockedByThread;
   sshStartupBlockedShellByWorkspaceRef.current = sshStartupBlockedShellByWorkspace;
@@ -2181,7 +2178,6 @@ export default function App() {
       threadIdBySessionIdRef.current[sessionId] = threadId;
       runStore.bindSession(threadId, sessionId, startedAt);
       lastSessionStartAtMsByThreadRef.current[threadId] = Date.now();
-      delete lastUserInputAtMsByThreadRef.current[threadId];
       delete lastMeaningfulOutputByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
       const nextStream = bindTerminalSessionStream(
