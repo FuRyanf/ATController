@@ -1873,6 +1873,8 @@ export default function App() {
     (threadId: string) => {
       const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
       const startedAtMs = Date.now();
+      delete lastMeaningfulOutputByThreadRef.current[threadId];
+      delete outputControlCarryByThreadRef.current[threadId];
       const nextState: ThreadAttentionState = {
         ...currentState,
         activeTurnId: nextTurnIdForAttentionState(currentState),
@@ -1964,7 +1966,7 @@ export default function App() {
       }
 
       const attentionState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      if (attentionState.activeTurnId === null || attentionState.activeTurnStatus !== 'running') {
+      if (attentionState.activeTurnId === null) {
         return false;
       }
 
@@ -1975,11 +1977,23 @@ export default function App() {
 
       const nowMs = Date.now();
       lastMeaningfulOutputByThreadRef.current[threadId] = normalized;
-      commitThreadAttentionState(threadId, {
+      const isCompletedTurn = attentionState.activeTurnStatus === 'completed';
+      const nextAttentionState: ThreadAttentionState = {
         ...attentionState,
-        activeTurnStatus: 'running',
+        activeTurnStatus: isCompletedTurn ? 'completed' : 'running',
         activeTurnHasMeaningfulOutput: true,
         activeTurnLastOutputAtMs: nowMs
+      };
+      if (isCompletedTurn && attentionState.lastCompletedTurnStatus) {
+        nextAttentionState.lastCompletedTurnIdWithOutput = Math.max(
+          attentionState.lastCompletedTurnIdWithOutput,
+          attentionState.activeTurnId
+        );
+        nextAttentionState.lastCompletedTurnAtMs = attentionState.lastCompletedTurnAtMs ?? nowMs;
+        nextAttentionState.lastCompletedTurnLastOutputAtMs = nowMs;
+      }
+      commitThreadAttentionState(threadId, nextAttentionState, {
+        render: !isThreadVisibleToUser(threadId)
       });
 
       if (isThreadVisibleToUser(threadId)) {
@@ -2001,17 +2015,25 @@ export default function App() {
       const completedStatus: ThreadAttentionCompletionStatus | null =
         status === 'Succeeded' || status === 'Failed' ? status : null;
       const isAlreadyCompleted = currentState.activeTurnStatus === 'completed';
-      const shouldPersistCompletion = currentState.activeTurnHasMeaningfulOutput && completedStatus !== null;
+      const didTurnProduceOutput =
+        currentState.activeTurnHasMeaningfulOutput ||
+        currentState.activeTurnLastOutputAtMs !== null ||
+        Boolean(lastMeaningfulOutputByThreadRef.current[threadId]);
+      const shouldPersistCompletion = didTurnProduceOutput && completedStatus !== null;
       const nextState: ThreadAttentionState = {
         ...currentState,
-        activeTurnStatus: 'completed'
+        activeTurnStatus: 'completed',
+        activeTurnHasMeaningfulOutput: didTurnProduceOutput,
+        activeTurnLastOutputAtMs:
+          currentState.activeTurnLastOutputAtMs ??
+          (didTurnProduceOutput ? completedAtMs : null)
       };
 
       if (shouldPersistCompletion) {
         nextState.lastCompletedTurnIdWithOutput = currentState.activeTurnId;
         nextState.lastCompletedTurnStatus = completedStatus;
         nextState.lastCompletedTurnAtMs = completedAtMs;
-        nextState.lastCompletedTurnLastOutputAtMs = currentState.activeTurnLastOutputAtMs;
+        nextState.lastCompletedTurnLastOutputAtMs = nextState.activeTurnLastOutputAtMs;
       }
 
       return commitThreadAttentionState(threadId, nextState, {
@@ -2756,17 +2778,6 @@ export default function App() {
             notifyCompletedTurnIfNeeded(threadId, completedAttentionState);
           }
         };
-        // If the session is still active, defer completion by one more idle
-        // window.  This gives the output handler a chance to re-enter working
-        // state (which calls clearThreadWorkingStopTimer, cancelling this
-        // deferred timer).  If no output arrives, completion fires normally.
-        if (activeRunsByThreadRef.current[threadId]) {
-          workingStopTimerByThreadRef.current[threadId] = window.setTimeout(() => {
-            delete workingStopTimerByThreadRef.current[threadId];
-            runCompletion();
-          }, THREAD_WORKING_IDLE_TIMEOUT_MS);
-          return;
-        }
         runCompletion();
       }, delayMs);
     },
@@ -5306,14 +5317,31 @@ export default function App() {
 
       const activeSessionIdForThread = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
       if (activeSessionIdForThread && activeSessionIdForThread !== event.sessionId) {
-        if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
-          console.debug('[terminal-data] dropped chunk for inactive session', {
-            eventSessionId: event.sessionId,
-            activeSessionId: activeSessionIdForThread,
-            threadId
-          });
+        const mappedThreadIdForEventSession = threadIdBySessionIdRef.current[event.sessionId] ?? sessionMeta?.threadId ?? null;
+        if (mappedThreadIdForEventSession === threadId) {
+          activeRunsByThreadRef.current = {
+            ...activeRunsByThreadRef.current,
+            [threadId]: {
+              threadId,
+              sessionId: event.sessionId,
+              startedAt: activeRunsByThreadRef.current[threadId]?.startedAt ?? new Date().toISOString()
+            }
+          };
+          runStore.bindSession(
+            threadId,
+            event.sessionId,
+            activeRunsByThreadRef.current[threadId]?.startedAt ?? new Date().toISOString()
+          );
+        } else {
+          if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
+            console.debug('[terminal-data] dropped chunk for inactive session', {
+              eventSessionId: event.sessionId,
+              activeSessionId: activeSessionIdForThread,
+              threadId
+            });
+          }
+          return;
         }
-        return;
       }
 
       const currentStream = terminalStreamsByThreadRef.current[threadId];
@@ -5352,12 +5380,18 @@ export default function App() {
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
         }
       }
+      const hasCompletedTurn = hasCompletedAttentionTurn(threadAttentionByThreadRef.current[threadId]);
       if (workingByThreadRef.current[threadId]) {
         scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
         if (!hasMeaningfulOutput) {
           maybeResolveStuckStreaming();
         }
-      } else if (hasMeaningfulOutput && activeRunsByThreadRef.current[threadId] && hasUserSentMessageInCurrentSession(threadId)) {
+      } else if (
+        hasMeaningfulOutput &&
+        activeRunsByThreadRef.current[threadId] &&
+        hasUserSentMessageInCurrentSession(threadId) &&
+        !(hasCompletedTurn && resolveThreadTurnCompletionMode(threadId) === 'jsonl')
+      ) {
         // Session still alive but working timer expired — re-enter working state.
         clearThreadWorkingStopTimer(threadId);
         startThreadWorking(threadId);
@@ -5374,6 +5408,7 @@ export default function App() {
       hasUserSentMessageInCurrentSession,
       isIgnoredSshAuthStatusSession,
       noteTurnOutput,
+      resolveThreadTurnCompletionMode,
       stripThreadHiddenInjectedPrompts,
       setShellTerminalStream,
       startThreadWorking,
@@ -5531,6 +5566,8 @@ export default function App() {
           activeTurnStatus: 'running',
           activeTurnHasMeaningfulOutput: true,
           activeTurnLastOutputAtMs: Math.max(previousAttentionState.activeTurnLastOutputAtMs ?? 0, completedAtMs)
+        }, {
+          render: !isThreadVisibleToUser(threadId)
         });
         if (isThreadVisibleToUser(threadId)) {
           markTurnViewed(threadId, false, completedAtMs, lastTerminalLogByThreadRef.current[threadId] ?? '');
@@ -6240,6 +6277,9 @@ export default function App() {
           importSessionWorkspace.kind === 'local'
             ? await api.getImportableClaudeSession(importSessionWorkspace.path, claudeSessionId)
             : null;
+        if (importSessionWorkspace.kind === 'local') {
+          await api.validateImportableClaudeSession(importSessionWorkspace.path, claudeSessionId);
+        }
         const thread = await api.createThread(
           importSessionWorkspace.id,
           'claude-code',
@@ -6793,7 +6833,7 @@ export default function App() {
               ? `${data.slice(0, submitIndex)}${hiddenPromptBlocks.join('')}${data.slice(submitIndex)}`
               : `${data}${hiddenPromptBlocks.join('')}`;
 
-        if (isSelectedThreadStarting || !selectedSessionId) {
+        if (isSelectedThreadStarting || !sessionId) {
           if (shouldClearSkills) {
             pendingSkillClearByThreadRef.current[selectedThread.id] = true;
           }
@@ -6803,7 +6843,7 @@ export default function App() {
           return;
         }
 
-          if (sessionId) {
+        if (sessionId) {
             clearThreadWorkingStopTimer(selectedThread.id);
             startThreadWorking(selectedThread.id);
             scheduleThreadWorkingStop(selectedThread.id, THREAD_WORKING_STUCK_TIMEOUT_MS);

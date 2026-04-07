@@ -279,6 +279,33 @@ vi.mock('xterm-addon-web-links', () => ({
 
 import { TerminalPanel } from '../../src/components/TerminalPanel';
 
+function renderClaudePanel(props: Record<string, unknown> = {}) {
+  return render(
+    <TerminalPanel
+      sessionId="session-1"
+      streamState={{
+        sessionId: 'session-1',
+        text: '',
+        startPosition: 0,
+        endPosition: 0,
+        truncated: false,
+        phase: 'live',
+        resetToken: 0
+      }}
+      readOnly={false}
+      inputEnabled
+      cursorVisible={false}
+      focusRequestId={0}
+      repairRequestId={0}
+      searchToggleRequestId={0}
+      onData={() => undefined}
+      onResize={() => undefined}
+      onFocusChange={() => undefined}
+      {...props}
+    />
+  );
+}
+
 function setViewportMetrics(
   viewport: HTMLElement,
   {
@@ -1005,6 +1032,70 @@ describe('TerminalPanel manual repair', () => {
     await waitFor(() => {
       expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
     });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('does not rerender the active terminal for unrelated parent state churn when props are stable', async () => {
+    const streamState = {
+      sessionId: 'session-1',
+      text: 'line 1\nline 2\n',
+      startPosition: 0,
+      endPosition: 14,
+      truncated: false,
+      phase: 'live' as const,
+      resetToken: 0
+    };
+
+    const onData = vi.fn();
+    const onResize = vi.fn();
+    const onFocusChange = vi.fn();
+
+    const { rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={streamState}
+        readOnly={false}
+        inputEnabled
+        cursorVisible={false}
+        focusRequestId={0}
+        repairRequestId={0}
+        searchToggleRequestId={0}
+        onData={onData}
+        onResize={onResize}
+        onFocusChange={onFocusChange}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    term.scrollToBottom.mockClear();
+    term.write.mockClear();
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={streamState}
+        readOnly={false}
+        inputEnabled
+        cursorVisible={false}
+        focusRequestId={0}
+        repairRequestId={0}
+        searchToggleRequestId={0}
+        onData={onData}
+        onResize={onResize}
+        onFocusChange={onFocusChange}
+      />
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mocks.terminals).toHaveLength(1);
+    expect(term.write).not.toHaveBeenCalled();
     expect(term.scrollToBottom).not.toHaveBeenCalled();
   });
 

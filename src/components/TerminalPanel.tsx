@@ -79,7 +79,27 @@ interface TerminalPanelProps {
 // All callback props (onData, onResize, onFocusChange) must be identity-stable at
 // the call site — the component stores them in refs internally but still needs a
 // render to sync the refs.
-export const TerminalPanel = React.memo(TerminalPanelComponent);
+export const TerminalPanel = React.memo(
+  TerminalPanelComponent,
+  (prevProps, nextProps) => {
+    return prevProps.sessionId === nextProps.sessionId &&
+      prevProps.streamState === nextProps.streamState &&
+      prevProps.content === nextProps.content &&
+      prevProps.contentByteCount === nextProps.contentByteCount &&
+      prevProps.contentGeneration === nextProps.contentGeneration &&
+      prevProps.contentLimitChars === nextProps.contentLimitChars &&
+      prevProps.readOnly === nextProps.readOnly &&
+      prevProps.inputEnabled === nextProps.inputEnabled &&
+      prevProps.cursorVisible === nextProps.cursorVisible &&
+      prevProps.overlayMessage === nextProps.overlayMessage &&
+      prevProps.focusRequestId === nextProps.focusRequestId &&
+      prevProps.repairRequestId === nextProps.repairRequestId &&
+      prevProps.searchToggleRequestId === nextProps.searchToggleRequestId &&
+      prevProps.onData === nextProps.onData &&
+      prevProps.onResize === nextProps.onResize &&
+      prevProps.onFocusChange === nextProps.onFocusChange;
+  }
+);
 
 function hardenTerminalTextInput(host: HTMLElement) {
   const textareas = host.querySelectorAll<HTMLTextAreaElement>(TERMINAL_TEXTAREA_SELECTOR);

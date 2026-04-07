@@ -174,6 +174,7 @@ const mocks = vi.hoisted(() => {
     setAppBadgeCount: vi.fn(async () => true),
     validateImportableClaudeSession: vi.fn(async () => true),
     discoverImportableClaudeSessions: vi.fn(async () => []),
+    getImportableClaudeSession: vi.fn(async () => null),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
   const openDialog = vi.fn(async () => null);
@@ -545,7 +546,7 @@ describe('Workspace add flow', () => {
         '/tmp/workspace-added',
         '123e4567-e89b-12d3-a456-426614174000'
       );
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code', false);
       expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
         'ws-added',
         'thread-import',
@@ -711,8 +712,8 @@ describe('Workspace add flow', () => {
         '22222222-2222-2222-2222-222222222222'
       );
       expect(mocks.api.addWorkspace).toHaveBeenCalledWith('/tmp/workspace-second');
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code');
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-second', 'claude-code');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code', false);
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-second', 'claude-code', false);
       expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
         'ws-added',
         'thread-bulk-existing',
