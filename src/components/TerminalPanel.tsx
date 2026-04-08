@@ -53,6 +53,7 @@ const TERMINAL_SEARCH_DECORATIONS: NonNullable<ISearchOptions['decorations']> = 
 interface PendingRepairState {
   preserveViewport: boolean;
   scrollbackOffset: number;
+  pausedViewportScrollTop: number | null;
 }
 
 interface TerminalPanelProps {
@@ -528,6 +529,58 @@ function TerminalPanelComponent({
     [capturePausedViewportScrollTop]
   );
 
+  const restorePausedViewport = useCallback(
+    (term: Terminal, reason: string) => {
+      if (terminalRef.current !== term || shouldAutoFollow(followStateRef.current)) {
+        return false;
+      }
+      const viewport = getViewportElement();
+      const savedScrollTop = pausedViewportScrollTopRef.current;
+      if (!viewport || savedScrollTop === null) {
+        return false;
+      }
+      const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      const targetScrollTop = Math.max(0, Math.min(savedScrollTop, maxScrollTop));
+      const targetViewportY =
+        maxScrollTop <= 0 || term.buffer.active.baseY <= 0
+          ? 0
+          : Math.max(
+              0,
+              Math.min(
+                term.buffer.active.baseY,
+                Math.round((targetScrollTop / maxScrollTop) * term.buffer.active.baseY)
+              )
+            );
+      const currentScrollTop = viewport.scrollTop;
+      logTerminalDebug('viewportScrollTop:restore-check', {
+        reason,
+        currentScrollTop,
+        targetScrollTop,
+        targetViewportY,
+        currentViewportY: term.buffer.active.viewportY
+      }, term);
+      if (term.buffer.active.viewportY !== targetViewportY) {
+        logTerminalDebug('scrollToLine:write-preserve', {
+          targetLine: targetViewportY,
+          reason
+        }, term);
+        term.scrollToLine(targetViewportY);
+      }
+      const updatedScrollTop = viewport.scrollTop;
+      if (Math.abs(updatedScrollTop - targetScrollTop) > 0.5) {
+        viewport.scrollTop = targetScrollTop;
+        logTerminalDebug('viewportScrollTop:restore', {
+          reason,
+          previousScrollTop: updatedScrollTop,
+          targetScrollTop
+        }, term);
+      }
+      scheduleTerminalRefresh(term);
+      return true;
+    },
+    [getViewportElement, logTerminalDebug, scheduleTerminalRefresh]
+  );
+
   const schedulePausedViewportRestore = useCallback(
     (term: Terminal, reason: string) => {
       if (pausedViewportRestoreRafRef.current !== null) {
@@ -535,55 +588,10 @@ function TerminalPanelComponent({
       }
       pausedViewportRestoreRafRef.current = window.requestAnimationFrame(() => {
         pausedViewportRestoreRafRef.current = null;
-        if (terminalRef.current !== term || shouldAutoFollow(followStateRef.current)) {
-          return;
-        }
-        const viewport = getViewportElement();
-        const savedScrollTop = pausedViewportScrollTopRef.current;
-        if (!viewport || savedScrollTop === null) {
-          return;
-        }
-        const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        const targetScrollTop = Math.max(0, Math.min(savedScrollTop, maxScrollTop));
-        const targetViewportY =
-          maxScrollTop <= 0 || term.buffer.active.baseY <= 0
-            ? 0
-            : Math.max(
-                0,
-                Math.min(
-                  term.buffer.active.baseY,
-                  Math.round((targetScrollTop / maxScrollTop) * term.buffer.active.baseY)
-                )
-              );
-        const currentScrollTop = viewport.scrollTop;
-        logTerminalDebug('viewportScrollTop:restore-check', {
-          reason,
-          currentScrollTop,
-          targetScrollTop,
-          targetViewportY,
-          currentViewportY: term.buffer.active.viewportY
-        }, term);
-        if (term.buffer.active.viewportY !== targetViewportY) {
-          logTerminalDebug('scrollToLine:write-preserve', {
-            targetLine: targetViewportY,
-            reason
-          }, term);
-          term.scrollToLine(targetViewportY);
-        }
-        const updatedScrollTop = viewport.scrollTop;
-        if (Math.abs(updatedScrollTop - targetScrollTop) <= 0.5) {
-          return;
-        }
-        viewport.scrollTop = targetScrollTop;
-        logTerminalDebug('viewportScrollTop:restore', {
-          reason,
-          previousScrollTop: updatedScrollTop,
-          targetScrollTop
-        }, term);
-        scheduleTerminalRefresh(term);
+        restorePausedViewport(term, reason);
       });
     },
-    [getViewportElement, logTerminalDebug, scheduleTerminalRefresh]
+    [restorePausedViewport]
   );
 
   const pauseFollowOutput = useCallback(() => {
@@ -1042,10 +1050,28 @@ function TerminalPanelComponent({
       terminalRef.current = term;
       writeQueueRef.current.setSink({
         write: (chunk, done) => {
+          const autoFollow = shouldAutoFollow(followStateRef.current);
+          if (!autoFollow && !bulkWritingRef.current) {
+            let promotedPendingPausedCapture = false;
+            if (pausedViewportCaptureRafRef.current !== null) {
+              window.cancelAnimationFrame(pausedViewportCaptureRafRef.current);
+              pausedViewportCaptureRafRef.current = null;
+              promotedPendingPausedCapture = true;
+            }
+            if (pausedViewportRestoreRafRef.current === null) {
+              if (promotedPendingPausedCapture || pausedViewportScrollTopRef.current === null) {
+                capturePausedViewportScrollTop(
+                  promotedPendingPausedCapture ? 'write-before-promote-pending-capture' : 'write-before',
+                  term
+                );
+              }
+            }
+          }
           isWritingRef.current = true;
           logTerminalDebug('write:start', {
             chunkLength: chunk.length,
-            bulkWriting: bulkWritingRef.current
+            bulkWriting: bulkWritingRef.current,
+            autoFollow
           }, term);
           term.write(chunk, () => {
             isWritingRef.current = false;
@@ -1184,6 +1210,62 @@ function TerminalPanelComponent({
       };
       fitWithReflowRef.current = fitWithReflow;
 
+      const runDeferredFitWithReflow = (reason: string) => {
+        let promotedPendingPausedCapture = false;
+        const preserveViewport = !shouldAutoFollow(followStateRef.current);
+        if (preserveViewport && pausedViewportCaptureRafRef.current !== null) {
+          window.cancelAnimationFrame(pausedViewportCaptureRafRef.current);
+          pausedViewportCaptureRafRef.current = null;
+          promotedPendingPausedCapture = true;
+        }
+        if (preserveViewport && (promotedPendingPausedCapture || pausedViewportScrollTopRef.current === null)) {
+          capturePausedViewportScrollTop(
+            promotedPendingPausedCapture ? `${reason}-promote-pending-capture` : `${reason}-before`,
+            term
+          );
+        }
+        const scrollbackOffset = preserveViewport
+          ? captureScrollbackOffset(term, reason)
+          : 0;
+        const pausedViewportScrollTop = preserveViewport ? pausedViewportScrollTopRef.current : null;
+        logTerminalDebug('fit:deferred-reflow-start', {
+          reason,
+          preserveViewport,
+          scrollbackOffset,
+          pausedViewportScrollTop
+        }, term);
+
+        fitWithReflow();
+
+        if (!preserveViewport) {
+          return;
+        }
+        pausedViewportScrollTopRef.current = pausedViewportScrollTop;
+        const targetLine = Math.max(0, term.buffer.active.baseY - scrollbackOffset);
+        logTerminalDebug('scrollToLine:deferred-fit-preserve', {
+          reason,
+          targetLine,
+          scrollbackOffset,
+          pausedViewportScrollTop
+        }, term);
+        term.scrollToLine(targetLine);
+        followStateRef.current = {
+          mode: 'pausedByUser',
+          viewportY: term.buffer.active.viewportY,
+          baseY: term.buffer.active.baseY
+        };
+        logTerminalDebug('follow:deferred-fit-preserve', {
+          reason
+        }, term);
+        syncFollowOutputPaused(true);
+        if (pausedViewportScrollTop === null) {
+          schedulePausedViewportCapture(term, reason);
+        } else if (!restorePausedViewport(term, reason)) {
+          schedulePausedViewportRestore(term, reason);
+        }
+        scheduleTerminalRefresh(term);
+      };
+
       const finalizeTerminalReplay = () => {
         if (terminalRef.current !== term) {
           return;
@@ -1206,12 +1288,14 @@ function TerminalPanelComponent({
         fitWithReflow();
 
         if (pendingRepairState?.preserveViewport) {
+          pausedViewportScrollTopRef.current = pendingRepairState.pausedViewportScrollTop;
           // Preserve the user's relative distance from the bottom of the scrollback.
           // This is only approximate if the replayed terminal wraps differently after reflow.
           const targetLine = Math.max(0, term.buffer.active.baseY - pendingRepairState.scrollbackOffset);
           logTerminalDebug('scrollToLine:replay-preserve', {
             targetLine,
-            scrollbackOffset: pendingRepairState.scrollbackOffset
+            scrollbackOffset: pendingRepairState.scrollbackOffset,
+            pausedViewportScrollTop: pendingRepairState.pausedViewportScrollTop
           }, term);
           term.scrollToLine(targetLine);
           followStateRef.current = {
@@ -1250,14 +1334,14 @@ function TerminalPanelComponent({
         if (terminalRef.current !== term) {
           return;
         }
-        fitWithReflow();
+        runDeferredFitWithReflow('mount-raf');
       });
       if ('fonts' in document) {
         void (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready.then(() => {
           if (terminalRef.current !== term) {
             return;
           }
-          fitWithReflow();
+          runDeferredFitWithReflow('mount-fonts-ready');
         });
         // Explicitly wait for SF Mono so xterm's char-measure element gets correct metrics.
         // fonts.ready can resolve before the specific font is measurable on cold start.
@@ -1268,21 +1352,21 @@ function TerminalPanelComponent({
             if (terminalRef.current !== term) {
               return;
             }
-            fitWithReflow();
+            runDeferredFitWithReflow('mount-fonts-load');
           });
       }
       window.setTimeout(() => {
         if (terminalRef.current !== term) {
           return;
         }
-        fitWithReflow();
+        runDeferredFitWithReflow('mount-timeout-100');
       }, 100);
       // Second deferred fit for slow Tauri window-restore on first launch.
       window.setTimeout(() => {
         if (terminalRef.current !== term) {
           return;
         }
-        fitWithReflow();
+        runDeferredFitWithReflow('mount-timeout-500');
       }, 500);
 
       if (initialContent.length > 0) {
@@ -1578,6 +1662,7 @@ function TerminalPanelComponent({
     }
   }, [
     armUserViewportInteraction,
+    capturePausedViewportScrollTop,
     captureScrollbackOffset,
     clearPausedViewportScrollTop,
     fallback,
@@ -1941,12 +2026,14 @@ function TerminalPanelComponent({
     const preserveViewport = !shouldAutoFollow(followStateRef.current);
     pendingRepairStateRef.current = {
       preserveViewport,
+      pausedViewportScrollTop: preserveViewport ? pausedViewportScrollTopRef.current : null,
       scrollbackOffset: preserveViewport
         ? captureScrollbackOffset(term, 'repair-request')
         : 0
     };
     logTerminalDebug('repair:request', {
       preserveViewport,
+      pausedViewportScrollTop: pendingRepairStateRef.current.pausedViewportScrollTop,
       scrollbackOffset: pendingRepairStateRef.current.scrollbackOffset
     }, term);
     clearPendingWrites();

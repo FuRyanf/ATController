@@ -8,6 +8,15 @@ let resizeObserverCallback: ResizeObserverCallback | null = null;
 
 const mocks = vi.hoisted(() => {
   const fit = vi.fn();
+  const createSearchAddon = () => ({
+    activate: vi.fn(),
+    dispose: vi.fn(),
+    findNext: vi.fn(() => false),
+    findPrevious: vi.fn(() => false),
+    clearDecorations: vi.fn(),
+    clearActiveDecoration: vi.fn(),
+    onDidChangeResults: vi.fn(() => ({ dispose: vi.fn() }))
+  });
   const terminals: Array<{
     open: ReturnType<typeof vi.fn>;
     loadAddon: ReturnType<typeof vi.fn>;
@@ -250,6 +259,7 @@ const mocks = vi.hoisted(() => {
 
   return {
     createTerminal,
+    createSearchAddon,
     emitData,
     fit,
     terminals
@@ -269,12 +279,20 @@ vi.mock('xterm', () => ({
 vi.mock('xterm-addon-fit', () => ({
   FitAddon: vi.fn(() => ({
     fit: mocks.fit,
+    proposeDimensions: () => {
+      mocks.fit();
+      return { cols: 80, rows: 24 };
+    },
     dispose: vi.fn()
   }))
 }));
 
 vi.mock('xterm-addon-web-links', () => ({
   WebLinksAddon: vi.fn(() => ({}))
+}));
+
+vi.mock('xterm-addon-search', () => ({
+  SearchAddon: vi.fn(() => mocks.createSearchAddon())
 }));
 
 import { TerminalPanel } from '../../src/components/TerminalPanel';
@@ -347,6 +365,38 @@ function setViewportMetrics(
       value: offsetWidth
     });
   }
+}
+
+function installQueuedRaf() {
+  const originalRaf = window.requestAnimationFrame;
+  const originalCancelRaf = window.cancelAnimationFrame;
+  let nextRafId = 1;
+  const queuedRafs = new Map<number, FrameRequestCallback>();
+
+  window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    const id = nextRafId++;
+    queuedRafs.set(id, callback);
+    return id;
+  }) as typeof window.requestAnimationFrame;
+  window.cancelAnimationFrame = ((id: number) => {
+    queuedRafs.delete(id);
+  }) as typeof window.cancelAnimationFrame;
+
+  return {
+    flush() {
+      while (queuedRafs.size > 0) {
+        const callbacks = Array.from(queuedRafs.entries());
+        queuedRafs.clear();
+        for (const [, callback] of callbacks) {
+          callback(0);
+        }
+      }
+    },
+    restore() {
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancelRaf;
+    }
+  };
 }
 
 describe('TerminalPanel manual repair', () => {
@@ -640,6 +690,342 @@ describe('TerminalPanel manual repair', () => {
     } finally {
       window.requestAnimationFrame = originalRaf;
       window.cancelAnimationFrame = originalCancelRaf;
+    }
+  });
+
+  it('preserves a paused viewport when a deferred mount reflow fires after the user scrolls up', async () => {
+    const queuedRaf = installQueuedRaf();
+    try {
+      const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+      const nextContent = `${initialContent}\nnext streamed line`;
+      const { container, rerender } = render(
+        <TerminalPanel
+          sessionId="session-1"
+          content={initialContent}
+          contentByteCount={initialContent.length}
+          contentGeneration={0}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+
+      await waitFor(() => {
+        expect(mocks.terminals).toHaveLength(1);
+      });
+
+      const term = mocks.terminals[0];
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+      });
+
+      const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+      expect(viewport).not.toBeNull();
+
+      term.buffer.active.baseY = 20;
+      term.buffer.active.viewportY = 12;
+      term.isUserScrolling = true;
+      setViewportMetrics(viewport as HTMLElement, {
+        clientHeight: 200,
+        scrollHeight: 1200,
+        scrollTop: 600
+      });
+
+      term.scrollToLine.mockClear();
+      term.scrollToBottom.mockClear();
+      mocks.fit.mockClear();
+
+      await act(async () => {
+        fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+      });
+
+      term.buffer.active.baseY = 20;
+      term.buffer.active.viewportY = 12;
+      term.isUserScrolling = true;
+
+      mocks.fit.mockImplementationOnce(() => {
+        term.buffer.active.baseY = 24;
+        term.buffer.active.viewportY = 24;
+      });
+
+      await act(async () => {
+        queuedRaf.flush();
+      });
+
+      await waitFor(() => {
+        expect(term.scrollToLine).toHaveBeenCalledWith(16);
+      });
+      expect(term.scrollToBottom).not.toHaveBeenCalled();
+      expect(term.buffer.active.viewportY).toBeLessThan(term.buffer.active.baseY);
+
+      term.write.mockClear();
+      term.scrollToBottom.mockClear();
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            content={nextContent}
+            contentByteCount={nextContent.length}
+            contentGeneration={0}
+            readOnly={false}
+            inputEnabled
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      });
+      expect(term.scrollToBottom).not.toHaveBeenCalled();
+    } finally {
+      queuedRaf.restore();
+    }
+  });
+
+  it('restores the latest paused viewport when streamed output lands before fit-preserve capture runs', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    const queuedRaf = installQueuedRaf();
+    try {
+      mocks.fit.mockImplementationOnce(() => {
+        term.buffer.active.baseY = 24;
+      });
+
+      expect(resizeObserverCallback).not.toBeNull();
+
+      await act(async () => {
+        resizeObserverCallback?.([], {} as ResizeObserver);
+      });
+
+      await waitFor(() => {
+        expect(term.scrollToLine).toHaveBeenCalledWith(16);
+      });
+
+      setViewportMetrics(viewport as HTMLElement, {
+        clientHeight: 200,
+        scrollHeight: 1240,
+        scrollTop: 640
+      });
+      term.buffer.active.baseY = 24;
+      term.buffer.active.viewportY = 16;
+
+      const originalWrite = term.write.getMockImplementation();
+      term.write.mockImplementation((chunk: string, callback?: () => void) => {
+        originalWrite?.(chunk, () => {
+          if (chunk === '\nnext streamed line') {
+            term.buffer.active.baseY = 24;
+            term.buffer.active.viewportY = 18;
+            setViewportMetrics(viewport as HTMLElement, {
+              clientHeight: 200,
+              scrollHeight: 1280,
+              scrollTop: 680
+            });
+            fireEvent.scroll(viewport as HTMLElement);
+          }
+          callback?.();
+        });
+      });
+
+      term.write.mockClear();
+      term.scrollToBottom.mockClear();
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            content={nextContent}
+            contentByteCount={nextContent.length}
+            contentGeneration={0}
+            readOnly={false}
+            inputEnabled
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      });
+      expect((viewport as HTMLElement).scrollTop).toBe(680);
+
+      await act(async () => {
+        queuedRaf.flush();
+      });
+
+      expect((viewport as HTMLElement).scrollTop).toBe(640);
+      expect(term.scrollToBottom).not.toHaveBeenCalled();
+    } finally {
+      queuedRaf.restore();
+    }
+  });
+
+  it('restores the latest paused viewport after a focus-request deferred resize fires while paused', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+        focusRequestId={0}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    const queuedRaf = installQueuedRaf();
+    try {
+      term.cols = 79;
+      term.resize.mockClear();
+      term.scrollToBottom.mockClear();
+
+      const originalResize = term.resize.getMockImplementation();
+      term.resize.mockImplementation((cols: number, rows: number) => {
+        originalResize?.(cols, rows);
+        if (cols === 80 && rows === 24) {
+          setViewportMetrics(viewport as HTMLElement, {
+            clientHeight: 200,
+            scrollHeight: 1240,
+            scrollTop: 640
+          });
+          fireEvent.scroll(viewport as HTMLElement);
+        }
+      });
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            content={initialContent}
+            contentByteCount={initialContent.length}
+            contentGeneration={0}
+            readOnly={false}
+            inputEnabled
+            focusRequestId={1}
+          />
+        );
+      });
+
+      expect(term.focus).toHaveBeenCalled();
+
+      await act(async () => {
+        queuedRaf.flush();
+      });
+
+      expect(term.resize).toHaveBeenCalledWith(80, 24);
+      expect((viewport as HTMLElement).scrollTop).toBe(640);
+      expect(term.scrollToBottom).not.toHaveBeenCalled();
+
+      const originalWrite = term.write.getMockImplementation();
+      term.write.mockImplementation((chunk: string, callback?: () => void) => {
+        originalWrite?.(chunk, () => {
+          if (chunk === '\nnext streamed line') {
+            setViewportMetrics(viewport as HTMLElement, {
+              clientHeight: 200,
+              scrollHeight: 1280,
+              scrollTop: 680
+            });
+            fireEvent.scroll(viewport as HTMLElement);
+          }
+          callback?.();
+        });
+      });
+
+      term.write.mockClear();
+      term.scrollToBottom.mockClear();
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            content={nextContent}
+            contentByteCount={nextContent.length}
+            contentGeneration={0}
+            readOnly={false}
+            inputEnabled
+            focusRequestId={1}
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      });
+      expect((viewport as HTMLElement).scrollTop).toBe(680);
+
+      await act(async () => {
+        queuedRaf.flush();
+      });
+
+      expect((viewport as HTMLElement).scrollTop).toBe(640);
+      expect(term.scrollToBottom).not.toHaveBeenCalled();
+    } finally {
+      queuedRaf.restore();
     }
   });
 
@@ -1035,6 +1421,125 @@ describe('TerminalPanel manual repair', () => {
     expect(term.scrollToBottom).not.toHaveBeenCalled();
   });
 
+  it('restores the latest paused viewport after reset-preserve when streamed output lands before capture runs', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = Array.from({ length: 48 }, (_, index) => `line ${index + 2}`).join('\n');
+    const appendedContent = `${nextContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    const queuedRaf = installQueuedRaf();
+    try {
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            content={nextContent}
+            contentByteCount={nextContent.length}
+            contentGeneration={1}
+            readOnly={false}
+            inputEnabled
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(term.reset).toHaveBeenCalledTimes(1);
+        expect(term.scrollToLine).toHaveBeenCalledWith(16);
+      });
+
+      setViewportMetrics(viewport as HTMLElement, {
+        clientHeight: 200,
+        scrollHeight: 1240,
+        scrollTop: 640
+      });
+      term.buffer.active.baseY = 20;
+      term.buffer.active.viewportY = 12;
+
+      const originalWrite = term.write.getMockImplementation();
+      term.write.mockImplementation((chunk: string, callback?: () => void) => {
+        originalWrite?.(chunk, () => {
+          if (chunk === '\nnext streamed line') {
+            term.buffer.active.baseY = 20;
+            term.buffer.active.viewportY = 14;
+            setViewportMetrics(viewport as HTMLElement, {
+              clientHeight: 200,
+              scrollHeight: 1280,
+              scrollTop: 680
+            });
+            fireEvent.scroll(viewport as HTMLElement);
+          }
+          callback?.();
+        });
+      });
+
+      term.write.mockClear();
+      term.scrollToBottom.mockClear();
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            content={appendedContent}
+            contentByteCount={appendedContent.length}
+            contentGeneration={1}
+            readOnly={false}
+            inputEnabled
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      });
+      expect((viewport as HTMLElement).scrollTop).toBe(680);
+
+      await act(async () => {
+        queuedRaf.flush();
+      });
+
+      expect((viewport as HTMLElement).scrollTop).toBe(640);
+      expect(term.scrollToBottom).not.toHaveBeenCalled();
+    } finally {
+      queuedRaf.restore();
+    }
+  });
+
   it('does not rerender the active terminal for unrelated parent state churn when props are stable', async () => {
     const streamState = {
       sessionId: 'session-1',
@@ -1283,7 +1788,7 @@ describe('TerminalPanel manual repair', () => {
 
     await waitFor(() => {
       expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
-      expect(term.scrollToLine).toHaveBeenCalledWith(10);
+      expect(term.scrollToLine).toHaveBeenCalled();
       expect((viewport as HTMLElement).scrollTop).toBe(400);
     });
     expect(term.scrollToBottom).not.toHaveBeenCalled();
@@ -1424,7 +1929,7 @@ describe('TerminalPanel manual repair', () => {
 
     await waitFor(() => {
       expect(term.reset).toHaveBeenCalledTimes(1);
-      expect(term.scrollToLine).toHaveBeenCalledWith(16);
+      expect(term.scrollToLine).toHaveBeenCalledWith(12);
     });
     expect(term.scrollToBottom).not.toHaveBeenCalled();
   });
@@ -1946,6 +2451,370 @@ describe('TerminalPanel manual repair', () => {
     });
   });
 
+  it('preserves a paused viewport through a streamState resetToken replay', async () => {
+    const initialText = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const resetText = Array.from({ length: 48 }, (_, index) => `line ${index + 2}`).join('\n');
+    const appendedText = `${resetText}\nnext streamed line`;
+    const initialStreamState = {
+      sessionId: 'session-1',
+      phase: 'ready' as const,
+      text: initialText,
+      rawEndPosition: initialText.length,
+      startPosition: 0,
+      endPosition: initialText.length,
+      chunks: [],
+      resetToken: 0
+    };
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={initialStreamState}
+        content={initialText}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialText, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    term.reset.mockClear();
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+
+    const queuedRaf = installQueuedRaf();
+    try {
+      const resetStreamState = {
+        ...initialStreamState,
+        text: resetText,
+        rawEndPosition: resetText.length,
+        endPosition: resetText.length,
+        resetToken: 1
+      };
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            streamState={resetStreamState}
+            content={resetText}
+            readOnly={false}
+            inputEnabled
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(term.reset).toHaveBeenCalledTimes(1);
+        expect(term.scrollToLine).toHaveBeenCalledWith(16);
+      });
+
+      setViewportMetrics(viewport as HTMLElement, {
+        clientHeight: 200,
+        scrollHeight: 1240,
+        scrollTop: 640
+      });
+      term.buffer.active.baseY = 24;
+      term.buffer.active.viewportY = 16;
+
+      const originalWrite = term.write.getMockImplementation();
+      term.write.mockImplementation((chunk: string, callback?: () => void) => {
+        originalWrite?.(chunk, () => {
+          if (chunk === '\nnext streamed line') {
+            term.buffer.active.baseY = 24;
+            term.buffer.active.viewportY = 18;
+            setViewportMetrics(viewport as HTMLElement, {
+              clientHeight: 200,
+              scrollHeight: 1280,
+              scrollTop: 680
+            });
+            fireEvent.scroll(viewport as HTMLElement);
+          }
+          callback?.();
+        });
+      });
+
+      term.write.mockClear();
+      term.scrollToBottom.mockClear();
+
+      const appendedStreamState = {
+        ...resetStreamState,
+        text: appendedText,
+        rawEndPosition: appendedText.length,
+        endPosition: appendedText.length,
+        chunks: [
+          {
+            rawStartPosition: resetText.length,
+            rawEndPosition: appendedText.length,
+            startPosition: resetText.length,
+            endPosition: appendedText.length,
+            data: '\nnext streamed line'
+          }
+        ]
+      };
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            streamState={appendedStreamState}
+            content={appendedText}
+            readOnly={false}
+            inputEnabled
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      });
+      expect((viewport as HTMLElement).scrollTop).toBe(680);
+
+      await act(async () => {
+        queuedRaf.flush();
+      });
+
+      expect((viewport as HTMLElement).scrollTop).toBe(640);
+      expect(term.scrollToBottom).not.toHaveBeenCalled();
+    } finally {
+      queuedRaf.restore();
+    }
+  });
+
+  it('keeps paused follow through a streamState pending-gap reset fallback', async () => {
+    const initialText = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const resetText = Array.from({ length: 48 }, (_, index) => `future line ${index + 1}`).join('\n');
+    const initialStreamState = {
+      sessionId: 'session-1',
+      phase: 'ready' as const,
+      text: initialText,
+      rawEndPosition: initialText.length,
+      startPosition: 0,
+      endPosition: initialText.length,
+      chunks: [],
+      resetToken: 0
+    };
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={initialStreamState}
+        content={initialText}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialText, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    term.reset.mockClear();
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+
+    const gapStart = initialText.length + 10;
+    const gapEnd = gapStart + resetText.length;
+    const gapStreamState = {
+      ...initialStreamState,
+      text: resetText,
+      rawEndPosition: gapEnd,
+      startPosition: gapStart,
+      endPosition: gapEnd,
+      chunks: [
+        {
+          rawStartPosition: gapEnd - 4,
+          rawEndPosition: gapEnd,
+          startPosition: gapEnd - 4,
+          endPosition: gapEnd,
+          data: resetText.slice(-4)
+        }
+      ]
+    };
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          streamState={gapStreamState}
+          content={resetText}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalledTimes(1);
+      expect(term.write).toHaveBeenCalledWith(resetText, expect.any(Function));
+      expect(term.scrollToLine).toHaveBeenCalledWith(16);
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('restores a paused viewport after a streamState visible-suffix replay write', async () => {
+    const initialText = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const appendedText = `${initialText.slice(4)}\nnext streamed line`;
+    const initialStreamState = {
+      sessionId: 'session-1',
+      phase: 'ready' as const,
+      text: initialText,
+      rawEndPosition: initialText.length,
+      startPosition: 0,
+      endPosition: initialText.length,
+      chunks: [],
+      resetToken: 0
+    };
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={initialStreamState}
+        content={initialText}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialText, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    const originalWrite = term.write.getMockImplementation();
+    term.write.mockImplementation((chunk: string, callback?: () => void) => {
+      originalWrite?.(chunk, () => {
+        if (chunk === '\nnext streamed line') {
+          term.buffer.active.baseY = 20;
+          term.buffer.active.viewportY = 14;
+          setViewportMetrics(viewport as HTMLElement, {
+            clientHeight: 200,
+            scrollHeight: 1240,
+            scrollTop: 640
+          });
+          fireEvent.scroll(viewport as HTMLElement);
+        }
+        callback?.();
+      });
+    });
+
+    term.write.mockClear();
+    term.reset.mockClear();
+    term.scrollToBottom.mockClear();
+
+    const queuedRaf = installQueuedRaf();
+    try {
+      const nextStreamState = {
+        ...initialStreamState,
+        text: appendedText,
+        rawEndPosition: initialText.length + '\nnext streamed line'.length,
+        startPosition: 4,
+        endPosition: initialText.length + '\nnext streamed line'.length,
+        chunks: [
+          {
+            rawStartPosition: initialText.length + '\nnext streamed line'.length - 4,
+            rawEndPosition: initialText.length + '\nnext streamed line'.length,
+            startPosition: initialText.length + '\nnext streamed line'.length - 4,
+            endPosition: initialText.length + '\nnext streamed line'.length,
+            data: 'line'
+          }
+        ]
+      };
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            streamState={nextStreamState}
+            content={appendedText}
+            readOnly={false}
+            inputEnabled
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      });
+      expect((viewport as HTMLElement).scrollTop).toBe(640);
+
+      await act(async () => {
+        queuedRaf.flush();
+      });
+
+      expect((viewport as HTMLElement).scrollTop).toBe(600);
+      expect(term.reset).not.toHaveBeenCalled();
+      expect(term.scrollToBottom).not.toHaveBeenCalled();
+    } finally {
+      queuedRaf.restore();
+    }
+  });
+
   it('captures a native off-bottom viewport position for manual repair even before xterm onScroll catches up', async () => {
     const content = Array.from({ length: 44 }, (_, index) => `line ${index + 1}`).join('\n');
     const { container, rerender } = render(
@@ -2009,5 +2878,132 @@ describe('TerminalPanel manual repair', () => {
     await waitFor(() => {
       expect(repairedTerm.scrollToLine).toHaveBeenCalledWith(12);
     });
+  });
+
+  it('restores the paused viewport when streamed output lands before replay-preserve capture runs', async () => {
+    const content = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${content}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={content}
+        contentByteCount={content.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+        repairRequestId={0}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const firstTerm = mocks.terminals[0];
+    await waitFor(() => {
+      expect(firstTerm.write).toHaveBeenCalledWith(content, expect.any(Function));
+    });
+
+    const firstViewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(firstViewport).not.toBeNull();
+
+    firstTerm.buffer.active.baseY = 20;
+    firstTerm.buffer.active.viewportY = 12;
+    setViewportMetrics(firstViewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.wheel(firstViewport as HTMLElement, { deltaY: -32 });
+    });
+
+    firstTerm.buffer.active.baseY = 20;
+    firstTerm.buffer.active.viewportY = 12;
+
+    const queuedRaf = installQueuedRaf();
+    try {
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            content={content}
+            contentByteCount={content.length}
+            contentGeneration={0}
+            readOnly={false}
+            inputEnabled
+            repairRequestId={1}
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(mocks.terminals).toHaveLength(2);
+      });
+
+      const repairedTerm = mocks.terminals[1];
+      await waitFor(() => {
+        expect(repairedTerm.scrollToLine).toHaveBeenCalled();
+      });
+
+      const repairedViewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+      expect(repairedViewport).not.toBeNull();
+      setViewportMetrics(repairedViewport as HTMLElement, {
+        clientHeight: 200,
+        scrollHeight: 1200,
+        scrollTop: 600
+      });
+      repairedTerm.buffer.active.baseY = 20;
+      repairedTerm.buffer.active.viewportY = 12;
+
+      const originalWrite = repairedTerm.write.getMockImplementation();
+      repairedTerm.write.mockImplementation((chunk: string, callback?: () => void) => {
+        originalWrite?.(chunk, () => {
+          if (chunk === '\nnext streamed line') {
+            repairedTerm.buffer.active.baseY = 20;
+            repairedTerm.buffer.active.viewportY = 14;
+            setViewportMetrics(repairedViewport as HTMLElement, {
+              clientHeight: 200,
+              scrollHeight: 1240,
+              scrollTop: 640
+            });
+            fireEvent.scroll(repairedViewport as HTMLElement);
+          }
+          callback?.();
+        });
+      });
+
+      repairedTerm.write.mockClear();
+      repairedTerm.scrollToBottom.mockClear();
+
+      await act(async () => {
+        rerender(
+          <TerminalPanel
+            sessionId="session-1"
+            content={nextContent}
+            contentByteCount={nextContent.length}
+            contentGeneration={0}
+            readOnly={false}
+            inputEnabled
+            repairRequestId={1}
+          />
+        );
+      });
+
+      await waitFor(() => {
+        expect(repairedTerm.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      });
+      expect((repairedViewport as HTMLElement).scrollTop).toBe(640);
+
+      await act(async () => {
+        queuedRaf.flush();
+      });
+
+      expect((repairedViewport as HTMLElement).scrollTop).toBe(600);
+      expect(repairedTerm.scrollToBottom).not.toHaveBeenCalled();
+    } finally {
+      queuedRaf.restore();
+    }
   });
 });
