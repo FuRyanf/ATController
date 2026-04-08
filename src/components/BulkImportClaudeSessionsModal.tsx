@@ -31,7 +31,15 @@ function projectStatusLabel(project: ImportableClaudeProject) {
 }
 
 function sessionTitle(session: ImportableClaudeSession) {
-  return session.summary?.trim() || session.firstPrompt?.trim() || 'Untitled Claude session';
+  return truncatePreview(session.summary?.trim() || session.firstPrompt?.trim() || 'Untitled Claude session', 110);
+}
+
+function truncatePreview(value: string, maxLength = 180) {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
 function sessionSubtitle(session: ImportableClaudeSession) {
@@ -40,7 +48,7 @@ function sessionSubtitle(session: ImportableClaudeSession) {
   if (!firstPrompt || firstPrompt === summary) {
     return null;
   }
-  return firstPrompt;
+  return truncatePreview(firstPrompt, 220);
 }
 
 function formatTimestamp(value?: string | null) {
@@ -205,8 +213,8 @@ export function BulkImportClaudeSessionsModal({
     }
     if (!includeAlreadyImported) {
       return daysBack === null
-        ? 'No importable projects are visible. Turn on "Include already imported" to show previously imported sessions.'
-        : `No importable projects are visible in the past ${daysBack} day${daysBack === 1 ? '' : 's'}. Turn on "Include already imported" or widen the range.`;
+        ? 'No importable projects are visible. Turn on "Show previously imported" to reveal recoverable sessions.'
+        : `No importable projects are visible in the past ${daysBack} day${daysBack === 1 ? '' : 's'}. Turn on "Show previously imported" or widen the range.`;
     }
     if (daysBack !== null) {
       return `No projects have visible sessions in the past ${daysBack} day${daysBack === 1 ? '' : 's'}.`;
@@ -285,7 +293,7 @@ export function BulkImportClaudeSessionsModal({
                 <span className="settings-switch-track" aria-hidden="true">
                   <span className="settings-switch-thumb" />
                 </span>
-                <span className="settings-switch-label">Include already imported</span>
+                <span className="settings-switch-label">Show previously imported</span>
               </button>
             </div>
           </div>
@@ -353,6 +361,7 @@ export function BulkImportClaudeSessionsModal({
                     ) : null}
                     {visibleSessions.map((session) => {
                       const alreadyImported = importedSet.has(session.sessionId);
+                      const recoverableImported = alreadyImported && !includeAlreadyImported;
                       const disabled = importing || !project.pathExists || alreadyImported;
                       const subtitle = sessionSubtitle(session);
                       const timestamp = formatTimestamp(session.modifiedAt ?? session.createdAt);
@@ -384,7 +393,7 @@ export function BulkImportClaudeSessionsModal({
                               <code>{session.sessionId}</code>
                               {session.gitBranch ? <span>{session.gitBranch}</span> : null}
                               {session.messageCount > 0 ? <span>{session.messageCount} msgs</span> : null}
-                              {alreadyImported ? <span>Already imported</span> : null}
+                              {alreadyImported ? <span>Recoverable import</span> : null}
                             </div>
                           </div>
                         </label>

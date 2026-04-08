@@ -736,4 +736,57 @@ describe('Workspace add flow', () => {
       expect(screen.queryByRole('dialog', { name: 'Bulk Import Claude Sessions' })).not.toBeInTheDocument();
     });
   });
+  it('reoffers an archived imported Claude session in bulk import so it can be recovered', async () => {
+    const user = userEvent.setup();
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne]);
+    mocks.api.listThreads.mockResolvedValueOnce([
+      {
+        id: 'thread-archived-import',
+        workspaceId: 'ws-added',
+        agentId: 'claude-code',
+        fullAccess: false,
+        enabledSkills: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        title: 'Archived import',
+        isArchived: true,
+        lastRunStatus: 'Idle',
+        lastRunStartedAt: null,
+        lastRunEndedAt: null,
+        claudeSessionId: '11111111-1111-1111-1111-111111111111',
+        lastResumeAt: null,
+        lastNewSessionAt: null
+      }
+    ]);
+    mocks.api.discoverImportableClaudeSessions.mockResolvedValueOnce([
+      {
+        path: '/tmp/workspace-added',
+        name: 'workspace-added',
+        pathExists: true,
+        workspaceId: 'ws-added',
+        workspaceName: 'workspace-added',
+        sessions: [
+          {
+            sessionId: '11111111-1111-1111-1111-111111111111',
+            summary: 'Recovered session',
+            firstPrompt: 'recover me please',
+            messageCount: 6,
+            createdAt: '2026-03-10T10:00:00.000Z',
+            modifiedAt: '2026-03-10T11:00:00.000Z',
+            gitBranch: 'feature/recover'
+          }
+        ]
+      }
+    ]);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    await user.click(await screen.findByRole('button', { name: 'Import Claude sessions' }));
+
+    await screen.findByRole('dialog', { name: 'Bulk Import Claude Sessions' });
+    expect(await screen.findByRole('checkbox', { name: /Recovered session/i })).toBeInTheDocument();
+    expect(screen.queryByText(/already imported/i)).not.toBeInTheDocument();
+  });
+
 });
