@@ -5565,7 +5565,7 @@ export default function App() {
           ...previousAttentionState,
           activeTurnStatus: 'running',
           activeTurnHasMeaningfulOutput: true,
-          activeTurnLastOutputAtMs: Math.max(previousAttentionState.activeTurnLastOutputAtMs ?? 0, completedAtMs)
+          activeTurnLastOutputAtMs: previousAttentionState.activeTurnLastOutputAtMs ?? completedAtMs
         }, {
           render: !isThreadVisibleToUser(threadId)
         });

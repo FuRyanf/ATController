@@ -1018,6 +1018,67 @@ describe('Left rail recency and sorting semantics', () => {
     expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
   });
 
+  it('does not resurface unread when structured completion arrives after the user already read the output', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      vi.setSystemTime(new Date('2026-02-22T10:00:00.000Z'));
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: 'new',
+        resumeSessionId: null,
+        turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
+        thread: mocks.getThread(params.threadId)
+      }));
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+      });
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+      });
+
+      await act(async () => {
+        vi.setSystemTime(new Date('2026-02-22T10:00:05.000Z'));
+      });
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: true,
+          completedAtMs: Date.now()
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+      });
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+      vi.useRealTimers();
+    }
+  });
+
   it('does not mark unread from control-only terminal chunks', async () => {
     const user = userEvent.setup();
     render(<App />);
