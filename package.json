@@ -1,7 +1,7 @@
 {
   "name": "atcontroller",
   "private": true,
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Native macOS desktop control plane for local Claude Code workflows.",
   "type": "module",
   "scripts": {
