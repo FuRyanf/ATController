@@ -198,6 +198,7 @@ function TerminalPanelComponent({
   const pausedViewportCaptureRafRef = useRef<number | null>(null);
   const pausedViewportRestoreRafRef = useRef<number | null>(null);
   const pausedViewportScrollTopRef = useRef<number | null>(null);
+  const pausedViewportScrollbackOffsetRef = useRef<number | null>(null);
   const scrollPauseCooldownRef = useRef(0);
   const streamRepairTimerRef = useRef<number | null>(null);
   const streamRepairEpochRef = useRef(0);
@@ -439,14 +440,19 @@ function TerminalPanelComponent({
 
   const clearPausedViewportScrollTop = useCallback(
     (reason: string, term: Terminal | null = terminalRef.current) => {
-      if (pausedViewportScrollTopRef.current === null) {
+      if (
+        pausedViewportScrollTopRef.current === null &&
+        pausedViewportScrollbackOffsetRef.current === null
+      ) {
         return;
       }
       logTerminalDebug('viewportScrollTop:clear', {
         reason,
-        scrollTop: pausedViewportScrollTopRef.current
+        scrollTop: pausedViewportScrollTopRef.current,
+        scrollbackOffset: pausedViewportScrollbackOffsetRef.current
       }, term);
       pausedViewportScrollTopRef.current = null;
+      pausedViewportScrollbackOffsetRef.current = null;
     },
     [logTerminalDebug]
   );
@@ -493,12 +499,58 @@ function TerminalPanelComponent({
     ]
   );
 
+  const estimateViewportScrollbackOffset = useCallback(
+    (term: Terminal, viewport: HTMLElement | null = getViewportElement()): number | null => {
+      if (!viewport) {
+        return null;
+      }
+      const baseY = term.buffer.active.baseY;
+      const clientHeight = viewport.clientHeight;
+      const scrollHeight = viewport.scrollHeight;
+      const scrollTop = viewport.scrollTop;
+      if (!Number.isFinite(baseY) || baseY <= 0) {
+        return 0;
+      }
+      if (!Number.isFinite(clientHeight) || !Number.isFinite(scrollHeight) || !Number.isFinite(scrollTop)) {
+        return null;
+      }
+      const maxScrollTop = scrollHeight - clientHeight;
+      if (maxScrollTop <= 0) {
+        return baseY > 0 ? null : 0;
+      }
+      const distanceFromBottomPx = Math.max(0, maxScrollTop - scrollTop);
+      return Math.max(0, Math.min(baseY, Math.round((distanceFromBottomPx / maxScrollTop) * baseY)));
+    },
+    [getViewportElement]
+  );
+
+  const captureScrollbackOffset = useCallback(
+    (term: Terminal, reason: string, viewport: HTMLElement | null = getViewportElement()) => {
+      const bufferOffset = Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY);
+      const domOffset = estimateViewportScrollbackOffset(term, viewport);
+      const scrollbackOffset = domOffset ?? bufferOffset;
+      logTerminalDebug('scrollbackOffset:capture', {
+        reason,
+        bufferOffset,
+        domOffset,
+        scrollbackOffset,
+        source: domOffset === null ? 'buffer' : 'dom'
+      }, term);
+      return scrollbackOffset;
+    },
+    [estimateViewportScrollbackOffset, getViewportElement, logTerminalDebug]
+  );
+
   const capturePausedViewportScrollTop = useCallback(
     (
       reason: string,
       term: Terminal | null = terminalRef.current,
       viewport: HTMLElement | null = getViewportElement()
     ) => {
+      if (!term) {
+        return;
+      }
+      pausedViewportScrollbackOffsetRef.current = captureScrollbackOffset(term, reason, viewport);
       if (!viewport) {
         return;
       }
@@ -507,10 +559,25 @@ function TerminalPanelComponent({
         reason,
         scrollTop: viewport.scrollTop,
         scrollHeight: viewport.scrollHeight,
-        clientHeight: viewport.clientHeight
+        clientHeight: viewport.clientHeight,
+        scrollbackOffset: pausedViewportScrollbackOffsetRef.current
       }, term);
     },
-    [getViewportElement, logTerminalDebug]
+    [captureScrollbackOffset, getViewportElement, logTerminalDebug]
+  );
+
+  const getPreservedScrollbackOffset = useCallback(
+    (term: Terminal, reason: string, viewport: HTMLElement | null = getViewportElement()) => {
+      if (!shouldAutoFollow(followStateRef.current) && pausedViewportScrollbackOffsetRef.current !== null) {
+        logTerminalDebug('scrollbackOffset:reuse', {
+          reason,
+          scrollbackOffset: pausedViewportScrollbackOffsetRef.current
+        }, term);
+        return pausedViewportScrollbackOffsetRef.current;
+      }
+      return captureScrollbackOffset(term, reason, viewport);
+    },
+    [captureScrollbackOffset, getViewportElement, logTerminalDebug]
   );
 
   const schedulePausedViewportCapture = useCallback(
@@ -618,48 +685,6 @@ function TerminalPanelComponent({
     syncFollowOutputPaused(true);
   }, [capturePausedViewportScrollTop, clearScheduledStreamRepair, logTerminalDebug, syncFollowOutputPaused]);
 
-  const estimateViewportScrollbackOffset = useCallback(
-    (term: Terminal, viewport: HTMLElement | null = getViewportElement()): number | null => {
-      if (!viewport) {
-        return null;
-      }
-      const baseY = term.buffer.active.baseY;
-      const clientHeight = viewport.clientHeight;
-      const scrollHeight = viewport.scrollHeight;
-      const scrollTop = viewport.scrollTop;
-      if (!Number.isFinite(baseY) || baseY <= 0) {
-        return 0;
-      }
-      if (!Number.isFinite(clientHeight) || !Number.isFinite(scrollHeight) || !Number.isFinite(scrollTop)) {
-        return null;
-      }
-      const maxScrollTop = scrollHeight - clientHeight;
-      if (maxScrollTop <= 0) {
-        return baseY > 0 ? null : 0;
-      }
-      const distanceFromBottomPx = Math.max(0, maxScrollTop - scrollTop);
-      return Math.max(0, Math.min(baseY, Math.round((distanceFromBottomPx / maxScrollTop) * baseY)));
-    },
-    [getViewportElement]
-  );
-
-  const captureScrollbackOffset = useCallback(
-    (term: Terminal, reason: string, viewport: HTMLElement | null = getViewportElement()) => {
-      const bufferOffset = Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY);
-      const domOffset = estimateViewportScrollbackOffset(term, viewport);
-      const scrollbackOffset = domOffset ?? bufferOffset;
-      logTerminalDebug('scrollbackOffset:capture', {
-        reason,
-        bufferOffset,
-        domOffset,
-        scrollbackOffset,
-        source: domOffset === null ? 'buffer' : 'dom'
-      }, term);
-      return scrollbackOffset;
-    },
-    [estimateViewportScrollbackOffset, getViewportElement, logTerminalDebug]
-  );
-
   const applyStreamRepair = useCallback(
     (term: Terminal) => {
       if (terminalRef.current !== term) {
@@ -667,7 +692,7 @@ function TerminalPanelComponent({
       }
       const preserveViewport = !shouldAutoFollow(followStateRef.current);
       const scrollbackOffset = preserveViewport
-        ? captureScrollbackOffset(term, 'stream-repair')
+        ? getPreservedScrollbackOffset(term, 'stream-repair')
         : 0;
       logTerminalDebug('streamRepair:apply', {
         preserveViewport,
@@ -695,7 +720,7 @@ function TerminalPanelComponent({
       scheduleTerminalRefresh(term);
     },
     [
-      captureScrollbackOffset,
+      getPreservedScrollbackOffset,
       logTerminalDebug,
       schedulePausedViewportCapture,
       scheduleTerminalRefresh,
@@ -846,7 +871,7 @@ function TerminalPanelComponent({
       }
       const preserveViewport = Boolean(options.preserveViewport);
       const scrollbackOffset = preserveViewport
-        ? captureScrollbackOffset(term, 'reset')
+        ? getPreservedScrollbackOffset(term, 'reset')
         : 0;
       logTerminalDebug('reset:start', {
         nextContentLength: nextContent.length,
@@ -914,7 +939,7 @@ function TerminalPanelComponent({
       });
     },
     [
-      captureScrollbackOffset,
+      getPreservedScrollbackOffset,
       clearPendingWrites,
       clearPausedViewportScrollTop,
       clearScheduledStreamRepair,
@@ -1134,7 +1159,7 @@ function TerminalPanelComponent({
       const fitPreservingViewport = () => {
         const preserveViewport = !shouldAutoFollow(followStateRef.current);
         const scrollbackOffset = preserveViewport
-          ? captureScrollbackOffset(term, 'fit-preserve')
+          ? getPreservedScrollbackOffset(term, 'fit-preserve')
           : 0;
         logTerminalDebug('fit:preserve-start', {
           preserveViewport,
@@ -1225,7 +1250,7 @@ function TerminalPanelComponent({
           );
         }
         const scrollbackOffset = preserveViewport
-          ? captureScrollbackOffset(term, reason)
+          ? getPreservedScrollbackOffset(term, reason)
           : 0;
         const pausedViewportScrollTop = preserveViewport ? pausedViewportScrollTopRef.current : null;
         logTerminalDebug('fit:deferred-reflow-start', {
@@ -1652,6 +1677,7 @@ function TerminalPanelComponent({
         userViewportCapturePendingRef.current = false;
         viewportPointerDownRef.current = false;
         pausedViewportScrollTopRef.current = null;
+        pausedViewportScrollbackOffsetRef.current = null;
         searchAddonRef.current = null;
         logTerminalDebug('panel:dispose', {}, term);
       };
@@ -1663,7 +1689,6 @@ function TerminalPanelComponent({
   }, [
     armUserViewportInteraction,
     capturePausedViewportScrollTop,
-    captureScrollbackOffset,
     clearPausedViewportScrollTop,
     fallback,
     estimateViewportScrollbackOffset,
@@ -1675,6 +1700,7 @@ function TerminalPanelComponent({
     queueWrite,
     resumeFollowOutput,
     clearScheduledStreamRepair,
+    getPreservedScrollbackOffset,
     schedulePausedViewportCapture,
     schedulePausedViewportRestore,
     scheduleStreamRepair,
@@ -2028,7 +2054,7 @@ function TerminalPanelComponent({
       preserveViewport,
       pausedViewportScrollTop: preserveViewport ? pausedViewportScrollTopRef.current : null,
       scrollbackOffset: preserveViewport
-        ? captureScrollbackOffset(term, 'repair-request')
+        ? getPreservedScrollbackOffset(term, 'repair-request')
         : 0
     };
     logTerminalDebug('repair:request', {
@@ -2041,7 +2067,7 @@ function TerminalPanelComponent({
     bulkWriteEpochRef.current += 1;
     streamRepairEpochRef.current += 1;
     setTerminalInstanceVersion((current) => current + 1);
-  }, [captureScrollbackOffset, clearPendingWrites, clearScheduledStreamRepair, logTerminalDebug, repairRequestId]);
+  }, [clearPendingWrites, clearScheduledStreamRepair, getPreservedScrollbackOffset, logTerminalDebug, repairRequestId]);
 
   const jumpToLatest = useCallback(() => {
     const term = terminalRef.current;
