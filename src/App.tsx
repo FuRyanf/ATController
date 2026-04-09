@@ -1917,6 +1917,17 @@ export default function App() {
       threadReadStateDirtyRef.current = true;
       const outputText = visibleOutputText ?? lastTerminalLogByThreadRef.current[threadId] ?? '';
       rememberThreadVisibleOutput(threadId, outputText, nextViewedAtMs);
+      const clearsUnread =
+        hasUnreadAttentionTurn(currentState) &&
+        !hasUnreadAttentionTurn({
+          ...currentState,
+          lastViewedTurnId: nextViewedTurnId,
+          lastViewedAtMs: nextViewedAtMs
+        });
+      const shouldPersistImmediately =
+        persistNow ||
+        nextViewedTurnId > currentState.lastViewedTurnId ||
+        clearsUnread;
       const nextState = commitThreadAttentionState(
         threadId,
         {
@@ -1925,11 +1936,11 @@ export default function App() {
           lastViewedAtMs: nextViewedAtMs
         },
         {
-          persistNow,
+          persistNow: shouldPersistImmediately,
           render: hasUnreadAttentionTurn(currentState) || nextViewedTurnId !== currentState.lastViewedTurnId
         }
       );
-      if (persistNow) {
+      if (shouldPersistImmediately) {
         flushThreadReadState();
       }
       return nextState;
@@ -2278,6 +2289,10 @@ export default function App() {
       flushThreadReadState();
       flushThreadAttentionState();
     };
+    const onPageHide = () => {
+      flushThreadReadState();
+      flushThreadAttentionState();
+    };
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         flushThreadReadState();
@@ -2285,6 +2300,7 @@ export default function App() {
       }
     };
     window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('pagehide', onPageHide);
     document.addEventListener('visibilitychange', onVisibilityChange);
     const id = window.setInterval(() => {
       flushThreadReadState();
@@ -2293,6 +2309,7 @@ export default function App() {
     return () => {
       window.clearInterval(id);
       window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       flushThreadReadState();
       flushThreadAttentionState();

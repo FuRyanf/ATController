@@ -1736,6 +1736,37 @@ describe('Left rail recency and sorting semantics', () => {
     expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
   });
 
+  it('persists visible selected-thread read state immediately without waiting for a flush timer', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+    });
+
+    expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      const attentionRaw = window.localStorage.getItem(THREAD_ATTENTION_STATE_V2_KEY) ?? '{}';
+      const attention = JSON.parse(attentionRaw) as Record<string, { lastViewedTurnId?: unknown }>;
+      expect(attention['thread-newer']).toMatchObject({ lastViewedTurnId: 1 });
+
+      const visibleGuardRaw = window.localStorage.getItem('atcontroller:visible-output-guard') ?? '{}';
+      const visibleGuard = JSON.parse(visibleGuardRaw) as Record<string, { tail?: unknown }>;
+      expect(visibleGuard['thread-newer']).toMatchObject({ tail: 'assistant output' });
+    });
+  });
+
   it('keeps a single terminal data subscription while run state changes', async () => {
     const user = userEvent.setup();
     render(<App />);
