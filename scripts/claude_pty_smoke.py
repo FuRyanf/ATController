@@ -77,6 +77,37 @@ def write_keys(fd: int, data: str) -> None:
     os.write(fd, data.encode("utf-8"))
 
 
+def is_run_state(text: str) -> bool:
+    normalized = normalize_text(text)
+    return (
+        "esc to interrupt" in normalized
+        or "inferring" in normalized
+        or "whatchamacalliting" in normalized
+        or "moseying" in normalized
+        or "frosting" in normalized
+        or "dilly-dallying" in normalized
+        or "reticulating" in normalized
+        or "press ctrl-c again to exit" in normalized
+        or normalized.count("❯") >= 2
+    )
+
+
+def wait_for_post_trust_output(fd: int, pid: int) -> Tuple[str, str]:
+    return wait_for(
+        fd,
+        lambda t: (
+            "? for shortcuts" in normalize_text(t)
+            or "welcome back" in normalize_text(t)
+            or "message from" in normalize_text(t)
+            or "tips for getting started" in normalize_text(t)
+            or "what can i help" in normalize_text(t)
+        ),
+        timeout=20,
+        label="post-trust prompt",
+        pid=pid,
+    )
+
+
 def main() -> int:
     claude = os.environ.get("CLAUDE_CLI_PATH") or shutil.which("claude")
     if not claude:
@@ -114,14 +145,8 @@ def main() -> int:
         collected_clean += clean
 
         if "quick safety check" in normalize_text(collected_clean):
-            write_keys(fd, "\r")
-            raw, clean = wait_for(
-                fd,
-                lambda t: "for shortcuts" in normalize_text(t) or "claude" in normalize_text(t),
-                timeout=20,
-                label="post-trust prompt",
-                pid=pid,
-            )
+            write_keys(fd, "1\r")
+            raw, clean = wait_for_post_trust_output(fd, pid)
             collected_raw += raw
             collected_clean += clean
 
@@ -132,42 +157,33 @@ def main() -> int:
         time.sleep(0.03)
         write_keys(fd, "\r")
 
-        try:
-            raw, clean = wait_for(
-                fd,
-                lambda t: (
-                    "esc to interrupt" in normalize_text(t)
-                    or "inferring" in normalize_text(t)
-                    or "whatchamacalliting" in normalize_text(t)
-                    or "moseying" in normalize_text(t)
-                    or "frosting" in normalize_text(t)
-                    or "dilly-dallying" in normalize_text(t)
-                    or "press ctrl-c again to exit" in normalize_text(t)
-                    or normalize_text(t).count("❯") >= 2
-                ),
-                timeout=25,
-                label="run state after submitting prompt",
-                pid=pid,
-            )
-        except RuntimeError:
-            # Some prompt states need one more Enter to trigger send.
-            write_keys(fd, "\r")
-            raw, clean = wait_for(
-                fd,
-                lambda t: (
-                    "esc to interrupt" in normalize_text(t)
-                    or "inferring" in normalize_text(t)
-                    or "whatchamacalliting" in normalize_text(t)
-                    or "moseying" in normalize_text(t)
-                    or "frosting" in normalize_text(t)
-                    or "dilly-dallying" in normalize_text(t)
-                    or "press ctrl-c again to exit" in normalize_text(t)
-                    or normalize_text(t).count("❯") >= 2
-                ),
-                timeout=25,
-                label="run state after fallback submit",
-                pid=pid,
-            )
+        run_state_error: RuntimeError | None = None
+        submit_steps = [
+            ("run state after submitting prompt", 25),
+            ("run state after fallback submit", 12),
+            ("run state after final fallback submit", 12),
+        ]
+        raw = ""
+        clean = ""
+        for index, (label, timeout) in enumerate(submit_steps):
+            try:
+                raw, clean = wait_for(
+                    fd,
+                    is_run_state,
+                    timeout=timeout,
+                    label=label,
+                    pid=pid,
+                )
+                run_state_error = None
+                break
+            except RuntimeError as error:
+                run_state_error = error
+                if index == len(submit_steps) - 1:
+                    raise
+                write_keys(fd, "\r")
+                time.sleep(0.05)
+        if run_state_error is not None:
+            raise run_state_error
         collected_raw += raw
         collected_clean += clean
 
