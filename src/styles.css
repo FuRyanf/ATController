@@ -990,14 +990,6 @@ body.shell-drawer-resizing {
   animation: pulse 1s ease-in-out infinite;
 }
 
-.thread-unread-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #4f7dff;
-  box-shadow: 0 0 0 2px rgba(79, 125, 255, 0.18);
-}
-
 .thread-last-status {
   color: #82a6ff;
   font-size: 11px;
@@ -3719,11 +3711,6 @@ html[data-theme='light'] .thread-item.active .thread-title {
 html[data-theme='light'] .thread-item.active .thread-time,
 html[data-theme='light'] .thread-item.active .thread-last-status {
   color: var(--accent-tint);
-}
-
-html[data-theme='light'] .thread-unread-dot {
-  background: var(--accent);
-  box-shadow: 0 0 0 2px rgba(31, 95, 224, 0.16);
 }
 
 html[data-theme='light'] .thread-delete-button {

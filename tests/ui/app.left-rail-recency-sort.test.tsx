@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const THREAD_ATTENTION_STATE_V2_KEY = 'atcontroller:thread-attention-v2';
+const THREAD_VISIBLE_OUTPUT_GUARD_KEY = 'atcontroller:visible-output-guard';
 
 function seedThreadAttentionState(stateByThread: Record<string, unknown>) {
   window.localStorage.setItem(THREAD_ATTENTION_STATE_V2_KEY, JSON.stringify(stateByThread));
@@ -533,7 +534,7 @@ describe('Left rail recency and sorting semantics', () => {
     });
   });
 
-  it('shows working spinner while generating and blue unread marker after completion on non-selected threads', async () => {
+  it('shows a working spinner while generating and then falls back to recency on non-selected threads', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -560,7 +561,7 @@ describe('Left rail recency and sorting semantics', () => {
     await waitFor(
       () => {
         expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       },
       { timeout: 2500 }
     );
@@ -580,12 +581,11 @@ describe('Left rail recency and sorting semantics', () => {
         activeTurnStartedAtMs: 2_000,
         activeTurnHasMeaningfulOutput: false,
         activeTurnLastOutputAtMs: null,
+        activeTurnSeenOutputAtMs: null,
         lastCompletedTurnIdWithOutput: 0,
         lastCompletedTurnStatus: null,
         lastCompletedTurnAtMs: null,
         lastCompletedTurnLastOutputAtMs: null,
-        lastViewedTurnId: 0,
-        lastViewedAtMs: null,
         lastNotifiedTurnId: 0,
         lastNotifiedTurnStatus: null
       }
@@ -639,12 +639,11 @@ describe('Left rail recency and sorting semantics', () => {
         activeTurnStartedAtMs: 2_000,
         activeTurnHasMeaningfulOutput: false,
         activeTurnLastOutputAtMs: null,
+        activeTurnSeenOutputAtMs: null,
         lastCompletedTurnIdWithOutput: 0,
         lastCompletedTurnStatus: null,
         lastCompletedTurnAtMs: null,
         lastCompletedTurnLastOutputAtMs: null,
-        lastViewedTurnId: 0,
-        lastViewedAtMs: null,
         lastNotifiedTurnId: 0,
         lastNotifiedTurnStatus: null
       }
@@ -761,9 +760,7 @@ describe('Left rail recency and sorting semantics', () => {
         });
       });
 
-      await waitFor(() => {
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
-      });
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     } finally {
       if (originalTerminalStartSession) {
         mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
@@ -772,7 +769,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('keeps unread when structured completion arrives before the final PTY chunk', async () => {
+  it('does not surface a completion marker when structured completion arrives before the final PTY chunk', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
@@ -813,16 +810,15 @@ describe('Left rail recency and sorting semantics', () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       });
 
       act(() => {
         mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
       });
 
-      await waitFor(() => {
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
-      });
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     } finally {
       if (originalTerminalStartSession) {
         mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
@@ -831,7 +827,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('does not duplicate unread or notifications when reconciliation is followed by the same completion event', async () => {
+  it('does not duplicate completion attention or notifications when reconciliation is followed by the same completion event', async () => {
     window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-older');
     window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
     seedThreadAttentionState({
@@ -841,12 +837,11 @@ describe('Left rail recency and sorting semantics', () => {
         activeTurnStartedAtMs: 2_000,
         activeTurnHasMeaningfulOutput: false,
         activeTurnLastOutputAtMs: null,
+        activeTurnSeenOutputAtMs: null,
         lastCompletedTurnIdWithOutput: 0,
         lastCompletedTurnStatus: null,
         lastCompletedTurnAtMs: null,
         lastCompletedTurnLastOutputAtMs: null,
-        lastViewedTurnId: 0,
-        lastViewedAtMs: null,
         lastNotifiedTurnId: 0,
         lastNotifiedTurnStatus: null
       }
@@ -925,7 +920,7 @@ describe('Left rail recency and sorting semantics', () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
         expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(1);
       });
 
@@ -940,7 +935,7 @@ describe('Left rail recency and sorting semantics', () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
         expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(1);
       });
     } finally {
@@ -1148,10 +1143,10 @@ describe('Left rail recency and sorting semantics', () => {
       mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
     });
 
-    await waitFor(
+      await waitFor(
       () => {
         expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       },
       { timeout: 2500 }
     );
@@ -1194,7 +1189,7 @@ describe('Left rail recency and sorting semantics', () => {
       await act(async () => {
         vi.advanceTimersByTime(1400);
       });
-      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: /Newer thread/i }));
       await waitFor(() => {
@@ -1283,7 +1278,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('fires an alert when a background thread first turns unread', async () => {
+  it('fires an alert when a background thread first completes offscreen', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
@@ -1311,7 +1306,7 @@ describe('Left rail recency and sorting semantics', () => {
         vi.advanceTimersByTime(1400);
       });
 
-      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledWith({
         threadTitle: 'Newer thread',
         status: 'Succeeded'
@@ -1321,16 +1316,13 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('mirrors unread thread count to the app badge and clears it once read', async () => {
+  it('does not mirror background completions to the app badge', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
       render(<App />);
 
       await screen.findByRole('button', { name: /Newer thread/i });
-      await waitFor(() => {
-        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(null);
-      });
       mocks.api.setAppBadgeCount.mockClear();
 
       await user.click(screen.getByRole('button', { name: 'submit-input' }));
@@ -1345,8 +1337,8 @@ describe('Left rail recency and sorting semantics', () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
-        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(1);
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).not.toHaveBeenCalled();
       });
 
       mocks.api.setAppBadgeCount.mockClear();
@@ -1354,14 +1346,14 @@ describe('Left rail recency and sorting semantics', () => {
       await user.click(screen.getByRole('button', { name: /Newer thread/i }));
       await waitFor(() => {
         expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
-        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(null);
+        expect(mocks.api.setAppBadgeCount).not.toHaveBeenCalled();
       });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('counts multiple unread threads in the app badge', async () => {
+  it('keeps the app badge cleared even when multiple background threads finish', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const baseMs = Date.parse('2026-02-22T10:00:00.000Z');
@@ -1398,7 +1390,7 @@ describe('Left rail recency and sorting semantics', () => {
         vi.advanceTimersByTime(1400);
       });
       await waitFor(() => {
-        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(1);
+        expect(mocks.api.setAppBadgeCount).not.toHaveBeenCalled();
       });
 
       mocks.api.setAppBadgeCount.mockClear();
@@ -1413,16 +1405,16 @@ describe('Left rail recency and sorting semantics', () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
-        expect(screen.getByTestId('thread-unread-thread-older')).toBeInTheDocument();
-        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(2);
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-older')).not.toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).not.toHaveBeenCalled();
       });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('marks a second identical reply as unread after a new prompt is submitted', async () => {
+  it('still alerts on a second identical reply after a new prompt is submitted', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
@@ -1450,7 +1442,7 @@ describe('Left rail recency and sorting semantics', () => {
         vi.advanceTimersByTime(1400);
       });
 
-      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: /Newer thread/i }));
       await waitFor(() => {
@@ -1468,14 +1460,14 @@ describe('Left rail recency and sorting semantics', () => {
         vi.advanceTimersByTime(1400);
       });
 
-      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('does not re-mark unread on terminal exit after unread has already been cleared', async () => {
+  it('does not surface a completion marker on terminal exit after background output', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -1494,7 +1486,7 @@ describe('Left rail recency and sorting semantics', () => {
     await waitFor(
       () => {
         expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       },
       { timeout: 2500 }
     );
@@ -1536,7 +1528,7 @@ describe('Left rail recency and sorting semantics', () => {
         vi.advanceTimersByTime(1400);
       });
 
-      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: /Newer thread/i }));
       await waitFor(() => {
@@ -1559,7 +1551,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('fires a failed alert when a background run exits before the idle unread timer fires', async () => {
+  it('fires a failed alert when a background run exits before the idle completion timer fires', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
@@ -1585,7 +1577,7 @@ describe('Left rail recency and sorting semantics', () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       });
       expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledWith({
         threadTitle: 'Newer thread',
@@ -1644,7 +1636,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('does not re-mark unread from shell prompt noise after the thread was already read', async () => {
+  it('does not surface a completion marker from shell prompt noise after the thread was already read', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
@@ -1665,7 +1657,7 @@ describe('Left rail recency and sorting semantics', () => {
       await act(async () => {
         vi.advanceTimersByTime(1400);
       });
-      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: /Newer thread/i }));
       await waitFor(() => {
@@ -1687,7 +1679,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('keeps unread cleared after relaunch when read state was persisted', async () => {
+  it('does not resurface completion attention after relaunch when visible output was already persisted', async () => {
     const user = userEvent.setup();
     const view = render(<App />);
 
@@ -1713,7 +1705,7 @@ describe('Left rail recency and sorting semantics', () => {
     await waitFor(
       () => {
         expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
-        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       },
       { timeout: 2500 }
     );
@@ -1724,9 +1716,15 @@ describe('Left rail recency and sorting semantics', () => {
     });
 
     await waitFor(() => {
-      const raw = window.localStorage.getItem('atcontroller:last-read-at') ?? '{}';
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      expect(typeof parsed['thread-newer']).toBe('number');
+      expect(window.localStorage.getItem('atcontroller:last-read-at')).toBeNull();
+
+      const attentionRaw = window.localStorage.getItem(THREAD_ATTENTION_STATE_V2_KEY) ?? '{}';
+      const attention = JSON.parse(attentionRaw) as Record<string, { activeTurnSeenOutputAtMs?: unknown }>;
+      expect(typeof attention['thread-newer']?.activeTurnSeenOutputAtMs).toBe('number');
+
+      const visibleGuardRaw = window.localStorage.getItem(THREAD_VISIBLE_OUTPUT_GUARD_KEY) ?? '{}';
+      const visibleGuard = JSON.parse(visibleGuardRaw) as Record<string, { tail?: unknown }>;
+      expect(visibleGuard['thread-newer']).toMatchObject({ tail: 'assistant output' });
     });
 
     view.unmount();
@@ -1758,10 +1756,10 @@ describe('Left rail recency and sorting semantics', () => {
 
     await waitFor(() => {
       const attentionRaw = window.localStorage.getItem(THREAD_ATTENTION_STATE_V2_KEY) ?? '{}';
-      const attention = JSON.parse(attentionRaw) as Record<string, { lastViewedTurnId?: unknown }>;
-      expect(attention['thread-newer']).toMatchObject({ lastViewedTurnId: 1 });
+      const attention = JSON.parse(attentionRaw) as Record<string, { activeTurnSeenOutputAtMs?: unknown }>;
+      expect(typeof attention['thread-newer']?.activeTurnSeenOutputAtMs).toBe('number');
 
-      const visibleGuardRaw = window.localStorage.getItem('atcontroller:visible-output-guard') ?? '{}';
+      const visibleGuardRaw = window.localStorage.getItem(THREAD_VISIBLE_OUTPUT_GUARD_KEY) ?? '{}';
       const visibleGuard = JSON.parse(visibleGuardRaw) as Record<string, { tail?: unknown }>;
       expect(visibleGuard['thread-newer']).toMatchObject({ tail: 'assistant output' });
     });

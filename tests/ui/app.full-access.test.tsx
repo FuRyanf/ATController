@@ -538,7 +538,7 @@ describe('Terminal launch flags', () => {
     });
   });
 
-  it('does not fire a task completion alert when the active thread finishes without becoming unread', async () => {
+  it('does not fire a task completion alert when the active thread finishes while already visible', async () => {
     const user = userEvent.setup();
 
     mocks.api.getSettings.mockResolvedValueOnce({
