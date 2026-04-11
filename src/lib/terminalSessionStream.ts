@@ -156,6 +156,24 @@ function buildVisibleChunk(
   };
 }
 
+function trimChunkToRawStart(chunk: TerminalStreamChunk, minRawStartPosition: number): TerminalStreamChunk | null {
+  if (chunk.rawEndPosition <= minRawStartPosition) {
+    return null;
+  }
+  if (chunk.rawStartPosition >= minRawStartPosition) {
+    return chunk;
+  }
+
+  const trimUnits = minRawStartPosition - chunk.rawStartPosition;
+  return {
+    rawStartPosition: minRawStartPosition,
+    rawEndPosition: chunk.rawEndPosition,
+    startPosition: chunk.startPosition,
+    endPosition: chunk.endPosition,
+    data: chunk.data.slice(trimUnits)
+  };
+}
+
 export function bindTerminalSessionStream(
   state: TerminalSessionStreamState,
   sessionId: string | null
@@ -314,24 +332,25 @@ export function hydrateTerminalSessionStream(
   let nextRawEndPosition = snapshot.endPosition;
 
   for (const chunk of state.chunks) {
-    if (chunk.rawEndPosition <= snapshot.endPosition) {
+    const normalizedRawChunk = trimChunkToRawStart(chunk, snapshot.endPosition);
+    if (!normalizedRawChunk || normalizedRawChunk.data.length === 0) {
       continue;
     }
     const visibleChunk = buildVisibleChunk(
-      chunk.rawStartPosition,
-      chunk.rawEndPosition,
-      chunk.data,
+      normalizedRawChunk.rawStartPosition,
+      normalizedRawChunk.rawEndPosition,
+      normalizedRawChunk.data,
       nextWindow.endPosition
     );
     nextWindow = applyChunkToText(nextWindow, visibleChunk, maxChars);
     const clampedVisibleChunk = normalizeChunk(visibleChunk, nextWindow.startPosition);
     if (!clampedVisibleChunk || clampedVisibleChunk.data.length === 0) {
-      nextRawEndPosition = chunk.rawEndPosition;
+      nextRawEndPosition = normalizedRawChunk.rawEndPosition;
       continue;
     }
     nextChunks = appendChunkToBuffer(nextChunks, clampedVisibleChunk);
     nextChunks = trimChunksToWindow(nextChunks, nextWindow.startPosition);
-    nextRawEndPosition = chunk.rawEndPosition;
+    nextRawEndPosition = normalizedRawChunk.rawEndPosition;
   }
 
   return {

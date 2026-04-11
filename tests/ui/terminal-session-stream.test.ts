@@ -126,6 +126,47 @@ describe('terminalSessionStream', () => {
     ]);
   });
 
+  it('trims a buffered chunk when hydration lands in the middle of it', () => {
+    let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
+    state = appendTerminalStreamChunk(
+      state,
+      {
+        sessionId: 'session-1',
+        startPosition: 5,
+        endPosition: 12,
+        data: '1234567'
+      },
+      1_000
+    );
+
+    const hydrated = hydrateTerminalSessionStream(
+      state,
+      'session-1',
+      {
+        text: 'abcde123',
+        startPosition: 0,
+        endPosition: 8,
+        truncated: false
+      },
+      1_000
+    );
+
+    expect(hydrated.phase).toBe('ready');
+    expect(hydrated.text).toBe('abcde1234567');
+    expect(hydrated.rawEndPosition).toBe(12);
+    expect(hydrated.startPosition).toBe(0);
+    expect(hydrated.endPosition).toBe(12);
+    expect(hydrated.chunks).toEqual([
+      {
+        rawStartPosition: 8,
+        rawEndPosition: 12,
+        startPosition: 8,
+        endPosition: 12,
+        data: '4567'
+      }
+    ]);
+  });
+
   it('ignores stale or duplicate chunks once the stream is ready', () => {
     const ready = presentTerminalSnapshot(
       bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1'),
