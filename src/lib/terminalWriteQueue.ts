@@ -287,23 +287,18 @@ export class TerminalWriteQueue {
 
     let batchBytes = 0;
     const parts: string[] = [];
-    let consumed = 0;
-    while (consumed < this.pendingChunks.length) {
-      const head = this.pendingChunks[consumed];
+    while (this.pendingChunks.length > 0) {
+      const head = this.pendingChunks[0];
       if (parts.length > 0 && batchBytes + head.chunk.length > this.maxBatchBytes) {
         break;
       }
       parts.push(head.chunk);
+      this.pendingChunks.shift();
+      this.pendingBytes -= head.chunk.length;
       batchBytes += head.chunk.length;
-      consumed += 1;
       if (batchBytes >= this.maxBatchBytes) {
         break;
       }
-    }
-
-    if (consumed > 0) {
-      this.pendingChunks.splice(0, consumed);
-      this.pendingBytes -= batchBytes;
     }
 
     return parts.join('');
