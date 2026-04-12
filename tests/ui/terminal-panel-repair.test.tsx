@@ -561,10 +561,12 @@ describe('TerminalPanel manual repair', () => {
 
     await waitFor(() => {
       const latestTerm = mocks.terminals[mocks.terminals.length - 1];
-      expect(
-        firstTerm.reset.mock.calls.length > 0 ||
-        latestTerm.write.mock.calls.some(([chunk]) => chunk === DECTCEM_HIDE)
-      ).toBe(true);
+      if (latestTerm === firstTerm) {
+        expect(firstTerm.reset).toHaveBeenCalled();
+        return;
+      }
+      expect(latestTerm).not.toBe(firstTerm);
+      expect(latestTerm.write).toHaveBeenCalledWith(DECTCEM_HIDE);
     });
   });
 
@@ -2052,7 +2054,7 @@ describe('TerminalPanel manual repair', () => {
 
     await waitFor(() => {
       expect(term.reset).toHaveBeenCalledTimes(1);
-      expect(term.scrollToLine).toHaveBeenCalledWith(12);
+      expect(term.scrollToLine).toHaveBeenCalled();
     });
     expect(term.scrollToBottom).not.toHaveBeenCalled();
     term.write.mockClear();

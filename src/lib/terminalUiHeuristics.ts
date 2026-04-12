@@ -1,7 +1,7 @@
 const ANSI_REGEX =
   /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[PX^_][^\u001b]*(?:\u001b\\)?|[@-_])/gu;
 
-const ALT_SCREEN_ENTER_REGEX = /\u001b\[\?(?:1049|1047|1048)h/u;
+const ALT_SCREEN_ENTER_REGEX = /\u001b\[\?(?:1049|1047)h/u;
 const CURSOR_POSITION_REGEX = /\u001b\[\d{1,4};\d{1,4}[Hf]/gu;
 const CLEAR_OR_ERASE_REGEX = /\u001b\[(?:2J|J|K|0K|2K)/gu;
 const CURSOR_HIDE_REGEX = /\u001b\[\?25l/gu;

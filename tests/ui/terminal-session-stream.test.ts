@@ -76,6 +76,54 @@ describe('terminalSessionStream', () => {
     expect(terminalSessionStreamKnownRawEndPosition(next)).toBe(9);
   });
 
+  it('keeps the non-overlapping tail when buffered chunks partially overlap', () => {
+    let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
+    state = appendTerminalStreamChunk(
+      state,
+      {
+        sessionId: 'session-1',
+        startPosition: 0,
+        endPosition: 10,
+        data: 'abcdefghij'
+      },
+      1_000
+    );
+    state = appendTerminalStreamChunk(
+      state,
+      {
+        sessionId: 'session-1',
+        startPosition: 7,
+        endPosition: 15,
+        data: 'hijklmno'
+      },
+      1_000
+    );
+
+    const hydrated = hydrateTerminalSessionStream(
+      state,
+      'session-1',
+      {
+        text: 'abcdefghij',
+        startPosition: 0,
+        endPosition: 10,
+        truncated: false
+      },
+      1_000
+    );
+
+    expect(hydrated.text).toBe('abcdefghijklmno');
+    expect(hydrated.rawEndPosition).toBe(15);
+    expect(hydrated.chunks).toEqual([
+      {
+        rawStartPosition: 10,
+        rawEndPosition: 15,
+        startPosition: 10,
+        endPosition: 15,
+        data: 'klmno'
+      }
+    ]);
+  });
+
   it('hydrates from a snapshot and replays only buffered chunks beyond the snapshot boundary', () => {
     let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
     state = appendTerminalStreamChunk(

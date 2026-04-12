@@ -91,7 +91,17 @@ function appendChunkToBuffer(chunks: TerminalStreamChunk[], incoming: TerminalSt
   if (incoming.rawStartPosition >= last.rawEndPosition) {
     return [...chunks, incoming];
   }
-  return chunks;
+  const overlapChars = Math.max(0, last.rawEndPosition - incoming.rawStartPosition);
+  const trimmed = {
+    ...incoming,
+    rawStartPosition: last.rawEndPosition,
+    startPosition: incoming.startPosition + overlapChars,
+    data: incoming.data.slice(overlapChars)
+  };
+  if (trimmed.data.length === 0) {
+    return chunks;
+  }
+  return [...chunks, trimmed];
 }
 
 function trimChunksToWindow(chunks: TerminalStreamChunk[], windowStartPosition: number): TerminalStreamChunk[] {

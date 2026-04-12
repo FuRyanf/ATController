@@ -827,9 +827,9 @@ function TerminalPanelComponent({
     [
       getPreservedScrollbackOffset,
       logTerminalDebug,
+      preserveViewportState,
       schedulePausedViewportCapture,
-      scheduleTerminalRefresh,
-      syncFollowOutputPaused
+      scheduleTerminalRefresh
     ]
   );
 
@@ -1054,11 +1054,12 @@ function TerminalPanelComponent({
       clearPausedViewportScrollTop,
       clearScheduledStreamRepair,
       logTerminalDebug,
+      preserveViewportState,
       queueWrite,
       schedulePausedViewportCapture,
       scheduleTerminalRefresh,
       scrollToBottomSoon,
-      syncFollowOutputPaused
+      syncFollowOutputIndicator
     ]
   );
 
@@ -1800,7 +1801,7 @@ function TerminalPanelComponent({
           (hasVisibleScrollbar && e.clientX > rect.left + el.clientWidth) ||
           isOverlayScrollbarHit
         ) {
-        armUserViewportInteraction();
+          armUserViewportInteraction();
           userScrollIntentRef.current = true;
           logTerminalDebug('follow:scroll-intent-armed', {}, term);
         }
@@ -1960,7 +1961,7 @@ function TerminalPanelComponent({
     scrollToBottomSoon,
     scheduleOutgoingInputFlush,
     shouldFreezeStatefulViewport,
-    syncFollowOutputPaused,
+    syncFollowOutputIndicator,
     terminalInstanceVersion,
     runTerminalSearch
   ]);
@@ -2094,8 +2095,7 @@ function TerminalPanelComponent({
     resetTerminalContent,
     scheduleTerminalRefresh,
     sessionId,
-    streamState,
-    syncFollowOutputPaused
+    streamState
   ]);
 
   useEffect(() => {
@@ -2351,7 +2351,7 @@ function TerminalPanelComponent({
     }
     syncFollowOutputIndicator(followStateRef.current.mode);
     scheduleTerminalRefresh(term);
-  }, [focusRequestId, logTerminalDebug, notifyResizeIfChanged, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]);
+  }, [focusRequestId, logTerminalDebug, notifyResizeIfChanged, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputIndicator]);
 
   useEffect(() => {
     if (previousRepairRequestRef.current === repairRequestId) {

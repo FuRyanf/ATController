@@ -128,6 +128,7 @@ const TERMINAL_LOG_FLUSH_SAFETY_MS = 48;
 const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
 const TERMINAL_RESIZE_DEBOUNCE_MS = 80;
 const STATEFUL_TERMINAL_RESYNC_DEBOUNCE_MS = 160;
+const STATEFUL_TERMINAL_REFRESH_RETRY_DELAYS_MS = [220, 520];
 const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
 const SESSION_SNAPSHOT_LATE_REFRESH_DELAYS_MS = [2200, 4200];
 const CLAUDE_IN_PLACE_RESTART_DELAY_MS = 120;
@@ -1296,6 +1297,7 @@ export default function App() {
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [selectedTerminalFollowPaused, setSelectedTerminalFollowPaused] = useState(false);
   const [selectedStatefulHydrationSessionId, setSelectedStatefulHydrationSessionId] = useState<string | null>(null);
+  const [selectedStatefulHydrationFailedSessionId, setSelectedStatefulHydrationFailedSessionId] = useState<string | null>(null);
   const [shellTerminalSize, setShellTerminalSize] = useState({ cols: 120, rows: 16 });
   const [shellDrawerHeight, setShellDrawerHeight] = useState(() => {
     const savedRaw = window.localStorage.getItem(SHELL_DRAWER_HEIGHT_KEY);
@@ -1656,6 +1658,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedSessionId && selectedStatefulHydrationSessionId !== null) {
       setSelectedStatefulHydrationSessionId(null);
+      setSelectedStatefulHydrationFailedSessionId(null);
       return;
     }
     if (
@@ -1665,7 +1668,24 @@ export default function App() {
     ) {
       setSelectedStatefulHydrationSessionId(null);
     }
-  }, [selectedSessionId, selectedStatefulHydrationSessionId]);
+    if (
+      selectedStatefulHydrationFailedSessionId !== null &&
+      selectedSessionId !== null &&
+      selectedStatefulHydrationFailedSessionId !== selectedSessionId
+    ) {
+      setSelectedStatefulHydrationFailedSessionId(null);
+    }
+  }, [selectedSessionId, selectedStatefulHydrationFailedSessionId, selectedStatefulHydrationSessionId]);
+
+  useEffect(() => {
+    if (
+      selectedStatefulHydrationFailedSessionId !== null &&
+      selectedStatefulHydrationFailedSessionId === selectedSessionId &&
+      selectedTerminalStream.text.length > 0
+    ) {
+      setSelectedStatefulHydrationFailedSessionId(null);
+    }
+  }, [selectedSessionId, selectedStatefulHydrationFailedSessionId, selectedTerminalStream.text]);
 
   useEffect(() => {
     const activeThreadIds = new Set(allThreads.map((thread) => thread.id));
@@ -2732,7 +2752,15 @@ export default function App() {
     (sessionId: string) => {
       delete threadIdBySessionIdRef.current[sessionId];
       delete sessionMetaBySessionIdRef.current[sessionId];
+      delete lastSentTerminalSizeBySessionRef.current[sessionId];
       delete pendingSshStartupAuthStatusBySessionIdRef.current[sessionId];
+      if (pendingTerminalResizeRef.current?.sessionId === sessionId) {
+        pendingTerminalResizeRef.current = null;
+        if (pendingTerminalResizeTimerRef.current !== null) {
+          window.clearTimeout(pendingTerminalResizeTimerRef.current);
+          pendingTerminalResizeTimerRef.current = null;
+        }
+      }
     },
     []
   );
@@ -3449,10 +3477,41 @@ export default function App() {
       sessionId: string,
       options: {
         forceFreshReadySnapshot?: boolean;
+        keepSelectedStatefulHydrationOverlayOnFailure?: boolean;
+        requestId?: number;
+        retryDelaysMs?: readonly number[];
       } = {}
     ) => {
-      const requestId = (terminalHydrationRequestIdByThreadRef.current[threadId] ?? 0) + 1;
-      terminalHydrationRequestIdByThreadRef.current[threadId] = requestId;
+      const requestId =
+        options.requestId ?? (terminalHydrationRequestIdByThreadRef.current[threadId] ?? 0) + 1;
+      if (options.requestId === undefined) {
+        terminalHydrationRequestIdByThreadRef.current[threadId] = requestId;
+      } else if (terminalHydrationRequestIdByThreadRef.current[threadId] !== requestId) {
+        return;
+      }
+      if (threadId === selectedThreadIdRef.current && sessionId === selectedSessionIdRef.current) {
+        setSelectedStatefulHydrationFailedSessionId((current) => (current === sessionId ? null : current));
+      }
+      const scheduleRetry = (remainingRetryDelays: readonly number[]) => {
+        const [nextDelayMs, ...restRetryDelays] = remainingRetryDelays;
+        if (nextDelayMs === undefined) {
+          return false;
+        }
+        window.setTimeout(() => {
+          if (terminalHydrationRequestIdByThreadRef.current[threadId] !== requestId) {
+            return;
+          }
+          if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
+            return;
+          }
+          void hydrateSessionSnapshot(threadId, sessionId, {
+            ...options,
+            requestId,
+            retryDelaysMs: restRetryDelays
+          });
+        }, nextDelayMs);
+        return true;
+      };
       void bootstrapThreadRuntimeCwdFromClaudeSession(threadId, sessionId);
       const snapshot = await api.terminalReadOutput(sessionId).catch(() => null);
       if (terminalHydrationRequestIdByThreadRef.current[threadId] !== requestId) {
@@ -3462,7 +3521,24 @@ export default function App() {
         return;
       }
       if (!snapshot) {
-        if (threadId === selectedThreadIdRef.current && sessionId === selectedSessionIdRef.current) {
+        if (scheduleRetry(options.retryDelaysMs ?? [])) {
+          return;
+        }
+        if (
+          threadId === selectedThreadIdRef.current &&
+          sessionId === selectedSessionIdRef.current
+        ) {
+          if (options.keepSelectedStatefulHydrationOverlayOnFailure) {
+            updateThreadTerminalStream(threadId, (current) => ({
+              ...bindLiveTerminalSessionStream(current, sessionId),
+              rawEndPosition: current.rawEndPosition,
+              startPosition: current.rawEndPosition,
+              endPosition: current.rawEndPosition
+            }));
+            setSelectedStatefulHydrationFailedSessionId((current) =>
+              current === sessionId ? current : sessionId
+            );
+          }
           setSelectedStatefulHydrationSessionId((current) => (current === sessionId ? null : current));
         }
         return;
@@ -3489,7 +3565,9 @@ export default function App() {
       }
       if (threadId === selectedThreadIdRef.current && sessionId === selectedSessionIdRef.current) {
         setSelectedStatefulHydrationSessionId((current) => (current === sessionId ? null : current));
+        setSelectedStatefulHydrationFailedSessionId((current) => (current === sessionId ? null : current));
       }
+      scheduleRetry(options.retryDelaysMs ?? []);
       if (!requiresReadySignal) {
         runLifecycleByThreadRef.current[threadId] = markRunReady(runLifecycleByThreadRef.current[threadId]);
         setStartingByThread((current) => removeThreadFlag(current, threadId));
@@ -3535,7 +3613,8 @@ export default function App() {
         return;
       }
       void hydrateSessionSnapshot(threadId, sessionId, {
-        forceFreshReadySnapshot: true
+        forceFreshReadySnapshot: true,
+        retryDelaysMs: STATEFUL_TERMINAL_REFRESH_RETRY_DELAYS_MS
       });
     }, STATEFUL_TERMINAL_RESYNC_DEBOUNCE_MS);
   }, [
@@ -5287,6 +5366,9 @@ export default function App() {
           setSelectedStatefulHydrationSessionId((current) =>
             current === existingSessionId ? current : existingSessionId
           );
+          setSelectedStatefulHydrationFailedSessionId((current) =>
+            current === existingSessionId ? null : current
+          );
         }
         if (!requiresReadySignal) {
           setReadyByThread((current) =>
@@ -5294,7 +5376,9 @@ export default function App() {
           );
         }
         void hydrateSessionSnapshot(selectedThread.id, existingSessionId, {
-          forceFreshReadySnapshot: true
+          forceFreshReadySnapshot: true,
+          keepSelectedStatefulHydrationOverlayOnFailure: shouldSuppressCachedStatefulStream,
+          retryDelaysMs: shouldSuppressCachedStatefulStream ? STATEFUL_TERMINAL_REFRESH_RETRY_DELAYS_MS : []
         });
       } else if (stream?.sessionId === existingSessionId && stream.phase === 'ready' && !requiresReadySignal) {
         setReadyByThread((current) =>
@@ -7132,6 +7216,8 @@ export default function App() {
                   ? 'Forked session could not be confirmed. Start fresh to continue.'
                   : selectedThreadResumeFailureBlocked
                   ? 'Session resume failed. Start fresh to continue.'
+                  : selectedStatefulHydrationFailedSessionId === selectedSessionId && Boolean(selectedSessionId)
+                  ? 'Could not refresh Claude screen yet. Waiting for new output...'
                   : selectedStatefulHydrationSessionId === selectedSessionId && Boolean(selectedSessionId)
                   ? 'Refreshing Claude screen...'
                   : !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
