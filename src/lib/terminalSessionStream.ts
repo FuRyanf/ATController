@@ -1,4 +1,5 @@
 import type { TerminalDataEvent, TerminalOutputSnapshot } from '../types';
+import { clampTerminalWindow, extractLatestTerminalScreenWindow, findLatestTerminalRepaintBoundary } from './terminalLogClamp';
 
 export type TerminalStreamPhase = 'idle' | 'hydrating' | 'ready';
 
@@ -53,10 +54,10 @@ function clampStreamWindow(
     };
   }
 
-  const trimChars = text.length - maxChars;
+  const { text: clampedText, startOffset } = clampTerminalWindow(text, maxChars);
   return {
-    text: text.slice(trimChars),
-    startPosition: startPosition + trimChars,
+    text: clampedText,
+    startPosition: startPosition + startOffset,
     endPosition
   };
 }
@@ -156,21 +157,54 @@ function buildVisibleChunk(
   };
 }
 
-function trimChunkToRawStart(chunk: TerminalStreamChunk, minRawStartPosition: number): TerminalStreamChunk | null {
+function buildResetStateFromRepaintChunk(
+  chunk: TerminalStreamChunk,
+  maxChars: number
+): Pick<TerminalSessionStreamState, 'text' | 'startPosition' | 'endPosition'> | null {
+  const repaintBoundary = findLatestTerminalRepaintBoundary(chunk.data);
+  if (repaintBoundary === -1) {
+    return null;
+  }
+
+  const frameData = chunk.data.slice(repaintBoundary);
+  const frameWindow = extractLatestTerminalScreenWindow(frameData, maxChars);
+  const frameEndPosition = chunk.rawEndPosition;
+  const frameStartPosition = frameEndPosition - frameWindow.text.length;
+  return {
+    text: frameWindow.text,
+    startPosition: frameStartPosition,
+    endPosition: frameEndPosition
+  };
+}
+
+function trimChunkToRawStart(
+  chunk: TerminalStreamChunk,
+  minRawStartPosition: number
+): (TerminalStreamChunk & { rewoundBeforeMinRawStart: boolean }) | null {
   if (chunk.rawEndPosition <= minRawStartPosition) {
     return null;
   }
   if (chunk.rawStartPosition >= minRawStartPosition) {
-    return chunk;
+    return {
+      ...chunk,
+      rewoundBeforeMinRawStart: false
+    };
   }
 
-  const trimUnits = minRawStartPosition - chunk.rawStartPosition;
+  const visibleChars = chunk.rawEndPosition - minRawStartPosition;
+  const { text: clampedText, startOffset } = clampTerminalWindow(chunk.data, visibleChars);
+  if (clampedText.length === 0) {
+    return null;
+  }
+
+  const nextRawStartPosition = chunk.rawStartPosition + startOffset;
   return {
-    rawStartPosition: minRawStartPosition,
+    rawStartPosition: nextRawStartPosition,
     rawEndPosition: chunk.rawEndPosition,
-    startPosition: chunk.startPosition,
+    startPosition: chunk.endPosition - clampedText.length,
     endPosition: chunk.endPosition,
-    data: chunk.data.slice(trimUnits)
+    data: clampedText,
+    rewoundBeforeMinRawStart: nextRawStartPosition < minRawStartPosition
   };
 }
 
@@ -213,8 +247,8 @@ export function presentTerminalSnapshot(
 ): TerminalSessionStreamState {
   const nextWindow = clampStreamWindow(
     snapshot.text,
-    0,
-    snapshot.text.length,
+    snapshot.startPosition,
+    snapshot.endPosition,
     maxChars
   );
 
@@ -276,6 +310,20 @@ export function appendTerminalStreamChunk(
     return state;
   }
 
+  const repaintResetWindow = buildResetStateFromRepaintChunk(incomingChunk, maxChars);
+  if (repaintResetWindow) {
+    return {
+      ...state,
+      phase: 'ready',
+      text: repaintResetWindow.text,
+      rawEndPosition: incomingChunk.rawEndPosition,
+      startPosition: repaintResetWindow.startPosition,
+      endPosition: repaintResetWindow.endPosition,
+      chunks: [],
+      resetToken: state.resetToken + 1
+    };
+  }
+
   const visibleChunk = buildVisibleChunk(
     incomingChunk.rawStartPosition,
     incomingChunk.rawEndPosition,
@@ -324,8 +372,8 @@ export function hydrateTerminalSessionStream(
 
   let nextWindow = clampStreamWindow(
     snapshot.text,
-    0,
-    snapshot.text.length,
+    snapshot.startPosition,
+    snapshot.endPosition,
     maxChars
   );
   let nextChunks: TerminalStreamChunk[] = [];
@@ -335,6 +383,21 @@ export function hydrateTerminalSessionStream(
     const normalizedRawChunk = trimChunkToRawStart(chunk, snapshot.endPosition);
     if (!normalizedRawChunk || normalizedRawChunk.data.length === 0) {
       continue;
+    }
+    const repaintResetWindow = buildResetStateFromRepaintChunk(normalizedRawChunk, maxChars);
+    if (repaintResetWindow) {
+      nextWindow = repaintResetWindow;
+      nextChunks = [];
+      nextRawEndPosition = normalizedRawChunk.rawEndPosition;
+      continue;
+    }
+    if (normalizedRawChunk.rewoundBeforeMinRawStart) {
+      nextWindow = {
+        text: '',
+        startPosition: 0,
+        endPosition: 0
+      };
+      nextChunks = [];
     }
     const visibleChunk = buildVisibleChunk(
       normalizedRawChunk.rawStartPosition,

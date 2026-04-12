@@ -15,13 +15,17 @@ import {
 } from '../lib/terminalDebug';
 import {
   createFollowState,
+  detachViewport,
   handleTerminalScroll,
   jumpToLatest as jumpFollowStateToLatest,
   pauseFollowByUser,
-  shouldAutoFollow
+  shouldAutoFollow,
+  shouldPreserveViewport,
+  type TerminalFollowState
 } from '../lib/terminalFollowState';
 import { shouldScheduleTerminalStreamRepair } from '../lib/terminalStreamRepair';
 import type { TerminalSessionStreamState } from '../lib/terminalSessionStream';
+import { looksLikeStatefulTerminalUi } from '../lib/terminalUiHeuristics';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
 const INPUT_FLUSH_MS = 8;
@@ -34,7 +38,10 @@ const OUTPUT_QUEUE_WARN_PENDING_BYTES = 128 * 1024;
 const OUTPUT_QUEUE_WARN_LATENCY_MS = 96;
 const OUTPUT_QUEUE_WARN_COOLDOWN_MS = 2_000;
 const VIEWPORT_OFF_BOTTOM_THRESHOLD_PX = 4;
+const VIEWPORT_RESUME_NEAR_BOTTOM_MIN_PX = 96;
+const VIEWPORT_RESUME_NEAR_BOTTOM_MAX_PX = 240;
 const VIEWPORT_OVERLAY_SCROLLBAR_HIT_WIDTH_PX = 24;
+const DEFERRED_INITIAL_REPLAY_FALLBACK_MS = 1_400;
 const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
 const MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS = 64;
 const DECTCEM_HIDE = '\x1b[?25l';
@@ -67,12 +74,15 @@ interface TerminalPanelProps {
   inputEnabled?: boolean;
   cursorVisible?: boolean;
   overlayMessage?: string;
+  preferLiveRedrawOnMount?: boolean;
   focusRequestId?: number;
   repairRequestId?: number;
   searchToggleRequestId?: number;
   onData?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   onFocusChange?: (focused: boolean) => void;
+  onStatefulRedrawRequest?: () => void;
+  onFollowOutputPausedChange?: (paused: boolean) => void;
 }
 
 // Memoized to avoid unnecessary re-renders (and xterm canvas flicker) when the
@@ -93,12 +103,15 @@ export const TerminalPanel = React.memo(
       prevProps.inputEnabled === nextProps.inputEnabled &&
       prevProps.cursorVisible === nextProps.cursorVisible &&
       prevProps.overlayMessage === nextProps.overlayMessage &&
+      prevProps.preferLiveRedrawOnMount === nextProps.preferLiveRedrawOnMount &&
       prevProps.focusRequestId === nextProps.focusRequestId &&
       prevProps.repairRequestId === nextProps.repairRequestId &&
       prevProps.searchToggleRequestId === nextProps.searchToggleRequestId &&
       prevProps.onData === nextProps.onData &&
       prevProps.onResize === nextProps.onResize &&
-      prevProps.onFocusChange === nextProps.onFocusChange;
+      prevProps.onFocusChange === nextProps.onFocusChange &&
+      prevProps.onStatefulRedrawRequest === nextProps.onStatefulRedrawRequest &&
+      prevProps.onFollowOutputPausedChange === nextProps.onFollowOutputPausedChange;
   }
 );
 
@@ -117,6 +130,17 @@ function hardenTerminalTextInput(host: HTMLElement) {
   }
 }
 
+function getViewportResumeNearBottomThresholdPx(viewport: HTMLElement | null): number {
+  if (!viewport) {
+    return VIEWPORT_OFF_BOTTOM_THRESHOLD_PX;
+  }
+  const dynamicThreshold = Math.round(viewport.clientHeight * 0.75);
+  return Math.min(
+    VIEWPORT_RESUME_NEAR_BOTTOM_MAX_PX,
+    Math.max(VIEWPORT_RESUME_NEAR_BOTTOM_MIN_PX, dynamicThreshold)
+  );
+}
+
 function TerminalPanelComponent({
   sessionId = null,
   streamState = null,
@@ -128,12 +152,15 @@ function TerminalPanelComponent({
   inputEnabled = true,
   cursorVisible = true,
   overlayMessage,
+  preferLiveRedrawOnMount = false,
   focusRequestId = 0,
   repairRequestId = 0,
   searchToggleRequestId = 0,
   onData,
   onResize,
-  onFocusChange
+  onFocusChange,
+  onStatefulRedrawRequest,
+  onFollowOutputPausedChange
 }: TerminalPanelProps) {
   const terminalDebugEnabled = isTerminalDebugEnabled();
   const [fallback, setFallback] = useState(
@@ -164,6 +191,8 @@ function TerminalPanelComponent({
   const onDataRef = useRef(onData);
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
+  const onStatefulRedrawRequestRef = useRef(onStatefulRedrawRequest);
+  const onFollowOutputPausedChangeRef = useRef(onFollowOutputPausedChange);
   const readOnlyRef = useRef(readOnly);
   const inputEnabledRef = useRef(inputEnabled);
   const cursorVisibleRef = useRef(cursorVisible);
@@ -182,6 +211,13 @@ function TerminalPanelComponent({
   const previousFocusRequestRef = useRef(focusRequestId);
   const previousRepairRequestRef = useRef(repairRequestId);
   const previousSearchToggleRequestRef = useRef(searchToggleRequestId);
+  const previousFollowOutputPausedRef = useRef(followOutputPaused);
+  const statefulSessionRef = useRef(
+    Boolean(
+      (streamState?.text && looksLikeStatefulTerminalUi(streamState.text)) ||
+      (content && looksLikeStatefulTerminalUi(content))
+    )
+  );
   const lastQueueWarningAtRef = useRef(0);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const fitWithReflowRef = useRef<(() => void) | null>(null);
@@ -206,6 +242,8 @@ function TerminalPanelComponent({
   const lastStreamRepairAtRef = useRef(0);
   const suppressPlainEnterUntilRef = useRef(0);
   const pendingRepairStateRef = useRef<PendingRepairState | null>(null);
+  const deferredInitialReplayTimerRef = useRef<number | null>(null);
+  const pendingStatefulResizeDimensionsRef = useRef<{ cols: number; rows: number } | null>(null);
 
   const logTerminalDebug = useCallback(
     (scope: string, data: Record<string, unknown> = {}, term: Terminal | null = terminalRef.current) => {
@@ -231,6 +269,53 @@ function TerminalPanelComponent({
   const syncFollowOutputPaused = useCallback((nextPaused: boolean) => {
     setFollowOutputPaused((current) => (current === nextPaused ? current : nextPaused));
   }, []);
+
+  const syncFollowOutputIndicator = useCallback(
+    (mode: TerminalFollowState['mode'] = followStateRef.current.mode) => {
+      syncFollowOutputPaused(mode === 'pausedByUser' || (mode === 'detached' && statefulSessionRef.current));
+    },
+    [syncFollowOutputPaused]
+  );
+
+  const shouldFreezeStatefulViewport = useCallback(
+    (mode: TerminalFollowState['mode'] = followStateRef.current.mode) =>
+      statefulSessionRef.current && mode !== 'following',
+    []
+  );
+
+  const updateStatefulSessionMode = useCallback((candidate: string | null | undefined) => {
+    if (!candidate || statefulSessionRef.current) {
+      return statefulSessionRef.current;
+    }
+    if (looksLikeStatefulTerminalUi(candidate)) {
+      statefulSessionRef.current = true;
+      if (followStateRef.current.mode !== 'following') {
+        syncFollowOutputIndicator(followStateRef.current.mode);
+      }
+    }
+    return statefulSessionRef.current;
+  }, [syncFollowOutputIndicator]);
+
+  const preserveViewportState = useCallback((term: Terminal, reason: string) => {
+    const current = followStateRef.current;
+    if (current.mode === 'pausedByUser') {
+      logTerminalDebug('follow:preserve-paused', { reason }, term);
+      syncFollowOutputIndicator(current.mode);
+      return;
+    }
+    const next = detachViewport({
+      ...current,
+      viewportY: term.buffer.active.viewportY,
+      baseY: term.buffer.active.baseY
+    });
+    followStateRef.current = next;
+    logTerminalDebug('follow:preserve-detached', {
+      reason,
+      viewportY: next.viewportY,
+      baseY: next.baseY
+    }, term);
+    syncFollowOutputIndicator(next.mode);
+  }, [logTerminalDebug, syncFollowOutputIndicator]);
 
   useEffect(() => {
     if (!terminalDebugEnabled) {
@@ -320,6 +405,13 @@ function TerminalPanelComponent({
     }
   }, []);
 
+  const clearDeferredInitialReplay = useCallback(() => {
+    if (deferredInitialReplayTimerRef.current !== null) {
+      window.clearTimeout(deferredInitialReplayTimerRef.current);
+      deferredInitialReplayTimerRef.current = null;
+    }
+  }, []);
+
   const forceViewportToBottom = useCallback(
     (term: Terminal, reason: string) => {
       const viewport = getViewportElement();
@@ -340,16 +432,31 @@ function TerminalPanelComponent({
     [getViewportElement, logTerminalDebug]
   );
 
-  const notifyResizeIfChanged = useCallback((term: Terminal) => {
+  const notifyResizeDimensionsIfChanged = useCallback((cols: number, rows: number) => {
     const previous = lastReportedTerminalSizeRef.current;
-    if (previous && previous.cols === term.cols && previous.rows === term.rows) {
-      return;
+    if (previous && previous.cols === cols && previous.rows === rows) {
+      return false;
     }
     lastReportedTerminalSizeRef.current = {
-      cols: term.cols,
-      rows: term.rows
+      cols,
+      rows
     };
-    onResizeRef.current?.(term.cols, term.rows);
+    onResizeRef.current?.(cols, rows);
+    return true;
+  }, []);
+
+  const notifyResizeIfChanged = useCallback((term: Terminal) => {
+    return notifyResizeDimensionsIfChanged(term.cols, term.rows);
+  }, [notifyResizeDimensionsIfChanged]);
+
+  const applyMeasuredLocalResize = useCallback((term: Terminal, dims: { cols: number; rows: number } | null) => {
+    if (!dims || isNaN(dims.cols) || isNaN(dims.rows)) {
+      return;
+    }
+    if (term.cols === dims.cols && term.rows === dims.rows) {
+      return;
+    }
+    term.resize(dims.cols, dims.rows);
   }, []);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
@@ -426,6 +533,10 @@ function TerminalPanelComponent({
   }, []);
 
   const armUserViewportInteraction = useCallback(() => {
+    if (pausedViewportRestoreRafRef.current !== null) {
+      window.cancelAnimationFrame(pausedViewportRestoreRafRef.current);
+      pausedViewportRestoreRafRef.current = null;
+    }
     userViewportCapturePendingRef.current = true;
     if (userViewportCaptureResetRafRef.current !== null) {
       window.cancelAnimationFrame(userViewportCaptureResetRafRef.current);
@@ -484,7 +595,7 @@ function TerminalPanelComponent({
       });
       logTerminalDebug(reason, {}, term);
       clearPausedViewportScrollTop(reason, term);
-      syncFollowOutputPaused(false);
+      syncFollowOutputIndicator(followStateRef.current.mode);
       scrollPauseCooldownRef.current = 0;
       term.scrollToBottom();
       forceViewportToBottom(term, reason);
@@ -495,7 +606,7 @@ function TerminalPanelComponent({
       forceViewportToBottom,
       logTerminalDebug,
       scheduleTerminalRefresh,
-      syncFollowOutputPaused
+      syncFollowOutputIndicator
     ]
   );
 
@@ -568,7 +679,7 @@ function TerminalPanelComponent({
 
   const getPreservedScrollbackOffset = useCallback(
     (term: Terminal, reason: string, viewport: HTMLElement | null = getViewportElement()) => {
-      if (!shouldAutoFollow(followStateRef.current) && pausedViewportScrollbackOffsetRef.current !== null) {
+      if (shouldPreserveViewport(followStateRef.current) && pausedViewportScrollbackOffsetRef.current !== null) {
         logTerminalDebug('scrollbackOffset:reuse', {
           reason,
           scrollbackOffset: pausedViewportScrollbackOffsetRef.current
@@ -587,7 +698,7 @@ function TerminalPanelComponent({
       }
       pausedViewportCaptureRafRef.current = window.requestAnimationFrame(() => {
         pausedViewportCaptureRafRef.current = null;
-        if (terminalRef.current !== term || shouldAutoFollow(followStateRef.current)) {
+        if (terminalRef.current !== term || !shouldPreserveViewport(followStateRef.current)) {
           return;
         }
         capturePausedViewportScrollTop(reason, term);
@@ -598,7 +709,7 @@ function TerminalPanelComponent({
 
   const restorePausedViewport = useCallback(
     (term: Terminal, reason: string) => {
-      if (terminalRef.current !== term || shouldAutoFollow(followStateRef.current)) {
+      if (terminalRef.current !== term || !shouldPreserveViewport(followStateRef.current)) {
         return false;
       }
       const viewport = getViewportElement();
@@ -682,15 +793,15 @@ function TerminalPanelComponent({
       cooldownUntil: scrollPauseCooldownRef.current
     });
     capturePausedViewportScrollTop('pause');
-    syncFollowOutputPaused(true);
-  }, [capturePausedViewportScrollTop, clearScheduledStreamRepair, logTerminalDebug, syncFollowOutputPaused]);
+    syncFollowOutputIndicator(next.mode);
+  }, [capturePausedViewportScrollTop, clearScheduledStreamRepair, logTerminalDebug, syncFollowOutputIndicator]);
 
   const applyStreamRepair = useCallback(
     (term: Terminal) => {
       if (terminalRef.current !== term) {
         return;
       }
-      const preserveViewport = !shouldAutoFollow(followStateRef.current);
+      const preserveViewport = shouldPreserveViewport(followStateRef.current);
       const scrollbackOffset = preserveViewport
         ? getPreservedScrollbackOffset(term, 'stream-repair')
         : 0;
@@ -708,13 +819,7 @@ function TerminalPanelComponent({
           scrollbackOffset
         }, term);
         term.scrollToLine(targetLine);
-        followStateRef.current = {
-          mode: 'pausedByUser',
-          viewportY: term.buffer.active.viewportY,
-          baseY: term.buffer.active.baseY
-        };
-        logTerminalDebug('follow:repair-preserve', {}, term);
-        syncFollowOutputPaused(true);
+        preserveViewportState(term, 'repair-preserve');
         schedulePausedViewportCapture(term, 'repair-preserve');
       }
       scheduleTerminalRefresh(term);
@@ -741,6 +846,18 @@ function TerminalPanelComponent({
       }, term);
 
       writeQueueRef.current.flushImmediate();
+      const statefulVisibleText = renderedContentRef.current || contentRef.current;
+      if (sessionId && updateStatefulSessionMode(statefulVisibleText)) {
+        lastStreamRepairAtRef.current = Date.now();
+        bytesSinceRepairRef.current = 0;
+        logTerminalDebug('streamRepair:skip-stateful', {
+          repairEpoch,
+          renderedLength: renderedContentRef.current.length,
+          contentLength: contentRef.current.length
+        }, term);
+        scheduleTerminalRefresh(term);
+        return;
+      }
       applyStreamRepair(term);
 
       void writeQueueRef.current.whenIdle().then(() => {
@@ -750,7 +867,7 @@ function TerminalPanelComponent({
         if (streamRepairEpochRef.current !== repairEpoch) {
           return;
         }
-        if (!shouldAutoFollow(followStateRef.current)) {
+        if (shouldPreserveViewport(followStateRef.current)) {
           logTerminalDebug('streamRepair:skip-second-pass-paused', {
             repairEpoch
           }, term);
@@ -762,7 +879,7 @@ function TerminalPanelComponent({
         applyStreamRepair(term);
       });
     },
-    [applyStreamRepair, logTerminalDebug]
+    [applyStreamRepair, logTerminalDebug, scheduleTerminalRefresh, sessionId, updateStatefulSessionMode]
   );
 
   const scheduleStreamRepair = useCallback(
@@ -782,7 +899,7 @@ function TerminalPanelComponent({
         if (terminalRef.current !== term) {
           return;
         }
-        if (!shouldAutoFollow(followStateRef.current)) {
+        if (shouldPreserveViewport(followStateRef.current)) {
           logTerminalDebug('streamRepair:timer-skip-paused', {}, term);
           return;
         }
@@ -856,8 +973,9 @@ function TerminalPanelComponent({
     if (data.length === 0) {
       return;
     }
+    clearDeferredInitialReplay();
     writeQueueRef.current.enqueue(data);
-  }, []);
+  }, [clearDeferredInitialReplay]);
 
   const clearPendingWrites = useCallback(() => {
     writeQueueRef.current.clear();
@@ -910,15 +1028,7 @@ function TerminalPanelComponent({
             bulkWriteEpoch
           }, term);
           term.scrollToLine(targetLine);
-          followStateRef.current = {
-            mode: 'pausedByUser',
-            viewportY: term.buffer.active.viewportY,
-            baseY: term.buffer.active.baseY
-          };
-          logTerminalDebug('follow:reset-preserve', {
-            bulkWriteEpoch
-          }, term);
-          syncFollowOutputPaused(true);
+          preserveViewportState(term, `reset-preserve:${bulkWriteEpoch}`);
           schedulePausedViewportCapture(term, 'reset-preserve');
         } else {
           followStateRef.current = createFollowState();
@@ -926,7 +1036,7 @@ function TerminalPanelComponent({
             bulkWriteEpoch
           }, term);
           clearPausedViewportScrollTop('reset-following', term);
-          syncFollowOutputPaused(false);
+          syncFollowOutputIndicator(followStateRef.current.mode);
           scrollToBottomSoon(term);
         }
         logTerminalDebug('reset:done', {
@@ -965,6 +1075,55 @@ function TerminalPanelComponent({
   }, [onFocusChange]);
 
   useEffect(() => {
+    onStatefulRedrawRequestRef.current = onStatefulRedrawRequest;
+  }, [onStatefulRedrawRequest]);
+
+  useEffect(() => {
+    onFollowOutputPausedChangeRef.current = onFollowOutputPausedChange;
+  }, [onFollowOutputPausedChange]);
+
+  useEffect(() => {
+    onFollowOutputPausedChangeRef.current?.(followOutputPaused);
+  }, [followOutputPaused]);
+
+  useEffect(() => {
+    const wasPaused = previousFollowOutputPausedRef.current;
+    previousFollowOutputPausedRef.current = followOutputPaused;
+    if (!wasPaused || followOutputPaused) {
+      return;
+    }
+    if (!streamState || !terminalRef.current) {
+      return;
+    }
+    if (sessionRef.current !== streamState.sessionId) {
+      return;
+    }
+    if (!looksLikeStatefulTerminalUi(streamState.text)) {
+      return;
+    }
+    const isStale =
+      renderedResetTokenRef.current !== streamState.resetToken ||
+      renderedStreamEndPositionRef.current !== streamState.endPosition ||
+      renderedContentRef.current !== streamState.text;
+    if (!isStale) {
+      return;
+    }
+    const term = terminalRef.current;
+    logTerminalDebug('stateful:resume-sync-latest', {
+      renderedEndPosition: renderedStreamEndPositionRef.current,
+      nextEndPosition: streamState.endPosition,
+      renderedLength: renderedContentRef.current.length,
+      nextLength: streamState.text.length
+    }, term);
+    renderedStreamEndPositionRef.current = streamState.endPosition;
+    renderedContentRef.current = streamState.text;
+    renderedByteCountRef.current = streamState.text.length;
+    renderedGenerationRef.current = streamState.resetToken;
+    renderedResetTokenRef.current = streamState.resetToken;
+    resetTerminalContent(streamState.text);
+  }, [followOutputPaused, logTerminalDebug, resetTerminalContent, streamState]);
+
+  useEffect(() => {
     contentRef.current = content;
   }, [content]);
 
@@ -988,10 +1147,16 @@ function TerminalPanelComponent({
     try {
       const pendingRepairState = pendingRepairStateRef.current;
       const initialContent = contentRef.current;
+      const initialLooksStateful = updateStatefulSessionMode(initialContent);
+      const deferInitialReplay =
+        preferLiveRedrawOnMount &&
+        initialContent.length > 0 &&
+        initialLooksStateful;
       logTerminalDebug('panel:create-terminal', {
         pendingRepairPreserveViewport: pendingRepairState?.preserveViewport ?? null,
         pendingRepairOffset: pendingRepairState?.scrollbackOffset ?? null,
-        initialContentLength: initialContent.length
+        initialContentLength: initialContent.length,
+        deferInitialReplay
       });
       const term = new Terminal({
         cursorBlink: false,
@@ -1084,12 +1249,10 @@ function TerminalPanelComponent({
               promotedPendingPausedCapture = true;
             }
             if (pausedViewportRestoreRafRef.current === null) {
-              if (promotedPendingPausedCapture || pausedViewportScrollTopRef.current === null) {
-                capturePausedViewportScrollTop(
-                  promotedPendingPausedCapture ? 'write-before-promote-pending-capture' : 'write-before',
-                  term
-                );
-              }
+              capturePausedViewportScrollTop(
+                promotedPendingPausedCapture ? 'write-before-promote-pending-capture' : 'write-before',
+                term
+              );
             }
           }
           isWritingRef.current = true;
@@ -1115,7 +1278,9 @@ function TerminalPanelComponent({
             scheduleTerminalRefresh(term);
             bytesSinceRepairRef.current += chunk.length;
             const queueStats = writeQueueRef.current.getStats();
+            const statefulVisibleText = renderedContentRef.current || contentRef.current;
             if (
+              !looksLikeStatefulTerminalUi(statefulVisibleText) &&
               shouldScheduleTerminalStreamRepair({
                 autoFollow: shouldAutoFollow(followStateRef.current),
                 bytesSinceLastRepair: bytesSinceRepairRef.current,
@@ -1157,7 +1322,7 @@ function TerminalPanelComponent({
       };
 
       const fitPreservingViewport = () => {
-        const preserveViewport = !shouldAutoFollow(followStateRef.current);
+        const preserveViewport = shouldPreserveViewport(followStateRef.current);
         const scrollbackOffset = preserveViewport
           ? getPreservedScrollbackOffset(term, 'fit-preserve')
           : 0;
@@ -1175,13 +1340,7 @@ function TerminalPanelComponent({
             scrollbackOffset
           }, term);
           term.scrollToLine(targetLine);
-          followStateRef.current = {
-            mode: 'pausedByUser',
-            viewportY: term.buffer.active.viewportY,
-            baseY: term.buffer.active.baseY
-          };
-          logTerminalDebug('follow:fit-preserve', {}, term);
-          syncFollowOutputPaused(true);
+          preserveViewportState(term, 'fit-preserve');
           schedulePausedViewportCapture(term, 'fit-preserve');
           scheduleTerminalRefresh(term);
           return;
@@ -1200,44 +1359,52 @@ function TerminalPanelComponent({
         logTerminalDebug('follow:fit-following', {}, term);
         clearPausedViewportScrollTop('fit-following', term);
         scheduleTerminalRefresh(term);
-        syncFollowOutputPaused(false);
+        syncFollowOutputIndicator(followStateRef.current.mode);
       };
+
+      const shouldUseSyntheticReflow = () =>
+        !sessionRef.current ||
+        (
+          renderedContentRef.current.length === 0 &&
+          renderedStreamEndPositionRef.current === 0 &&
+          contentRef.current.length === 0
+        );
 
       // fitAddon.fit() short-circuits when the proposed cols/rows match the
       // current grid — it skips term.resize(), so xterm never re-measures
-      // character metrics.  term.resize(same, same) also short-circuits.
-      // On cold start the initial measurement can use stale font metrics
-      // (before SF Mono is measurable) or stale container dimensions (before
-      // Tauri window-restore completes).  Later fits silently no-op because
-      // the grid "hasn't changed".
+      // character metrics. term.resize(same, same) also short-circuits.
       //
-      // A one-column nudge forces xterm through a real resize() →
-      // _renderService.handleResize() → _updateDimensions() path, which
-      // re-reads character metrics from the (now correct) char-measure
-      // element and recomputes css.cell.width/height.  This is the same
-      // mechanism that makes manual window resize fix the display.
+      // On a blank terminal we can safely force a one-column reflow nudge to
+      // refresh xterm's internal measurements after fonts/container dimensions
+      // settle. Once a live Claude session has already painted content,
+      // however, synthetic local-only resizes can desynchronize a stateful TUI
+      // from the PTY and smear/redraw the screen. In that case we only do an
+      // exact fit and wait for real PTY-driven output to repaint.
       const fitWithReflow = () => {
         const cols = term.cols;
         const rows = term.rows;
+        const useSyntheticReflow = shouldUseSyntheticReflow();
         logTerminalDebug('fit:reflow-start', {
           cols,
-          rows
+          rows,
+          useSyntheticReflow
         }, term);
-        if (cols > 1) {
+        if (useSyntheticReflow && cols > 1) {
           term.resize(cols + 1, rows);
           term.resize(cols, rows);
         }
         fitAndNotify();
         logTerminalDebug('fit:reflow-end', {
           cols: term.cols,
-          rows: term.rows
+          rows: term.rows,
+          useSyntheticReflow
         }, term);
       };
       fitWithReflowRef.current = fitWithReflow;
 
       const runDeferredFitWithReflow = (reason: string) => {
         let promotedPendingPausedCapture = false;
-        const preserveViewport = !shouldAutoFollow(followStateRef.current);
+        const preserveViewport = shouldPreserveViewport(followStateRef.current);
         if (preserveViewport && pausedViewportCaptureRafRef.current !== null) {
           window.cancelAnimationFrame(pausedViewportCaptureRafRef.current);
           pausedViewportCaptureRafRef.current = null;
@@ -1274,15 +1441,7 @@ function TerminalPanelComponent({
           pausedViewportScrollTop
         }, term);
         term.scrollToLine(targetLine);
-        followStateRef.current = {
-          mode: 'pausedByUser',
-          viewportY: term.buffer.active.viewportY,
-          baseY: term.buffer.active.baseY
-        };
-        logTerminalDebug('follow:deferred-fit-preserve', {
-          reason
-        }, term);
-        syncFollowOutputPaused(true);
+        preserveViewportState(term, `deferred-fit-preserve:${reason}`);
         if (pausedViewportScrollTop === null) {
           schedulePausedViewportCapture(term, reason);
         } else if (!restorePausedViewport(term, reason)) {
@@ -1323,19 +1482,13 @@ function TerminalPanelComponent({
             pausedViewportScrollTop: pendingRepairState.pausedViewportScrollTop
           }, term);
           term.scrollToLine(targetLine);
-          followStateRef.current = {
-            mode: 'pausedByUser',
-            viewportY: term.buffer.active.viewportY,
-            baseY: term.buffer.active.baseY
-          };
-          logTerminalDebug('follow:replay-preserve', {}, term);
-          syncFollowOutputPaused(true);
+          preserveViewportState(term, 'replay-preserve');
           schedulePausedViewportCapture(term, 'replay-preserve');
         } else {
           followStateRef.current = createFollowState();
           logTerminalDebug('follow:replay-following', {}, term);
           clearPausedViewportScrollTop('replay-following', term);
-          syncFollowOutputPaused(false);
+          syncFollowOutputIndicator(followStateRef.current.mode);
           scrollToBottomSoon(term);
         }
 
@@ -1354,58 +1507,78 @@ function TerminalPanelComponent({
 
       // Synchronous best-effort fit (renderer may not have dims yet — that's OK).
       fitAndNotify();
-      // Deferred fits use fitWithReflow to force correct metrics.
-      window.requestAnimationFrame(() => {
-        if (terminalRef.current !== term) {
-          return;
-        }
-        runDeferredFitWithReflow('mount-raf');
-      });
-      if ('fonts' in document) {
-        void (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready.then(() => {
+      // Live stateful reattach prefers one authoritative redraw path over a burst
+      // of mount-time fit/reflow passes that can provoke multiple Claude repaints.
+      if (!deferInitialReplay) {
+        // Deferred fits use fitWithReflow to force correct metrics.
+        window.requestAnimationFrame(() => {
           if (terminalRef.current !== term) {
             return;
           }
-          runDeferredFitWithReflow('mount-fonts-ready');
+          runDeferredFitWithReflow('mount-raf');
         });
-        // Explicitly wait for SF Mono so xterm's char-measure element gets correct metrics.
-        // fonts.ready can resolve before the specific font is measurable on cold start.
-        void (document as Document & { fonts?: { load: (font: string) => Promise<unknown> } }).fonts
-          ?.load('13px "SF Mono"')
-          .catch(() => {})
-          .then(() => {
+        if ('fonts' in document) {
+          void (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready.then(() => {
             if (terminalRef.current !== term) {
               return;
             }
-            runDeferredFitWithReflow('mount-fonts-load');
+            runDeferredFitWithReflow('mount-fonts-ready');
           });
+          // Explicitly wait for SF Mono so xterm's char-measure element gets correct metrics.
+          // fonts.ready can resolve before the specific font is measurable on cold start.
+          void (document as Document & { fonts?: { load: (font: string) => Promise<unknown> } }).fonts
+            ?.load('13px "SF Mono"')
+            .catch(() => {})
+            .then(() => {
+              if (terminalRef.current !== term) {
+                return;
+              }
+              runDeferredFitWithReflow('mount-fonts-load');
+            });
+        }
+        window.setTimeout(() => {
+          if (terminalRef.current !== term) {
+            return;
+          }
+          runDeferredFitWithReflow('mount-timeout-100');
+        }, 100);
+        // Second deferred fit for slow Tauri window-restore on first launch.
+        window.setTimeout(() => {
+          if (terminalRef.current !== term) {
+            return;
+          }
+          runDeferredFitWithReflow('mount-timeout-500');
+        }, 500);
       }
-      window.setTimeout(() => {
-        if (terminalRef.current !== term) {
-          return;
-        }
-        runDeferredFitWithReflow('mount-timeout-100');
-      }, 100);
-      // Second deferred fit for slow Tauri window-restore on first launch.
-      window.setTimeout(() => {
-        if (terminalRef.current !== term) {
-          return;
-        }
-        runDeferredFitWithReflow('mount-timeout-500');
-      }, 500);
 
-      if (initialContent.length > 0) {
+      if (initialContent.length > 0 && !deferInitialReplay) {
         queueWrite(initialContent);
         writeQueueRef.current.flushImmediate();
+      } else if (initialContent.length > 0 && deferInitialReplay) {
+        deferredInitialReplayTimerRef.current = window.setTimeout(() => {
+          deferredInitialReplayTimerRef.current = null;
+          if (terminalRef.current !== term) {
+            return;
+          }
+          logTerminalDebug('replay:deferred-fallback', {
+            initialContentLength: initialContent.length
+          }, term);
+          resetTerminalContent(initialContent, {
+            preserveViewport: shouldPreserveViewport(followStateRef.current)
+          });
+          scheduleTerminalRefresh(term);
+        }, DEFERRED_INITIAL_REPLAY_FALLBACK_MS);
       }
       renderedContentRef.current = initialContent;
       renderedByteCountRef.current = contentByteCount ?? initialContent.length;
       renderedGenerationRef.current = contentGeneration ?? 0;
       renderedStreamEndPositionRef.current = streamState?.endPosition ?? initialContent.length;
       renderedResetTokenRef.current = streamState?.resetToken ?? 0;
-      void writeQueueRef.current.whenIdle().then(() => {
-        finalizeTerminalReplay();
-      });
+      if (!deferInitialReplay) {
+        void writeQueueRef.current.whenIdle().then(() => {
+          finalizeTerminalReplay();
+        });
+      }
 
       const onDataDisposable = term.onData((data) => {
         if (readOnlyRef.current || !inputEnabledRef.current) {
@@ -1461,29 +1634,28 @@ function TerminalPanelComponent({
             logTerminalDebug('xterm:onScroll-user-pause', {}, term);
             return;
           }
-          if (resolved.mode === 'pausedByUser' && viewportY >= baseY) {
-            resolved = jumpFollowStateToLatest(resolved, { baseY });
-            followStateRef.current = resolved;
-            logTerminalDebug('follow:user-resume-bottom', {}, term);
-            clearPausedViewportScrollTop('user-resume-bottom', term);
-            syncFollowOutputPaused(false);
+          if (resolved.mode !== 'following' && viewportY >= baseY) {
+            resumeFollowOutput(term, 'follow:user-resume-bottom');
             return;
           }
         }
 
         if (userResumeFollowRef.current) {
-          if (resolved.mode === 'pausedByUser' && viewportY >= baseY) {
-            resolved = jumpFollowStateToLatest(resolved, { baseY });
-            logTerminalDebug('follow:wheel-resume-bottom', {}, term);
-            clearPausedViewportScrollTop('wheel-resume-bottom', term);
+          if (resolved.mode !== 'following' && viewportY >= baseY) {
+            resumeFollowOutput(term, 'follow:wheel-resume-bottom');
+            return;
           }
           userResumeFollowRef.current = false;
+        }
+        if (resolved.mode === 'detached' && viewportY >= baseY) {
+          resolved = jumpFollowStateToLatest(resolved, { baseY });
+          clearPausedViewportScrollTop('detached-resume-bottom', term);
         }
         followStateRef.current = resolved;
         logTerminalDebug('follow:onScroll-update', {
           resolvedMode: resolved.mode
         }, term);
-        syncFollowOutputPaused(resolved.mode === 'pausedByUser');
+        syncFollowOutputIndicator(resolved.mode);
       });
 
       const onWheel = (event: WheelEvent) => {
@@ -1494,6 +1666,7 @@ function TerminalPanelComponent({
         if (event.deltaY < 0) {
           userResumeFollowRef.current = false;
           pauseFollowOutput();
+          schedulePausedViewportCapture(term, 'wheel-post-scroll');
           return;
         }
         if (event.deltaY > 0 && followStateRef.current.mode === 'pausedByUser') {
@@ -1509,6 +1682,12 @@ function TerminalPanelComponent({
         const distanceFromBottomPx = viewport
           ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop)
           : null;
+        const nearBottomResumeThresholdPx = getViewportResumeNearBottomThresholdPx(viewport);
+        const previousPausedViewportScrollTop = pausedViewportScrollTopRef.current;
+        const movingTowardBottom =
+          viewport && previousPausedViewportScrollTop !== null
+            ? viewport.scrollTop > previousPausedViewportScrollTop + 0.5
+            : userResumeFollowRef.current;
         const userInteracting =
           userScrollIntentRef.current ||
           userViewportCapturePendingRef.current ||
@@ -1520,6 +1699,8 @@ function TerminalPanelComponent({
           distanceFromBottomPx,
           estimatedScrollbackOffset,
           userInteracting,
+          movingTowardBottom,
+          nearBottomResumeThresholdPx,
           pausedViewportScrollTop: pausedViewportScrollTopRef.current
         }, term);
         if (
@@ -1537,16 +1718,59 @@ function TerminalPanelComponent({
         if (
           viewport &&
           distanceFromBottomPx !== null &&
+          distanceFromBottomPx <= nearBottomResumeThresholdPx &&
+          (
+            (shouldFreezeStatefulViewport(followStateRef.current.mode) && movingTowardBottom) ||
+            (
+              followStateRef.current.mode === 'pausedByUser' &&
+              (userResumeFollowRef.current || (userInteracting && movingTowardBottom))
+            )
+          )
+        ) {
+          userResumeFollowRef.current = false;
+          resumeFollowOutput(term, 'viewport-scroll-user-resume-near-bottom');
+          return;
+        }
+        if (
+          viewport &&
+          distanceFromBottomPx !== null &&
+          distanceFromBottomPx <= nearBottomResumeThresholdPx &&
+          followStateRef.current.mode === 'detached' &&
+          movingTowardBottom
+        ) {
+          resumeFollowOutput(term, 'viewport-scroll-detached-resume');
+          return;
+        }
+        if (
+          viewport &&
+          distanceFromBottomPx !== null &&
           distanceFromBottomPx > VIEWPORT_OFF_BOTTOM_THRESHOLD_PX &&
           !bulkWritingRef.current &&
           shouldAutoFollow(followStateRef.current)
         ) {
-          logTerminalDebug('follow:viewport-scroll-pause', {
-            distanceFromBottomPx
-          }, term);
-          pauseFollowOutput();
+          if (userScrollIntentRef.current) {
+            logTerminalDebug('follow:viewport-scroll-pause', {
+              distanceFromBottomPx
+            }, term);
+            pauseFollowOutput();
+            userViewportCapturePendingRef.current = false;
+            userResumeFollowRef.current = false;
+            return;
+          }
+          capturePausedViewportScrollTop('viewport-scroll-detached', term, viewport);
+          preserveViewportState(term, 'viewport-scroll-detached');
           userViewportCapturePendingRef.current = false;
           userResumeFollowRef.current = false;
+          return;
+        }
+        if (
+          viewport &&
+          distanceFromBottomPx !== null &&
+          distanceFromBottomPx > VIEWPORT_OFF_BOTTOM_THRESHOLD_PX &&
+          !bulkWritingRef.current &&
+          followStateRef.current.mode === 'detached'
+        ) {
+          capturePausedViewportScrollTop('viewport-scroll-detached-update', term, viewport);
         }
       };
       const onViewportPointerDown = (e: PointerEvent) => {
@@ -1576,7 +1800,7 @@ function TerminalPanelComponent({
           (hasVisibleScrollbar && e.clientX > rect.left + el.clientWidth) ||
           isOverlayScrollbarHit
         ) {
-          armUserViewportInteraction();
+        armUserViewportInteraction();
           userScrollIntentRef.current = true;
           logTerminalDebug('follow:scroll-intent-armed', {}, term);
         }
@@ -1612,7 +1836,29 @@ function TerminalPanelComponent({
       // coalescing is unnecessary.  fitAddon.fit() only reads the host's
       // dimensions — it does not mutate them — so there is no re-entry risk.
       const observer = new ResizeObserver(() => {
-        logTerminalDebug('host:resize-observer', {}, term);
+        const currentStreamState = streamState;
+        const shouldForceStatefulResizeResync =
+          currentStreamState !== null &&
+          sessionRef.current === currentStreamState.sessionId &&
+          statefulSessionRef.current &&
+          shouldAutoFollow(followStateRef.current);
+        const measuredDims = fitAddon.proposeDimensions();
+        logTerminalDebug('host:resize-observer', {
+          shouldForceStatefulResizeResync,
+          measuredCols: measuredDims?.cols ?? null,
+          measuredRows: measuredDims?.rows ?? null
+        }, term);
+        if (shouldForceStatefulResizeResync) {
+          clearPendingWrites();
+          clearScheduledStreamRepair();
+          if (measuredDims && !isNaN(measuredDims.cols) && !isNaN(measuredDims.rows)) {
+            pendingStatefulResizeDimensionsRef.current = measuredDims;
+            notifyResizeDimensionsIfChanged(measuredDims.cols, measuredDims.rows);
+          }
+          onStatefulRedrawRequestRef.current?.();
+          scheduleTerminalRefresh(term);
+          return;
+        }
         fitPreservingViewport();
       });
       observer.observe(host);
@@ -1640,9 +1886,11 @@ function TerminalPanelComponent({
         writeQueueRef.current.clear();
         bulkWritingRef.current = false;
         isWritingRef.current = false;
+        pendingStatefulResizeDimensionsRef.current = null;
         bulkWriteEpochRef.current += 1;
         fitWithReflowRef.current = null;
         lastReportedTerminalSizeRef.current = null;
+        clearDeferredInitialReplay();
         clearScheduledStreamRepair();
         bytesSinceRepairRef.current = 0;
         term.dispose();
@@ -1689,6 +1937,7 @@ function TerminalPanelComponent({
   }, [
     armUserViewportInteraction,
     capturePausedViewportScrollTop,
+    clearDeferredInitialReplay,
     clearPausedViewportScrollTop,
     fallback,
     estimateViewportScrollbackOffset,
@@ -1697,6 +1946,7 @@ function TerminalPanelComponent({
     maybeLogQueueHealth,
     openExternalLink,
     pauseFollowOutput,
+    preferLiveRedrawOnMount,
     queueWrite,
     resumeFollowOutput,
     clearScheduledStreamRepair,
@@ -1705,9 +1955,11 @@ function TerminalPanelComponent({
     schedulePausedViewportRestore,
     scheduleStreamRepair,
     forceViewportToBottom,
+    notifyResizeDimensionsIfChanged,
     notifyResizeIfChanged,
     scrollToBottomSoon,
     scheduleOutgoingInputFlush,
+    shouldFreezeStatefulViewport,
     syncFollowOutputPaused,
     terminalInstanceVersion,
     runTerminalSearch
@@ -1786,12 +2038,26 @@ function TerminalPanelComponent({
   }, [cursorVisible, inputEnabled, logTerminalDebug, readOnly, scrollToBottomSoon]);
 
   useEffect(() => {
+    if (sessionRef.current === sessionId) {
+      return;
+    }
+    sessionRef.current = sessionId;
+    statefulSessionRef.current = false;
+    if (streamState?.sessionId === sessionId) {
+      updateStatefulSessionMode(streamState.text);
+      return;
+    }
+    updateStatefulSessionMode(contentRef.current);
+  }, [contentRef, sessionId, streamState, updateStatefulSessionMode]);
+
+  useEffect(() => {
     if (streamState) {
       return;
     }
     const term = terminalRef.current;
     if (!term) {
       sessionRef.current = sessionId;
+      statefulSessionRef.current = Boolean(content && looksLikeStatefulTerminalUi(content));
       return;
     }
 
@@ -1800,8 +2066,9 @@ function TerminalPanelComponent({
     }
 
     sessionRef.current = sessionId;
+    statefulSessionRef.current = Boolean(contentRef.current && looksLikeStatefulTerminalUi(contentRef.current));
     followStateRef.current = createFollowState();
-    syncFollowOutputPaused(false);
+    syncFollowOutputIndicator(followStateRef.current.mode);
     clearPendingWrites();
     clearScheduledStreamRepair();
     bytesSinceRepairRef.current = 0;
@@ -1860,6 +2127,7 @@ function TerminalPanelComponent({
     const rendered = renderedContentRef.current;
     const nextByteCount = contentByteCount ?? content.length;
     const nextGeneration = contentGeneration ?? 0;
+    updateStatefulSessionMode(content);
     if (content === rendered && nextGeneration === renderedGenerationRef.current) {
       return;
     }
@@ -1901,7 +2169,7 @@ function TerminalPanelComponent({
       generationChanged: nextGeneration !== renderedGenerationRef.current
     }, term);
     resetTerminalContent(content, {
-      preserveViewport: !shouldAutoFollow(followStateRef.current)
+      preserveViewport: shouldPreserveViewport(followStateRef.current)
     });
     renderedContentRef.current = content;
     renderedByteCountRef.current = nextByteCount;
@@ -1920,6 +2188,7 @@ function TerminalPanelComponent({
     logTerminalDebug,
     queueWrite,
     scrollToBottomSoon,
+    updateStatefulSessionMode,
   ]);
 
   useEffect(() => {
@@ -1932,6 +2201,40 @@ function TerminalPanelComponent({
       return;
     }
 
+    const statefulLiveScreen =
+      sessionRef.current === streamState.sessionId &&
+      (updateStatefulSessionMode(streamState.text) ||
+        updateStatefulSessionMode(renderedContentRef.current || contentRef.current));
+    const pendingStatefulResizeDimensions = pendingStatefulResizeDimensionsRef.current;
+    const hasAuthoritativeStateAdvance =
+      renderedResetTokenRef.current !== streamState.resetToken ||
+      renderedStreamEndPositionRef.current !== streamState.endPosition ||
+      renderedContentRef.current !== streamState.text;
+    if (
+      pendingStatefulResizeDimensions &&
+      sessionRef.current === streamState.sessionId &&
+      hasAuthoritativeStateAdvance
+    ) {
+      applyMeasuredLocalResize(term, pendingStatefulResizeDimensions);
+      pendingStatefulResizeDimensionsRef.current = null;
+      scheduleTerminalRefresh(term);
+    }
+    const freezeStatefulWhilePaused =
+      sessionRef.current === streamState.sessionId &&
+      shouldFreezeStatefulViewport() &&
+      statefulLiveScreen;
+
+    if (freezeStatefulWhilePaused) {
+      logTerminalDebug('stream:freeze-stateful-paused', {
+        renderedEndPosition: renderedStreamEndPositionRef.current,
+        nextEndPosition: streamState.endPosition,
+        renderedLength: renderedContentRef.current.length,
+        nextLength: streamState.text.length
+      }, term);
+      scheduleTerminalRefresh(term);
+      return;
+    }
+
     if (renderedResetTokenRef.current !== streamState.resetToken) {
       renderedResetTokenRef.current = streamState.resetToken;
       renderedStreamEndPositionRef.current = streamState.endPosition;
@@ -1939,7 +2242,7 @@ function TerminalPanelComponent({
       renderedByteCountRef.current = streamState.text.length;
       renderedGenerationRef.current = streamState.resetToken;
       resetTerminalContent(streamState.text, {
-        preserveViewport: !shouldAutoFollow(followStateRef.current)
+        preserveViewport: shouldPreserveViewport(followStateRef.current)
       });
       scheduleTerminalRefresh(term);
       return;
@@ -1961,7 +2264,7 @@ function TerminalPanelComponent({
       const canReplayVisibleSuffix =
         renderedStreamEndPositionRef.current >= streamState.startPosition &&
         renderedStreamEndPositionRef.current <= streamState.endPosition;
-      if (canReplayVisibleSuffix) {
+      if (canReplayVisibleSuffix && !statefulLiveScreen) {
         const replayOffset = renderedStreamEndPositionRef.current - streamState.startPosition;
         const delta = streamState.text.slice(replayOffset);
         if (delta.length > 0) {
@@ -1982,7 +2285,7 @@ function TerminalPanelComponent({
       renderedByteCountRef.current = streamState.text.length;
       renderedGenerationRef.current = streamState.resetToken;
       resetTerminalContent(streamState.text, {
-        preserveViewport: !shouldAutoFollow(followStateRef.current)
+        preserveViewport: shouldPreserveViewport(followStateRef.current)
       });
       scheduleTerminalRefresh(term);
       return;
@@ -2006,7 +2309,17 @@ function TerminalPanelComponent({
     if (shouldAutoFollow(followStateRef.current)) {
       scrollToBottomSoon(term);
     }
-  }, [queueWrite, resetTerminalContent, scheduleTerminalRefresh, scrollToBottomSoon, streamState]);
+  }, [
+    applyMeasuredLocalResize,
+    logTerminalDebug,
+    queueWrite,
+    resetTerminalContent,
+    scheduleTerminalRefresh,
+    scrollToBottomSoon,
+    shouldFreezeStatefulViewport,
+    streamState,
+    updateStatefulSessionMode
+  ]);
 
   useEffect(() => {
     if (previousFocusRequestRef.current === focusRequestId) {
@@ -2036,7 +2349,7 @@ function TerminalPanelComponent({
     if (shouldAutoFollow(followStateRef.current)) {
       scrollToBottomSoon(term);
     }
-    syncFollowOutputPaused(followStateRef.current.mode === 'pausedByUser');
+    syncFollowOutputIndicator(followStateRef.current.mode);
     scheduleTerminalRefresh(term);
   }, [focusRequestId, logTerminalDebug, notifyResizeIfChanged, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]);
 
@@ -2049,7 +2362,7 @@ function TerminalPanelComponent({
     if (!term) {
       return;
     }
-    const preserveViewport = !shouldAutoFollow(followStateRef.current);
+    const preserveViewport = shouldPreserveViewport(followStateRef.current);
     pendingRepairStateRef.current = {
       preserveViewport,
       pausedViewportScrollTop: preserveViewport ? pausedViewportScrollTopRef.current : null,

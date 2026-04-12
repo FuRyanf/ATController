@@ -1,4 +1,4 @@
-export type TerminalFollowMode = 'following' | 'pausedByUser';
+export type TerminalFollowMode = 'following' | 'detached' | 'pausedByUser';
 
 export interface TerminalFollowState {
   mode: TerminalFollowMode;
@@ -25,6 +25,20 @@ export function createFollowState(): TerminalFollowState {
 
 export function shouldAutoFollow(state: TerminalFollowState): boolean {
   return state.mode === 'following';
+}
+
+export function shouldPreserveViewport(state: TerminalFollowState): boolean {
+  return state.mode !== 'following';
+}
+
+export function detachViewport(state: TerminalFollowState): TerminalFollowState {
+  if (state.mode === 'detached') {
+    return state;
+  }
+  return {
+    ...state,
+    mode: 'detached'
+  };
 }
 
 export function pauseFollowByUser(state: TerminalFollowState): TerminalFollowState {

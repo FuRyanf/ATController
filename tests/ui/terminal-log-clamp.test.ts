@@ -30,5 +30,32 @@ describe('terminal log clamp', () => {
     const tail = '[dev@host workspace]$ ';
     expect(clampTerminalLog(prefix + tail, tail.length)).toBe(tail);
   });
-});
 
+  it('anchors truncated fullscreen output at the latest repaint boundary', () => {
+    const clear = '\u001b[2J\u001b[H';
+    const frame1 = `${clear}frame one\nline two\n`;
+    const frame2 = `${clear}frame two\nline four\n`;
+    const text = `prefix line that should fall out\n${frame1}${frame2}`;
+    const maxChars = frame1.length + frame2.length - 4;
+
+    expect(clampTerminalLog(text, maxChars)).toBe(frame2);
+  });
+
+  it('backs up to the repaint boundary when truncation lands inside the clear sequence', () => {
+    const clear = '\u001b[2J\u001b[H';
+    const text = `prefix\n${clear}frame latest\n`;
+    const maxChars = text.length - text.indexOf(clear) - 2;
+
+    expect(clampTerminalLog(text, maxChars)).toBe(`${clear}frame latest\n`);
+  });
+
+  it('backs up to the latest repaint boundary when truncation lands inside the latest frame body', () => {
+    const clear = '\u001b[2J\u001b[H';
+    const frame1 = `${clear}frame one\nline two\n`;
+    const frame2 = `${clear}frame two\nline three\nline four\n`;
+    const text = `prefix line that should fall out\n${frame1}${frame2}`;
+    const maxChars = frame2.length - 5;
+
+    expect(clampTerminalLog(text, maxChars)).toBe(frame2);
+  });
+});

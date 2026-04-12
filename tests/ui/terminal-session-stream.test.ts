@@ -114,13 +114,13 @@ describe('terminalSessionStream', () => {
     expect(hydrated.phase).toBe('ready');
     expect(hydrated.text).toBe('hello tail+++');
     expect(hydrated.rawEndPosition).toBe(12);
-    expect(hydrated.endPosition).toBe(13);
+    expect(hydrated.endPosition).toBe(12);
     expect(hydrated.chunks).toEqual([
       {
         rawStartPosition: 9,
         rawEndPosition: 12,
-        startPosition: 10,
-        endPosition: 13,
+        startPosition: 9,
+        endPosition: 12,
         data: '+++'
       }
     ]);
@@ -165,6 +165,77 @@ describe('terminalSessionStream', () => {
         data: '4567'
       }
     ]);
+  });
+
+  it('rewinds to the repaint boundary when hydration lands inside a fullscreen repaint chunk', () => {
+    const clear = '\u001b[2J\u001b[H';
+    const frame = `${clear}Claude Code\nfresh frame\n`;
+    let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
+    state = appendTerminalStreamChunk(
+      state,
+      {
+        sessionId: 'session-1',
+        startPosition: 0,
+        endPosition: frame.length,
+        data: frame
+      },
+      1_000
+    );
+
+    const hydrated = hydrateTerminalSessionStream(
+      state,
+      'session-1',
+      {
+        text: 'stale visible snapshot',
+        startPosition: 0,
+        endPosition: clear.length + 5,
+        truncated: false
+      },
+      1_000
+    );
+
+    expect(hydrated.phase).toBe('ready');
+    expect(hydrated.text).toBe(frame);
+    expect(hydrated.startPosition).toBe(0);
+    expect(hydrated.endPosition).toBe(frame.length);
+    expect(hydrated.rawEndPosition).toBe(frame.length);
+    expect(hydrated.chunks).toEqual([]);
+  });
+
+  it('replaces the snapshot with a later buffered repaint chunk during hydration', () => {
+    const clear = '\u001b[2J\u001b[H';
+    const frame1 = `${clear}Claude Code\nframe one\n`;
+    const frame2 = `${clear}Claude Code\nframe two\n`;
+    let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
+    state = appendTerminalStreamChunk(
+      state,
+      {
+        sessionId: 'session-1',
+        startPosition: frame1.length,
+        endPosition: frame1.length + frame2.length,
+        data: frame2
+      },
+      1_000
+    );
+
+    const hydrated = hydrateTerminalSessionStream(
+      state,
+      'session-1',
+      {
+        text: frame1,
+        startPosition: 0,
+        endPosition: frame1.length,
+        truncated: false
+      },
+      1_000
+    );
+
+    expect(hydrated.phase).toBe('ready');
+    expect(hydrated.text).toBe(frame2);
+    expect(hydrated.startPosition).toBe(frame1.length);
+    expect(hydrated.endPosition).toBe(frame1.length + frame2.length);
+    expect(hydrated.rawEndPosition).toBe(frame1.length + frame2.length);
+    expect(hydrated.chunks).toEqual([]);
   });
 
   it('ignores stale or duplicate chunks once the stream is ready', () => {
@@ -218,6 +289,92 @@ describe('terminalSessionStream', () => {
     );
 
     expect(next).toBe(ready);
+  });
+
+  it('preserves the latest fullscreen repaint boundary when snapshot text is truncated', () => {
+    const clear = '\u001b[2J\u001b[H';
+    const frame1 = `${clear}frame one\nline two\n`;
+    const frame2 = `${clear}frame two\nline four\n`;
+    const snapshotText = `prefix line that should fall out\n${frame1}${frame2}`;
+    const maxChars = frame1.length + frame2.length - 4;
+    const expectedStart = snapshotText.lastIndexOf(frame2);
+
+    const next = presentTerminalSnapshot(
+      bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1'),
+      {
+        text: snapshotText,
+        startPosition: 0,
+        endPosition: snapshotText.length,
+        truncated: false
+      },
+      maxChars
+    );
+
+    expect(next.text).toBe(frame2);
+    expect(next.startPosition).toBe(expectedStart);
+    expect(next.endPosition).toBe(snapshotText.length);
+  });
+
+  it('backs up to the latest repaint boundary when snapshot truncation lands inside the latest frame body', () => {
+    const clear = '\u001b[2J\u001b[H';
+    const frame1 = `${clear}frame one\nline two\n`;
+    const frame2 = `${clear}frame two\nline three\nline four\n`;
+    const snapshotText = `prefix line that should fall out\n${frame1}${frame2}`;
+    const maxChars = frame2.length - 5;
+    const expectedStart = snapshotText.lastIndexOf(frame2);
+
+    const next = presentTerminalSnapshot(
+      bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1'),
+      {
+        text: snapshotText,
+        startPosition: 0,
+        endPosition: snapshotText.length,
+        truncated: false
+      },
+      maxChars
+    );
+
+    expect(next.text).toBe(frame2);
+    expect(next.startPosition).toBe(expectedStart);
+    expect(next.endPosition).toBe(snapshotText.length);
+  });
+
+  it('drops orphan CSI fragments when a snapshot window starts in the middle of a control sequence', () => {
+    const snapshotText = 'abcdefgh[31mhello';
+
+    const next = presentTerminalSnapshot(
+      bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1'),
+      {
+        text: snapshotText,
+        startPosition: 0,
+        endPosition: snapshotText.length,
+        truncated: false
+      },
+      '[31mhello'.length
+    );
+
+    expect(next.text).toBe('hello');
+    expect(next.startPosition).toBe(snapshotText.length - 'hello'.length);
+  });
+
+  it('preserves a nonzero snapshot start position when presenting a ready stream', () => {
+    const clear = '\u001b[2J\u001b[H';
+    const snapshotText = `${clear}Claude Code\nframe two\n`;
+    const next = presentTerminalSnapshot(
+      bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1'),
+      {
+        text: snapshotText,
+        startPosition: 512,
+        endPosition: 512 + snapshotText.length,
+        truncated: false
+      },
+      1_000
+    );
+
+    expect(next.text).toBe(snapshotText);
+    expect(next.startPosition).toBe(512);
+    expect(next.endPosition).toBe(512 + snapshotText.length);
+    expect(next.rawEndPosition).toBe(512 + snapshotText.length);
   });
 
   it('ignores stale snapshots once a ready stream has advanced beyond them', () => {
