@@ -1889,6 +1889,98 @@ describe('TerminalPanel manual repair', () => {
     expect(term.scrollToLine).not.toHaveBeenCalled();
   });
 
+  it('hides the cursor immediately after submitting input on a stateful Claude screen', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const onData = vi.fn();
+      const content = [
+        '\u001b[2J\u001b[HClaude Code v2.1.101',
+        'bypass permissions on',
+        '> prompt'
+      ].join('\n');
+      render(
+        <TerminalPanel
+          sessionId="session-1"
+          content={content}
+          contentByteCount={content.length}
+          contentGeneration={0}
+          readOnly={false}
+          inputEnabled
+          onData={onData}
+        />
+      );
+
+      await waitFor(() => {
+        expect(mocks.terminals).toHaveLength(1);
+      });
+
+      const term = mocks.terminals[0];
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith(content, expect.any(Function));
+      });
+
+      term.write.mockClear();
+
+      await act(async () => {
+        mocks.emitData(term, 'x');
+        mocks.emitData(term, '\r');
+      });
+
+      await waitFor(() => {
+        expect(onData).toHaveBeenCalledWith('x\r');
+        expect(term.write).toHaveBeenCalledWith(DECTCEM_HIDE);
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1_200);
+      });
+
+      await waitFor(() => {
+        expect(term.write).toHaveBeenCalledWith(DECTCEM_SHOW);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not hide the cursor after submit on a plain shell screen', async () => {
+    const onData = vi.fn();
+    const content = 'shell prompt';
+    render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={content}
+        contentByteCount={content.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+        onData={onData}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(content, expect.any(Function));
+    });
+
+    term.write.mockClear();
+
+    await act(async () => {
+      mocks.emitData(term, 'x');
+      mocks.emitData(term, '\r');
+    });
+
+    await waitFor(() => {
+      expect(onData).toHaveBeenCalledWith('x\r');
+    });
+
+    expect(term.write).not.toHaveBeenCalledWith(DECTCEM_HIDE);
+  });
+
   it('does not pause follow for a viewport scroll event that remains at bottom', async () => {
     const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
     const nextContent = `${initialContent}\nnext streamed line`;

@@ -347,7 +347,19 @@ pub struct TerminalTurnCompletedEvent {
     pub status: String,
     pub has_meaningful_output: bool,
     pub completed_at_ms: i64,
+    #[serde(default)]
+    pub completion_index: Option<u64>,
     pub current_cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeTurnCompletionSummary {
+    pub claude_session_id: String,
+    pub completion_index: u64,
+    pub completed_at_ms: i64,
+    pub status: String,
+    pub has_meaningful_output: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

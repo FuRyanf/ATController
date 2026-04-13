@@ -990,6 +990,15 @@ body.shell-drawer-resizing {
   animation: pulse 1s ease-in-out infinite;
 }
 
+.thread-unread-dot {
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #4f7cff;
+  box-shadow: 0 0 0 2px rgba(79, 124, 255, 0.18);
+}
+
 .thread-last-status {
   color: #82a6ff;
   font-size: 11px;

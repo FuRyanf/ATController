@@ -21,11 +21,12 @@ use uuid::Uuid;
 
 use crate::git_tools;
 use crate::models::{
-    ContextFilePreview, ContextPreview, ImportableClaudeProject, ImportableClaudeSession,
-    PreparedNativeFork, RunClaudeRequest, RunClaudeResponse, RunExitEvent, RunMetadata, Settings,
-    StreamEvent, TerminalDataEvent, TerminalExitEvent, TerminalOutputSnapshot, TerminalReadyEvent,
-    TerminalSshAuthStatusEvent, TerminalStartResponse, TerminalTurnCompletedEvent, ThreadRunStatus,
-    TranscriptEntry, WorkspaceKind, WorkspaceShellStartResponse,
+    ClaudeTurnCompletionSummary, ContextFilePreview, ContextPreview, ImportableClaudeProject,
+    ImportableClaudeSession, PreparedNativeFork, RunClaudeRequest, RunClaudeResponse,
+    RunExitEvent, RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
+    TerminalOutputSnapshot, TerminalReadyEvent, TerminalSshAuthStatusEvent, TerminalStartResponse,
+    TerminalTurnCompletedEvent, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
+    WorkspaceShellStartResponse,
 };
 use crate::skills;
 use crate::storage;
@@ -1749,6 +1750,10 @@ struct ClaudeTurnCompletion {
     completed_at_ms: i64,
 }
 
+fn is_qualifying_claude_turn_completion(completion: &ClaudeTurnCompletion) -> bool {
+    completion.has_meaningful_output || completion.status == "Failed"
+}
+
 fn classify_claude_turn_completion_entry(entry: &ClaudeJsonlEntry) -> Option<ClaudeTurnCompletion> {
     if entry.r#type.as_deref() != Some("assistant") {
         return None;
@@ -1820,6 +1825,52 @@ fn claude_session_jsonl_path(workspace_path: &str, claude_session_id: &str) -> R
     }
 
     Ok(default_path)
+}
+
+fn latest_qualifying_claude_turn_completion(
+    session_path: &Path,
+    claude_session_id: &str,
+) -> Option<ClaudeTurnCompletionSummary> {
+    let file = File::open(session_path).ok()?;
+    let mut reader = StdBufReader::new(file);
+    let mut latest_completion = None;
+    let mut qualifying_completion_count = 0_u64;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).ok()?;
+        if bytes_read == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            break;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<ClaudeJsonlEntry>(trimmed) else {
+            continue;
+        };
+        let Some(completion) = classify_claude_turn_completion_entry(&entry) else {
+            continue;
+        };
+        if !is_qualifying_claude_turn_completion(&completion) {
+            continue;
+        }
+        qualifying_completion_count = qualifying_completion_count.saturating_add(1);
+        latest_completion = Some(ClaudeTurnCompletionSummary {
+            claude_session_id: claude_session_id.to_string(),
+            completion_index: qualifying_completion_count,
+            completed_at_ms: completion.completed_at_ms,
+            status: completion.status.to_string(),
+            has_meaningful_output: completion.has_meaningful_output,
+        });
+    }
+
+    latest_completion
 }
 
 fn existing_claude_session_project_dir(
@@ -1939,10 +1990,15 @@ fn spawn_claude_turn_completion_watcher(
     let initial_read_offset = fs::metadata(&session_path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
+    let initial_qualifying_completion_index =
+        latest_qualifying_claude_turn_completion(&session_path, &observed_claude_session_id)
+            .map(|summary| summary.completion_index)
+            .unwrap_or(0);
 
     std::thread::spawn(move || {
         let mut read_offset = initial_read_offset;
         let mut emitted_completion_count = 0_u64;
+        let mut absolute_qualifying_completion_index = initial_qualifying_completion_index;
         let mut current_cwd = session
             .current_cwd
             .lock()
@@ -1977,6 +2033,13 @@ fn spawn_claude_turn_completion_watcher(
                 read_offset = fs::metadata(&session_path)
                     .map(|metadata| metadata.len())
                     .unwrap_or(0);
+                absolute_qualifying_completion_index =
+                    latest_qualifying_claude_turn_completion(
+                        &session_path,
+                        &observed_claude_session_id,
+                    )
+                    .map(|summary| summary.completion_index)
+                    .unwrap_or(0);
                 if let Ok(Some(entry_cwd)) = latest_claude_session_cwd(
                     session.workspace_path.clone(),
                     observed_claude_session_id.clone(),
@@ -1998,6 +2061,7 @@ fn spawn_claude_turn_completion_watcher(
 
             if metadata.len() < read_offset {
                 read_offset = 0;
+                absolute_qualifying_completion_index = 0;
             }
 
             if metadata.len() > read_offset {
@@ -2045,6 +2109,14 @@ fn spawn_claude_turn_completion_watcher(
                             continue;
                         }
                         emitted_completion_count = emitted_completion_count.saturating_add(1);
+                        let completion_index =
+                            if is_qualifying_claude_turn_completion(&completion) {
+                                absolute_qualifying_completion_index =
+                                    absolute_qualifying_completion_index.saturating_add(1);
+                                Some(absolute_qualifying_completion_index)
+                            } else {
+                                None
+                            };
                         let _ = app.emit(
                             TERMINAL_TURN_COMPLETED_EVENT,
                             TerminalTurnCompletedEvent {
@@ -2053,6 +2125,7 @@ fn spawn_claude_turn_completion_watcher(
                                 status: completion.status.to_string(),
                                 has_meaningful_output: completion.has_meaningful_output,
                                 completed_at_ms: completion.completed_at_ms,
+                                completion_index,
                                 current_cwd: current_cwd.clone(),
                             },
                         );
@@ -2797,6 +2870,22 @@ pub fn latest_claude_session_cwd(
         Some(_) => None,
         None => None,
     })
+}
+
+pub fn latest_claude_turn_completion(
+    workspace_path: String,
+    claude_session_id: String,
+) -> Result<Option<ClaudeTurnCompletionSummary>> {
+    let normalized_session_id = claude_session_id.trim();
+    if normalized_session_id.is_empty() {
+        return Ok(None);
+    }
+
+    let session_path = claude_session_jsonl_path(&workspace_path, normalized_session_id)?;
+    Ok(latest_qualifying_claude_turn_completion(
+        &session_path,
+        normalized_session_id,
+    ))
 }
 
 pub fn terminal_read_output(
@@ -4672,6 +4761,88 @@ mod tests {
         .expect("should write jsonl");
 
         assert_eq!(latest_claude_turn_completion_after(&path, 1_000), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_qualifying_claude_turn_completion_returns_latest_qualifying_summary() {
+        let dir = std::env::temp_dir().join(format!(
+            "atcontroller-turn-completion-summary-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        let path = dir.join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Useful\"}]},\"timestamp\":\"1970-01-01T00:00:01Z\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"stop_sequence\",\"content\":[{\"type\":\"text\",\"text\":\"No response requested.\"}]},\"timestamp\":\"1970-01-01T00:00:02Z\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"stop_sequence\",\"content\":[{\"type\":\"text\",\"text\":\"API Error: network\"}]},\"timestamp\":\"1970-01-01T00:00:03Z\"}\n"
+            ),
+        )
+        .expect("should write jsonl");
+
+        assert_eq!(
+            latest_qualifying_claude_turn_completion(&path, "session-123"),
+            Some(ClaudeTurnCompletionSummary {
+                claude_session_id: "session-123".to_string(),
+                completion_index: 2,
+                completed_at_ms: 3_000,
+                status: "Failed".to_string(),
+                has_meaningful_output: true,
+            })
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_qualifying_claude_turn_completion_ignores_no_response_requested() {
+        let dir = std::env::temp_dir().join(format!(
+            "atcontroller-turn-completion-no-response-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        let path = dir.join("session.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"stop_sequence\",\"content\":[{\"type\":\"text\",\"text\":\"No response requested.\"}]},\"timestamp\":\"1970-01-01T00:00:01Z\"}\n",
+        )
+        .expect("should write jsonl");
+
+        assert_eq!(
+            latest_qualifying_claude_turn_completion(&path, "session-456"),
+            None
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_qualifying_claude_turn_completion_keeps_failed_turns_without_meaningful_output() {
+        let dir = std::env::temp_dir().join(format!(
+            "atcontroller-turn-completion-failed-summary-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        let path = dir.join("session.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"stop_sequence\",\"content\":[{\"type\":\"text\",\"text\":\"Prompt is too long\"}]},\"timestamp\":\"1970-01-01T00:00:01Z\"}\n",
+        )
+        .expect("should write jsonl");
+
+        assert_eq!(
+            latest_qualifying_claude_turn_completion(&path, "session-789"),
+            Some(ClaudeTurnCompletionSummary {
+                claude_session_id: "session-789".to_string(),
+                completion_index: 1,
+                completed_at_ms: 1_000,
+                status: "Failed".to_string(),
+                has_meaningful_output: true,
+            })
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -217,7 +217,16 @@ export interface TerminalTurnCompletedEvent {
   status?: Extract<RunStatus, 'Succeeded' | 'Failed'>;
   hasMeaningfulOutput?: boolean;
   completedAtMs?: number | null;
+  completionIndex?: number | null;
   currentCwd?: string | null;
+}
+
+export interface ClaudeTurnCompletionSummary {
+  claudeSessionId: string;
+  completionIndex: number;
+  completedAtMs: number;
+  status: Extract<RunStatus, 'Succeeded' | 'Failed'>;
+  hasMeaningfulOutput: boolean;
 }
 
 export interface RunStreamEvent {

@@ -66,8 +66,10 @@ const mocks = vi.hoisted(() => {
     status?: 'Succeeded' | 'Failed';
     hasMeaningfulOutput?: boolean;
     completedAtMs?: number | null;
+    completionIndex?: number | null;
   }) => void) | null = null;
   let terminalExitHandler: ((event: { sessionId: string; code: number | null; signal: number | null }) => void) | null = null;
+  let threadUpdatedHandler: ((thread: (typeof baseThreads)[number]) => void) | null = null;
   const terminalPositions = new Map<string, number>();
 
   const api = {
@@ -155,6 +157,7 @@ const mocks = vi.hoisted(() => {
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
+    latestClaudeTurnCompletion: vi.fn(async () => null),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
@@ -177,12 +180,14 @@ const mocks = vi.hoisted(() => {
     terminalDataHandler = null;
     terminalTurnCompletedHandler = null;
     terminalExitHandler = null;
+    threadUpdatedHandler = null;
     terminalPositions.clear();
     window.localStorage.clear();
     helperMocks.sendTaskCompletionAlert.mockClear();
     helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockClear();
     helperMocks.sendTaskCompletionAlertsTestNotification.mockClear();
     helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockResolvedValue(true);
+    api.latestClaudeTurnCompletion.mockResolvedValue(null);
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -214,11 +219,16 @@ const mocks = vi.hoisted(() => {
       status?: 'Succeeded' | 'Failed';
       hasMeaningfulOutput?: boolean;
       completedAtMs?: number | null;
+      completionIndex?: number | null;
     }) => {
       terminalTurnCompletedHandler?.(event);
     },
     emitTerminalExit: (event: { sessionId: string; code: number | null; signal: number | null }) => {
       terminalExitHandler?.(event);
+    },
+    emitThreadUpdated: (thread: (typeof baseThreads)[number]) => {
+      threadState = threadState.map((candidate) => (candidate.id === thread.id ? thread : candidate));
+      threadUpdatedHandler?.(thread);
     },
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
@@ -247,6 +257,7 @@ const mocks = vi.hoisted(() => {
           status?: 'Succeeded' | 'Failed';
           hasMeaningfulOutput?: boolean;
           completedAtMs?: number | null;
+          completionIndex?: number | null;
         }) => void
       ) => {
         terminalTurnCompletedHandler = handler;
@@ -267,7 +278,14 @@ const mocks = vi.hoisted(() => {
         };
       }
     ),
-    onThreadUpdated: vi.fn(async () => () => undefined)
+    onThreadUpdated: vi.fn(async (handler: (thread: (typeof baseThreads)[number]) => void) => {
+      threadUpdatedHandler = handler;
+      return () => {
+        if (threadUpdatedHandler === handler) {
+          threadUpdatedHandler = null;
+        }
+      };
+    })
   };
 });
 
@@ -593,12 +611,22 @@ describe('Left rail recency and sorting semantics', () => {
 
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
+      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce({
+        claudeSessionId: 'resume-thread-newer',
+        completionIndex: 1,
+        completedAtMs: 3_000,
+        status: 'Succeeded',
+        hasMeaningfulOutput: true
+      });
       mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
         sessionId: `session-${params.threadId}`,
         sessionMode: params.threadId === 'thread-newer' ? 'resumed' : 'new',
         resumeSessionId: params.threadId === 'thread-newer' ? 'resume-thread-newer' : null,
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
-        thread: mocks.getThread(params.threadId)
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'resume-thread-newer' }
+            : mocks.getThread(params.threadId)
       }));
 
       render(<App />);
@@ -606,6 +634,9 @@ describe('Left rail recency and sorting semantics', () => {
       await screen.findByRole('button', { name: /Newer thread/i });
       await waitFor(() => {
         expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+      await waitFor(() => {
+        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
       });
 
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
@@ -616,7 +647,8 @@ describe('Left rail recency and sorting semantics', () => {
           threadId: 'thread-newer',
           status: 'Succeeded',
           hasMeaningfulOutput: true,
-          completedAtMs: 3_000
+          completedAtMs: 3_000,
+          completionIndex: 1
         });
       });
 
@@ -656,7 +688,10 @@ describe('Left rail recency and sorting semantics', () => {
         sessionMode: params.threadId === 'thread-newer' ? 'resumed' : 'new',
         resumeSessionId: params.threadId === 'thread-newer' ? 'resume-thread-newer' : null,
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
-        thread: mocks.getThread(params.threadId)
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'resume-thread-newer' }
+            : mocks.getThread(params.threadId)
       }));
 
       render(<App />);
@@ -664,6 +699,9 @@ describe('Left rail recency and sorting semantics', () => {
       await screen.findByRole('button', { name: /Newer thread/i });
       await waitFor(() => {
         expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+      await waitFor(() => {
+        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
       });
 
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
@@ -674,7 +712,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('does not request local reattach reconciliation when there is no persisted running turn', async () => {
+  it('reconciles local resumed JSONL sessions even without persisted heuristic running state', async () => {
     window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-newer');
 
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
@@ -685,7 +723,10 @@ describe('Left rail recency and sorting semantics', () => {
         resumeSessionId: 'resume-thread-newer',
         turnCompletionMode: 'jsonl',
         reattachTurnCompletion: null,
-        thread: mocks.getThread(params.threadId)
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'resume-thread-newer' }
+            : mocks.getThread(params.threadId)
       }));
 
       render(<App />);
@@ -701,6 +742,9 @@ describe('Left rail recency and sorting semantics', () => {
 
       const [firstCall] = mocks.api.terminalStartSession.mock.calls;
       expect(firstCall?.[0]).not.toHaveProperty('reattachCompletionAfterMs');
+      await waitFor(() => {
+        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
+      });
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     } finally {
       if (originalTerminalStartSession) {
@@ -718,7 +762,10 @@ describe('Left rail recency and sorting semantics', () => {
         sessionMode: 'new',
         resumeSessionId: null,
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
-        thread: mocks.getThread(params.threadId)
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            : mocks.getThread(params.threadId)
       }));
 
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
@@ -756,11 +803,14 @@ describe('Left rail recency and sorting semantics', () => {
           threadId: 'thread-newer',
           status: 'Succeeded',
           hasMeaningfulOutput: true,
-          completedAtMs: Date.now()
+          completedAtMs: Date.now(),
+          completionIndex: 1
         });
       });
 
-      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      });
     } finally {
       if (originalTerminalStartSession) {
         mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
@@ -769,7 +819,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('does not surface a completion marker when structured completion arrives before the final PTY chunk', async () => {
+  it('surfaces a completion marker as soon as structured completion arrives, even before the final PTY chunk', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
@@ -778,7 +828,10 @@ describe('Left rail recency and sorting semantics', () => {
         sessionMode: 'new',
         resumeSessionId: null,
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
-        thread: mocks.getThread(params.threadId)
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            : mocks.getThread(params.threadId)
       }));
 
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
@@ -805,20 +858,21 @@ describe('Left rail recency and sorting semantics', () => {
           threadId: 'thread-newer',
           status: 'Succeeded',
           hasMeaningfulOutput: true,
-          completedAtMs: Date.now()
+          completedAtMs: Date.now(),
+          completionIndex: 1
         });
       });
 
       await waitFor(() => {
         expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
-        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
       });
 
       act(() => {
         mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
       });
 
-      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
     } finally {
       if (originalTerminalStartSession) {
         mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
@@ -870,6 +924,13 @@ describe('Left rail recency and sorting semantics', () => {
 
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
+      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce({
+        claudeSessionId: 'resume-thread-newer',
+        completionIndex: 1,
+        completedAtMs: 3_000,
+        status: 'Succeeded',
+        hasMeaningfulOutput: true
+      });
       mocks.api.terminalStartSession.mockImplementation((params: { threadId: string }) => {
         if (params.threadId === 'thread-newer') {
           return newerStartPromise;
@@ -879,7 +940,10 @@ describe('Left rail recency and sorting semantics', () => {
           sessionMode: 'new' as const,
           resumeSessionId: null,
           turnCompletionMode: 'idle' as const,
-          thread: mocks.getThread(params.threadId)
+          thread:
+            params.threadId === 'thread-newer'
+              ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+              : mocks.getThread(params.threadId)
         });
       });
 
@@ -915,12 +979,13 @@ describe('Left rail recency and sorting semantics', () => {
           threadId: 'thread-newer',
           status: 'Succeeded',
           hasMeaningfulOutput: true,
-          completedAtMs: 3_000
+          completedAtMs: 3_000,
+          completionIndex: 1
         });
       });
 
       await waitFor(() => {
-        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
         expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(1);
       });
 
@@ -930,12 +995,223 @@ describe('Left rail recency and sorting semantics', () => {
           threadId: 'thread-newer',
           status: 'Succeeded',
           hasMeaningfulOutput: true,
-          completedAtMs: 3_000
+          completedAtMs: 3_000,
+          completionIndex: 1
         });
       });
 
       await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+    }
+  });
+
+  it('adds a blue dot and app badge for offscreen JSONL completions, then clears both when read', async () => {
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: 'new',
+        resumeSessionId: null,
+        turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            : mocks.getThread(params.threadId)
+      }));
+
+      const user = userEvent.setup();
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      mocks.api.setAppBadgeCount.mockClear();
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: true,
+          completedAtMs: 3_000,
+          completionIndex: 1
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(1);
+      });
+
+      mocks.api.setAppBadgeCount.mockClear();
+
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
         expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(null);
+      });
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+    }
+  });
+
+  it('resets JSONL unread attention when a thread binds to a different Claude session id', async () => {
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: params.threadId === 'thread-newer' ? 'resumed' : 'new',
+        resumeSessionId: params.threadId === 'thread-newer' ? 'resume-old' : null,
+        turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
+        thread: {
+          ...mocks.getThread(params.threadId),
+          claudeSessionId: params.threadId === 'thread-newer' ? 'resume-old' : null
+        }
+      }));
+
+      const user = userEvent.setup();
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: true,
+          completedAtMs: 3_000,
+          completionIndex: 1
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      });
+
+      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce(null);
+
+      act(() => {
+        mocks.emitThreadUpdated({
+          ...mocks.getThread('thread-newer'),
+          claudeSessionId: 'resume-new'
+        });
+      });
+
+      await waitFor(() => {
+        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-new');
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      });
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+    }
+  });
+
+  it('reconciles unread JSONL attention for existing local Claude threads after reload without startup spam', async () => {
+    window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-older');
+    const originalListThreads = mocks.api.listThreads.getMockImplementation();
+    try {
+      mocks.api.listThreads.mockImplementation(async () => [
+        mocks.getThread('thread-older'),
+        {
+          ...mocks.getThread('thread-newer'),
+          claudeSessionId: 'persisted-jsonl-newer'
+        }
+      ]);
+      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce({
+        claudeSessionId: 'persisted-jsonl-newer',
+        completionIndex: 1,
+        completedAtMs: 3_000,
+        status: 'Succeeded',
+        hasMeaningfulOutput: true
+      });
+
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Older thread/i });
+      await waitFor(() => {
+        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'persisted-jsonl-newer');
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(1);
+      });
+      expect(mocks.sendTaskCompletionAlert).not.toHaveBeenCalled();
+    } finally {
+      if (originalListThreads) {
+        mocks.api.listThreads.mockImplementation(originalListThreads);
+      }
+    }
+  });
+
+  it('treats local Claude completions as JSONL attention even if turnCompletionMode metadata is missing', async () => {
+    mocks.api.getSettings.mockResolvedValueOnce({
+      claudeCliPath: '/usr/local/bin/claude',
+      taskCompletionAlerts: true
+    });
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: 'new',
+        resumeSessionId: null,
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            : mocks.getThread(params.threadId)
+      }));
+
+      const user = userEvent.setup();
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+      });
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: true,
+          completedAtMs: 3_000,
+          completionIndex: 1
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
         expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(1);
       });
     } finally {
@@ -1013,7 +1289,7 @@ describe('Left rail recency and sorting semantics', () => {
     expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
   });
 
-  it('does not resurface unread when structured completion arrives after the user already read the output', async () => {
+  it('clears JSONL unread attention when the user selects the completed thread', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
@@ -1023,7 +1299,10 @@ describe('Left rail recency and sorting semantics', () => {
         sessionMode: 'new',
         resumeSessionId: null,
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
-        thread: mocks.getThread(params.threadId)
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            : mocks.getThread(params.threadId)
       }));
 
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
@@ -1058,14 +1337,23 @@ describe('Left rail recency and sorting semantics', () => {
           threadId: 'thread-newer',
           status: 'Succeeded',
           hasMeaningfulOutput: true,
-          completedAtMs: Date.now()
+          completedAtMs: Date.now(),
+          completionIndex: 1
         });
       });
 
       await waitFor(() => {
         expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
       });
-      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      });
     } finally {
       if (originalTerminalStartSession) {
         mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);

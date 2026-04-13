@@ -654,6 +654,15 @@ fn latest_claude_session_cwd(
 }
 
 #[tauri::command]
+fn latest_claude_turn_completion(
+    workspace_path: String,
+    claude_session_id: String,
+) -> Result<Option<crate::models::ClaudeTurnCompletionSummary>, String> {
+    runner::latest_claude_turn_completion(workspace_path, claude_session_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn terminal_read_output(
     state: State<'_, AppState>,
     session_id: String,
@@ -905,6 +914,7 @@ fn main() {
             terminal_send_signal,
             terminal_get_last_log,
             latest_claude_session_cwd,
+            latest_claude_turn_completion,
             terminal_read_output,
             generate_commit_message,
             open_in_finder,

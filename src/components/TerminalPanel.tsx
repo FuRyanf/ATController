@@ -44,6 +44,7 @@ const VIEWPORT_OVERLAY_SCROLLBAR_HIT_WIDTH_PX = 24;
 const DEFERRED_INITIAL_REPLAY_FALLBACK_MS = 1_400;
 const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
 const MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS = 64;
+const OPTIMISTIC_SUBMIT_CURSOR_HIDE_MS = 1_200;
 const DECTCEM_HIDE = '\x1b[?25l';
 const DECTCEM_SHOW = '\x1b[?25h';
 const TERMINAL_SEARCH_HIGHLIGHT_LIMIT = 500;
@@ -207,6 +208,8 @@ function TerminalPanelComponent({
   );
   const inputBufferRef = useRef('');
   const inputFlushTimerRef = useRef<number | null>(null);
+  const optimisticSubmitCursorTimerRef = useRef<number | null>(null);
+  const optimisticSubmitCursorHiddenRef = useRef(false);
   const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
   const previousRepairRequestRef = useRef(repairRequestId);
@@ -260,6 +263,57 @@ function TerminalPanelComponent({
     },
     [terminalDebugEnabled]
   );
+
+  const clearOptimisticSubmitCursorHide = useCallback(
+    (reason: string, options: { restoreCursor?: boolean } = {}) => {
+      if (optimisticSubmitCursorTimerRef.current !== null) {
+        window.clearTimeout(optimisticSubmitCursorTimerRef.current);
+        optimisticSubmitCursorTimerRef.current = null;
+      }
+      if (!optimisticSubmitCursorHiddenRef.current) {
+        return;
+      }
+      optimisticSubmitCursorHiddenRef.current = false;
+      const term = terminalRef.current;
+      if (!term) {
+        return;
+      }
+      const shouldRestoreCursor = Boolean(options.restoreCursor && cursorVisibleRef.current);
+      logTerminalDebug('inputSubmit:cursor-hide-cleared', {
+        reason,
+        restoreCursor: shouldRestoreCursor
+      }, term);
+      if (shouldRestoreCursor) {
+        term.write(DECTCEM_SHOW);
+      }
+    },
+    [logTerminalDebug]
+  );
+
+  const armOptimisticSubmitCursorHide = useCallback((term: Terminal) => {
+    if (!statefulSessionRef.current || !cursorVisibleRef.current) {
+      return;
+    }
+    if (optimisticSubmitCursorTimerRef.current !== null) {
+      window.clearTimeout(optimisticSubmitCursorTimerRef.current);
+      optimisticSubmitCursorTimerRef.current = null;
+    }
+    optimisticSubmitCursorHiddenRef.current = true;
+    logTerminalDebug('inputSubmit:cursor-hide-armed', {}, term);
+    term.write(DECTCEM_HIDE);
+    optimisticSubmitCursorTimerRef.current = window.setTimeout(() => {
+      optimisticSubmitCursorTimerRef.current = null;
+      if (!optimisticSubmitCursorHiddenRef.current) {
+        return;
+      }
+      optimisticSubmitCursorHiddenRef.current = false;
+      if (terminalRef.current !== term || !cursorVisibleRef.current) {
+        return;
+      }
+      logTerminalDebug('inputSubmit:cursor-hide-timeout-restore', {}, term);
+      term.write(DECTCEM_SHOW);
+    }, OPTIMISTIC_SUBMIT_CURSOR_HIDE_MS);
+  }, [logTerminalDebug]);
 
   interface ResetTerminalContentOptions {
     preserveViewport?: boolean;
@@ -973,9 +1027,10 @@ function TerminalPanelComponent({
     if (data.length === 0) {
       return;
     }
+    clearOptimisticSubmitCursorHide('output-arrived');
     clearDeferredInitialReplay();
     writeQueueRef.current.enqueue(data);
-  }, [clearDeferredInitialReplay]);
+  }, [clearDeferredInitialReplay, clearOptimisticSubmitCursorHide]);
 
   const clearPendingWrites = useCallback(() => {
     writeQueueRef.current.clear();
@@ -1000,6 +1055,7 @@ function TerminalPanelComponent({
       const bulkWriteEpoch = bulkWriteEpochRef.current + 1;
       bulkWriteEpochRef.current = bulkWriteEpoch;
       bulkWritingRef.current = true;
+      clearOptimisticSubmitCursorHide('reset');
       clearPendingWrites();
       term.reset();
       if (!cursorVisibleRef.current) {
@@ -1049,6 +1105,7 @@ function TerminalPanelComponent({
       });
     },
     [
+      clearOptimisticSubmitCursorHide,
       getPreservedScrollbackOffset,
       clearPendingWrites,
       clearPausedViewportScrollTop,
@@ -1603,6 +1660,9 @@ function TerminalPanelComponent({
           data === '\x03' ||
           inputBufferRef.current.length >= INPUT_CHUNK_SIZE
         ) {
+          if (data === '\r') {
+            armOptimisticSubmitCursorHide(term);
+          }
           if (inputFlushTimerRef.current !== null) {
             window.clearTimeout(inputFlushTimerRef.current);
             inputFlushTimerRef.current = null;
@@ -1891,6 +1951,7 @@ function TerminalPanelComponent({
         bulkWriteEpochRef.current += 1;
         fitWithReflowRef.current = null;
         lastReportedTerminalSizeRef.current = null;
+        clearOptimisticSubmitCursorHide('dispose', { restoreCursor: true });
         clearDeferredInitialReplay();
         clearScheduledStreamRepair();
         bytesSinceRepairRef.current = 0;
@@ -1936,9 +1997,11 @@ function TerminalPanelComponent({
       return;
     }
   }, [
+    armOptimisticSubmitCursorHide,
     armUserViewportInteraction,
     capturePausedViewportScrollTop,
     clearDeferredInitialReplay,
+    clearOptimisticSubmitCursorHide,
     clearPausedViewportScrollTop,
     fallback,
     estimateViewportScrollbackOffset,
@@ -2070,6 +2133,7 @@ function TerminalPanelComponent({
     statefulSessionRef.current = Boolean(contentRef.current && looksLikeStatefulTerminalUi(contentRef.current));
     followStateRef.current = createFollowState();
     syncFollowOutputIndicator(followStateRef.current.mode);
+    clearOptimisticSubmitCursorHide('session-change');
     clearPendingWrites();
     clearScheduledStreamRepair();
     bytesSinceRepairRef.current = 0;
@@ -2088,6 +2152,7 @@ function TerminalPanelComponent({
     renderedResetTokenRef.current = 0;
     scheduleTerminalRefresh(term);
   }, [
+    clearOptimisticSubmitCursorHide,
     clearPendingWrites,
     clearScheduledStreamRepair,
     contentByteCount,

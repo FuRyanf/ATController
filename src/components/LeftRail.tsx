@@ -12,6 +12,7 @@ interface LeftRailProps {
   defaultNewThreadFullAccess?: boolean;
   creatingThreadByWorkspace?: Record<string, boolean>;
   isThreadWorking?: (threadId: string) => boolean;
+  unreadCompletedTurnByThread?: Record<string, true>;
   getThreadDisplayTimestampMs: (thread: ThreadMetadata) => number;
   onOpenWorkspacePicker: () => void;
   onOpenSettings: () => void;
@@ -227,6 +228,7 @@ interface ThreadRowProps {
   active: boolean;
   relativeTime: string | null;
   isWorking: boolean;
+  hasUnreadCompletedTurn: boolean;
   isEditing: boolean;
   editingValue: string;
   onEditingValueChange: (value: string) => void;
@@ -243,6 +245,7 @@ const ThreadRow = React.memo(function ThreadRow({
   active,
   relativeTime,
   isWorking,
+  hasUnreadCompletedTurn,
   isEditing,
   editingValue,
   onEditingValueChange,
@@ -336,6 +339,12 @@ const ThreadRow = React.memo(function ThreadRow({
           <span className="thread-running" data-testid={`thread-running-${thread.id}`} aria-label="Thread is working">
             <span className="spinner-dot" />
           </span>
+        ) : hasUnreadCompletedTurn ? (
+          <span
+            className="thread-unread-dot"
+            data-testid={`thread-unread-${thread.id}`}
+            aria-label="Thread has an unread completed turn"
+          />
         ) : relativeTime ? (
           <span className="thread-time" data-testid={`thread-recency-${thread.id}`}>
             {relativeTime}
@@ -399,6 +408,7 @@ function LeftRailComponent({
   defaultNewThreadFullAccess = false,
   creatingThreadByWorkspace = {},
   isThreadWorking,
+  unreadCompletedTurnByThread = {},
   getThreadDisplayTimestampMs,
   onOpenWorkspacePicker,
   onOpenSettings,
@@ -961,6 +971,7 @@ function LeftRailComponent({
                                   nowMs
                                 )}
                                 isWorking={Boolean(isThreadWorking?.(thread.id))}
+                                hasUnreadCompletedTurn={Boolean(unreadCompletedTurnByThread[thread.id])}
                                 isEditing={editingThreadId === thread.id}
                                 editingValue={editingValue}
                                 onEditingValueChange={setEditingValue}

@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppUpdateInfo,
+  ClaudeTurnCompletionSummary,
   ContextPack,
   ContextPreview,
   FinalizedNativeFork,
@@ -164,6 +165,11 @@ export const api = {
     invoke<TerminalOutputSnapshot>('terminal_get_last_log', { workspaceId, threadId }),
   latestClaudeSessionCwd: (workspacePath: string, claudeSessionId: string) =>
     invoke<string | null>('latest_claude_session_cwd', { workspacePath, claudeSessionId }),
+  latestClaudeTurnCompletion: (workspacePath: string, claudeSessionId: string) =>
+    invoke<ClaudeTurnCompletionSummary | null>('latest_claude_turn_completion', {
+      workspacePath,
+      claudeSessionId
+    }),
   terminalReadOutput: (sessionId: string) =>
     invoke<TerminalOutputSnapshot>('terminal_read_output', { sessionId }),
   generateCommitMessage: (workspacePath: string, fullAccess: boolean) =>
