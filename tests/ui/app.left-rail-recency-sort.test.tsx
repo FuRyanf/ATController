@@ -4,9 +4,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const THREAD_ATTENTION_STATE_V2_KEY = 'atcontroller:thread-attention-v2';
 const THREAD_VISIBLE_OUTPUT_GUARD_KEY = 'atcontroller:visible-output-guard';
+const THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY = 'atcontroller:jsonl-completion-attention-v1';
 
 function seedThreadAttentionState(stateByThread: Record<string, unknown>) {
   window.localStorage.setItem(THREAD_ATTENTION_STATE_V2_KEY, JSON.stringify(stateByThread));
+}
+
+function seedVisibleOutputGuard(stateByThread: Record<string, unknown>) {
+  window.localStorage.setItem(THREAD_VISIBLE_OUTPUT_GUARD_KEY, JSON.stringify(stateByThread));
+}
+
+function seedThreadJsonlCompletionAttentionState(stateByThread: Record<string, unknown>) {
+  window.localStorage.setItem(THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY, JSON.stringify(stateByThread));
 }
 
 const mocks = vi.hoisted(() => {
@@ -1162,6 +1171,108 @@ describe('Left rail recency and sorting semantics', () => {
         mocks.api.listThreads.mockImplementation(originalListThreads);
       }
     }
+  });
+
+  it('does not bootstrap a historical JSONL completion as unread when prior visible output proves it was already seen', async () => {
+    window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-older');
+    seedVisibleOutputGuard({
+      'thread-newer': {
+        seenAtMs: 4_000,
+        baselineUserInputAtMs: 0,
+        tail: 'completed output'
+      }
+    });
+    seedThreadAttentionState({
+      'thread-newer': {
+        activeTurnId: 1,
+        activeTurnStatus: 'completed',
+        activeTurnStartedAtMs: 2_000,
+        activeTurnHasMeaningfulOutput: true,
+        activeTurnLastOutputAtMs: 3_500,
+        activeTurnSeenOutputAtMs: 4_000,
+        lastCompletedTurnIdWithOutput: 1,
+        lastCompletedTurnStatus: 'Succeeded',
+        lastCompletedTurnAtMs: 3_000,
+        lastCompletedTurnLastOutputAtMs: 3_500,
+        lastNotifiedTurnId: 0,
+        lastNotifiedTurnStatus: null
+      }
+    });
+    const originalListThreads = mocks.api.listThreads.getMockImplementation();
+    try {
+      mocks.api.listThreads.mockImplementation(async () => [
+        mocks.getThread('thread-older'),
+        {
+          ...mocks.getThread('thread-newer'),
+          claudeSessionId: 'persisted-jsonl-newer'
+        }
+      ]);
+      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce({
+        claudeSessionId: 'persisted-jsonl-newer',
+        completionIndex: 1,
+        completedAtMs: 3_000,
+        status: 'Succeeded',
+        hasMeaningfulOutput: true
+      });
+
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Older thread/i });
+      await waitFor(() => {
+        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'persisted-jsonl-newer');
+      });
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(null);
+      });
+
+      act(() => {
+        window.dispatchEvent(new Event('pagehide'));
+      });
+
+      expect(JSON.parse(window.localStorage.getItem(THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY) ?? '{}')).toMatchObject({
+        'thread-newer': {
+          claudeSessionId: 'persisted-jsonl-newer',
+          latestCompletionIndex: 1,
+          lastSeenCompletionIndex: 1,
+          lastNotifiedCompletionIndex: 1,
+          latestStatus: 'Succeeded',
+          latestCompletedAtMs: 3_000
+        }
+      });
+      expect(mocks.sendTaskCompletionAlert).not.toHaveBeenCalled();
+    } finally {
+      if (originalListThreads) {
+        mocks.api.listThreads.mockImplementation(originalListThreads);
+      }
+    }
+  });
+
+  it('clears stale persisted JSONL unread attention when a thread no longer has a Claude session id', async () => {
+    seedThreadJsonlCompletionAttentionState({
+      'thread-newer': {
+        claudeSessionId: 'stale-jsonl-session',
+        latestCompletionIndex: 1,
+        lastSeenCompletionIndex: 0,
+        lastNotifiedCompletionIndex: 0,
+        latestStatus: 'Succeeded',
+        latestCompletedAtMs: 3_000
+      }
+    });
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(null);
+    });
+
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+
+    expect(window.localStorage.getItem(THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY)).toBeNull();
   });
 
   it('treats local Claude completions as JSONL attention even if turnCompletionMode metadata is missing', async () => {

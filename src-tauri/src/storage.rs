@@ -123,12 +123,12 @@ pub fn load_settings() -> Result<Settings> {
     let file = settings_file()?;
     let raw = fs::read_to_string(file)?;
     let settings: Settings = serde_json::from_str(&raw).unwrap_or_default();
-    Ok(settings)
+    Ok(settings.normalized())
 }
 
 pub fn save_settings(settings: &Settings) -> Result<()> {
     let file = settings_file()?;
-    let raw = serde_json::to_string_pretty(settings)?;
+    let raw = serde_json::to_string_pretty(&settings.clone().normalized())?;
     write_file_atomic(&file, raw.as_bytes())?;
     Ok(())
 }
@@ -416,6 +416,35 @@ pub fn thread_dir(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
 
 pub fn runs_dir(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
     Ok(thread_dir(workspace_id, thread_id)?.join("runs"))
+}
+
+fn latest_thread_run_pointer_path(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
+    Ok(thread_dir(workspace_id, thread_id)?.join("latest-run.txt"))
+}
+
+pub fn set_latest_thread_run_id(workspace_id: &str, thread_id: &str, run_id: &str) -> Result<()> {
+    let run_id = validate_storage_segment(run_id, "run id")?;
+    let path = latest_thread_run_pointer_path(workspace_id, thread_id)?;
+    write_file_atomic(&path, run_id.as_bytes())
+}
+
+pub fn latest_thread_run_dir(workspace_id: &str, thread_id: &str) -> Result<Option<PathBuf>> {
+    let path = latest_thread_run_pointer_path(workspace_id, thread_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(path)?;
+    let Ok(run_id) = validate_storage_segment(&raw, "run id") else {
+        return Ok(None);
+    };
+
+    let run_dir = runs_dir(workspace_id, thread_id)?.join(run_id);
+    if run_dir.is_dir() {
+        Ok(Some(run_dir))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn workspace_shell_sessions_dir(workspace_id: &str) -> Result<PathBuf> {
@@ -1216,8 +1245,10 @@ mod tests {
     fn add_ssh_workspace_persists_command_and_kind() {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
-        let temp_root =
-            std::env::temp_dir().join(format!("atcontroller-ssh-workspace-test-{}", Uuid::new_v4()));
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-ssh-workspace-test-{}",
+            Uuid::new_v4()
+        ));
         std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
 
         let added = add_ssh_workspace(
@@ -1256,7 +1287,10 @@ mod tests {
         let added = add_rdev_workspace("rdev ssh team/example-env", Some("example-env"))
             .expect("rdev workspace should be added");
         assert_eq!(added.kind, WorkspaceKind::Rdev);
-        assert_eq!(added.rdev_ssh_command.as_deref(), Some("rdev ssh team/example-env"));
+        assert_eq!(
+            added.rdev_ssh_command.as_deref(),
+            Some("rdev ssh team/example-env")
+        );
         assert!(
             added.path.starts_with("rdev-workspace-"),
             "rdev workspace path should use deterministic non-filesystem marker"
@@ -1451,8 +1485,10 @@ mod tests {
     fn set_thread_claude_session_id_overwrites_and_trims() {
         let _guard = test_env_lock().lock().expect("lock poisoned");
 
-        let temp_root =
-            std::env::temp_dir().join(format!("atcontroller-force-session-test-{}", Uuid::new_v4()));
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-force-session-test-{}",
+            Uuid::new_v4()
+        ));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 

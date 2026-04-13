@@ -435,6 +435,7 @@ fn get_settings() -> Result<Settings, String> {
 
 #[tauri::command]
 fn save_settings(settings: Settings) -> Result<Settings, String> {
+    let settings = settings.normalized();
     storage::save_settings(&settings)
         .map(|_| settings)
         .map_err(|error| error.to_string())

@@ -9,6 +9,7 @@ interface WorkspaceShellDrawerProps {
   workspace?: Workspace;
   sessionId?: string | null;
   streamState?: TerminalSessionStreamState | null;
+  scrollbackLines?: number;
   content?: string;
   height?: number;
   starting?: boolean;
@@ -46,6 +47,7 @@ export function WorkspaceShellDrawer({
   workspace,
   sessionId = null,
   streamState = null,
+  scrollbackLines,
   content = '',
   height = 280,
   starting = false,
@@ -113,6 +115,7 @@ export function WorkspaceShellDrawer({
         <TerminalPanel
           sessionId={sessionId}
           streamState={streamState}
+          scrollbackLines={scrollbackLines}
           content={content}
           inputEnabled={Boolean(sessionId) && !starting && !blockedMessage}
           overlayMessage={

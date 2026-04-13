@@ -27,6 +27,7 @@ import { shouldScheduleTerminalStreamRepair } from '../lib/terminalStreamRepair'
 import type { TerminalSessionStreamState } from '../lib/terminalSessionStream';
 import { looksLikeStatefulTerminalUi } from '../lib/terminalUiHeuristics';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
+import { TERMINAL_SCROLLBACK_LINES_DEFAULT, normalizeTerminalScrollbackLines } from '../types';
 
 const INPUT_FLUSH_MS = 8;
 const INPUT_CHUNK_SIZE = 4 * 1024;
@@ -71,6 +72,7 @@ interface TerminalPanelProps {
   contentByteCount?: number;
   contentGeneration?: number;
   contentLimitChars?: number;
+  scrollbackLines?: number;
   readOnly?: boolean;
   inputEnabled?: boolean;
   cursorVisible?: boolean;
@@ -100,6 +102,7 @@ export const TerminalPanel = React.memo(
       prevProps.contentByteCount === nextProps.contentByteCount &&
       prevProps.contentGeneration === nextProps.contentGeneration &&
       prevProps.contentLimitChars === nextProps.contentLimitChars &&
+      prevProps.scrollbackLines === nextProps.scrollbackLines &&
       prevProps.readOnly === nextProps.readOnly &&
       prevProps.inputEnabled === nextProps.inputEnabled &&
       prevProps.cursorVisible === nextProps.cursorVisible &&
@@ -149,6 +152,7 @@ function TerminalPanelComponent({
   contentByteCount,
   contentGeneration,
   contentLimitChars: _contentLimitChars,
+  scrollbackLines = TERMINAL_SCROLLBACK_LINES_DEFAULT,
   readOnly = false,
   inputEnabled = true,
   cursorVisible = true,
@@ -164,6 +168,7 @@ function TerminalPanelComponent({
   onFollowOutputPausedChange
 }: TerminalPanelProps) {
   const terminalDebugEnabled = isTerminalDebugEnabled();
+  const normalizedScrollbackLines = normalizeTerminalScrollbackLines(scrollbackLines);
   const [fallback, setFallback] = useState(
     () =>
       import.meta.env.MODE === 'test' &&
@@ -1220,7 +1225,7 @@ function TerminalPanelComponent({
         cursorBlink: false,
         convertEol: false,
         allowProposedApi: true,
-        scrollback: 10_000,
+        scrollback: normalizedScrollbackLines,
         fontFamily: '"SF Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
         fontSize: 14,
         fontWeight: 460,
@@ -2032,6 +2037,17 @@ function TerminalPanelComponent({
   useEffect(() => {
     writeQueueRef.current.setMaxBatchBytes(followOutputPaused ? OUTPUT_BATCH_BYTES_INTERACTIVE : OUTPUT_BATCH_BYTES);
   }, [followOutputPaused]);
+
+  useEffect(() => {
+    const term = terminalRef.current;
+    if (!term) {
+      return;
+    }
+    if (term.options.scrollback === normalizedScrollbackLines) {
+      return;
+    }
+    term.options.scrollback = normalizedScrollbackLines;
+  }, [normalizedScrollbackLines]);
 
   useEffect(() => {
     searchOpenRef.current = searchOpen;

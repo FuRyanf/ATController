@@ -19,6 +19,7 @@ describe('SettingsModal', () => {
         initialAppearanceMode="system"
         initialDefaultNewThreadFullAccess={false}
         initialTaskCompletionAlerts={true}
+        initialTerminalScrollbackLines={100_000}
         detectedCliPath="/opt/homebrew/bin/claude"
         onClose={onClose}
         onSave={onSave}
@@ -37,13 +38,16 @@ describe('SettingsModal', () => {
     await user.click(screen.getByRole('button', { name: 'Use detected path' }));
     await user.click(screen.getByRole('switch', { name: /Start new threads with Full access/i }));
     await user.click(screen.getByRole('switch', { name: /Task completion alerts/i }));
+    await user.clear(screen.getByRole('spinbutton', { name: /Scrollback lines/i }));
+    await user.type(screen.getByRole('spinbutton', { name: /Scrollback lines/i }), '300000');
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(onSave).toHaveBeenCalledWith({
       cliPath: '/opt/homebrew/bin/claude',
       appearanceMode: 'dark',
       defaultNewThreadFullAccess: true,
-      taskCompletionAlerts: false
+      taskCompletionAlerts: false,
+      terminalScrollbackLines: 250_000
     });
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }));

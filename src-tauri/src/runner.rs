@@ -22,8 +22,8 @@ use uuid::Uuid;
 use crate::git_tools;
 use crate::models::{
     ClaudeTurnCompletionSummary, ContextFilePreview, ContextPreview, ImportableClaudeProject,
-    ImportableClaudeSession, PreparedNativeFork, RunClaudeRequest, RunClaudeResponse,
-    RunExitEvent, RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
+    ImportableClaudeSession, PreparedNativeFork, RunClaudeRequest, RunClaudeResponse, RunExitEvent,
+    RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
     TerminalOutputSnapshot, TerminalReadyEvent, TerminalSshAuthStatusEvent, TerminalStartResponse,
     TerminalTurnCompletedEvent, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
     WorkspaceShellStartResponse,
@@ -2033,13 +2033,12 @@ fn spawn_claude_turn_completion_watcher(
                 read_offset = fs::metadata(&session_path)
                     .map(|metadata| metadata.len())
                     .unwrap_or(0);
-                absolute_qualifying_completion_index =
-                    latest_qualifying_claude_turn_completion(
-                        &session_path,
-                        &observed_claude_session_id,
-                    )
-                    .map(|summary| summary.completion_index)
-                    .unwrap_or(0);
+                absolute_qualifying_completion_index = latest_qualifying_claude_turn_completion(
+                    &session_path,
+                    &observed_claude_session_id,
+                )
+                .map(|summary| summary.completion_index)
+                .unwrap_or(0);
                 if let Ok(Some(entry_cwd)) = latest_claude_session_cwd(
                     session.workspace_path.clone(),
                     observed_claude_session_id.clone(),
@@ -2109,14 +2108,14 @@ fn spawn_claude_turn_completion_watcher(
                             continue;
                         }
                         emitted_completion_count = emitted_completion_count.saturating_add(1);
-                        let completion_index =
-                            if is_qualifying_claude_turn_completion(&completion) {
-                                absolute_qualifying_completion_index =
-                                    absolute_qualifying_completion_index.saturating_add(1);
-                                Some(absolute_qualifying_completion_index)
-                            } else {
-                                None
-                            };
+                        let completion_index = if is_qualifying_claude_turn_completion(&completion)
+                        {
+                            absolute_qualifying_completion_index =
+                                absolute_qualifying_completion_index.saturating_add(1);
+                            Some(absolute_qualifying_completion_index)
+                        } else {
+                            None
+                        };
                         let _ = app.emit(
                             TERMINAL_TURN_COMPLETED_EVENT,
                             TerminalTurnCompletedEvent {
@@ -2797,6 +2796,29 @@ fn read_run_end_position(run_dir: &Path, fallback_text: &str) -> u64 {
         .unwrap_or_else(|| terminal_position_len(fallback_text))
 }
 
+fn find_latest_output_log_path(runs_root: &Path) -> Result<Option<PathBuf>> {
+    let mut latest_log: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(runs_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let output_log = path.join("output.log");
+        if !output_log.is_file() {
+            continue;
+        }
+        let modified = fs::metadata(&output_log)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        match latest_log.as_ref() {
+            Some((current_modified, _)) if modified <= *current_modified => {}
+            _ => latest_log = Some((modified, output_log)),
+        }
+    }
+    Ok(latest_log.map(|(_, path)| path))
+}
+
 pub fn terminal_get_last_log(
     workspace_id: &str,
     thread_id: &str,
@@ -2811,25 +2833,12 @@ pub fn terminal_get_last_log(
         });
     }
 
-    let mut logs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    for entry in fs::read_dir(&runs_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let output_log = path.join("output.log");
-        if !output_log.exists() {
-            continue;
-        }
-        let modified = fs::metadata(&output_log)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        logs.push((modified, output_log));
-    }
-
-    logs.sort_by(|a, b| a.0.cmp(&b.0));
-    let Some((_, last_log)) = logs.last() else {
+    let pointer_log = storage::latest_thread_run_dir(workspace_id, thread_id)
+        .ok()
+        .flatten()
+        .map(|run_dir| run_dir.join("output.log"))
+        .filter(|path| path.is_file());
+    let Some(last_log) = pointer_log.or(find_latest_output_log_path(&runs_root)?) else {
         return Ok(TerminalOutputSnapshot {
             text: String::new(),
             start_position: 0,
@@ -2839,7 +2848,7 @@ pub fn terminal_get_last_log(
     };
 
     let run_dir = last_log.parent().unwrap_or_else(|| Path::new(""));
-    let (text, truncated) = read_log_snapshot(last_log)?;
+    let (text, truncated) = read_log_snapshot(&last_log)?;
     let end_position = read_run_end_position(run_dir, &text);
     let text_len = terminal_position_len(&text);
     let start_position = end_position.saturating_sub(text_len);
@@ -3508,6 +3517,12 @@ pub async fn terminal_start_session(
         if let Ok(diff) = git_tools::capture_patch_diff(&diff_workspace_path) {
             let _ = fs::write(run_folder.join("patch.diff"), diff);
         }
+
+        let _ = storage::set_latest_thread_run_id(
+            &wait_session.workspace_id,
+            thread_id,
+            &wait_session_id,
+        );
 
         let _ = app.emit(
             TERMINAL_EXIT_EVENT,
@@ -4180,7 +4195,9 @@ pub fn install_latest_update() -> Result<()> {
             .arg(&target_app)
             .status()?;
         if !copy_status.success() {
-            return Err(anyhow!("Failed to copy ATController.app into /Applications"));
+            return Err(anyhow!(
+                "Failed to copy ATController.app into /Applications"
+            ));
         }
 
         let _ = StdCommand::new("xattr")
@@ -4281,7 +4298,6 @@ pub async fn run_claude(
             .append(true)
             .open(run_dir.join("output.log"))?,
     ));
-    let assistant_output = Arc::new(AsyncMutex::new(String::new()));
 
     let stdout_task = spawn_stream_reader(
         app.clone(),
@@ -4290,7 +4306,6 @@ pub async fn run_claude(
         "stdout".to_string(),
         stdout,
         output_log.clone(),
-        assistant_output.clone(),
     );
 
     let stderr_task = spawn_stream_reader(
@@ -4300,7 +4315,6 @@ pub async fn run_claude(
         "stderr".to_string(),
         stderr,
         output_log,
-        assistant_output.clone(),
     );
 
     let wait_state = state.clone();
@@ -4363,7 +4377,13 @@ pub async fn run_claude(
             let _ = fs::write(run_folder.join("patch.diff"), diff);
         }
 
-        let output = assistant_output.lock().await.clone();
+        let _ =
+            storage::set_latest_thread_run_id(&wait_workspace_id, &wait_thread_id, &wait_run_id);
+
+        let output = fs::read(run_folder.join("output.log"))
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .unwrap_or_default();
         if !output.trim().is_empty() {
             let entry = TranscriptEntry {
                 id: Uuid::new_v4().to_string(),
@@ -4419,7 +4439,6 @@ fn spawn_stream_reader<R>(
     stream: String,
     reader: R,
     output_file: Arc<Mutex<std::fs::File>>,
-    assistant_output: Arc<AsyncMutex<String>>,
 ) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -4431,11 +4450,6 @@ where
 
             if let Ok(mut file) = output_file.lock() {
                 let _ = file.write_all(chunk.as_bytes());
-            }
-
-            {
-                let mut output = assistant_output.lock().await;
-                output.push_str(&chunk);
             }
 
             let event = StreamEvent {
@@ -4885,6 +4899,105 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_get_last_log_prefers_latest_run_pointer_when_available() {
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-runner-latest-run-pointer-{}",
+            Uuid::new_v4()
+        ));
+        let app_support_root = temp_root.join("app-support");
+        let workspace_path = temp_root.join("workspace");
+        fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
+
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &app_support_root);
+
+        let workspace = storage::add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be stored");
+        let thread =
+            storage::create_thread(&workspace.id, None, false).expect("thread should be created");
+        let runs_dir =
+            storage::runs_dir(&workspace.id, &thread.id).expect("runs dir should resolve");
+        fs::create_dir_all(&runs_dir).expect("runs dir should exist");
+
+        let preferred_run_id = Uuid::new_v4().to_string();
+        let newer_modified_run_id = Uuid::new_v4().to_string();
+        let preferred_run_dir = runs_dir.join(&preferred_run_id);
+        let newer_modified_run_dir = runs_dir.join(&newer_modified_run_id);
+        fs::create_dir_all(&preferred_run_dir).expect("preferred run dir should exist");
+        fs::create_dir_all(&newer_modified_run_dir).expect("newer run dir should exist");
+        fs::write(preferred_run_dir.join("output.log"), "preferred output\n")
+            .expect("preferred log should write");
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(
+            newer_modified_run_dir.join("output.log"),
+            "newer modified output\n",
+        )
+        .expect("newer log should write");
+
+        storage::set_latest_thread_run_id(&workspace.id, &thread.id, &preferred_run_id)
+            .expect("latest run pointer should write");
+
+        let snapshot =
+            terminal_get_last_log(&workspace.id, &thread.id).expect("snapshot should load");
+        assert_eq!(snapshot.text, "preferred output\n");
+
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn terminal_get_last_log_falls_back_when_latest_run_pointer_is_stale() {
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-runner-latest-run-fallback-{}",
+            Uuid::new_v4()
+        ));
+        let app_support_root = temp_root.join("app-support");
+        let workspace_path = temp_root.join("workspace");
+        fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
+
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &app_support_root);
+
+        let workspace = storage::add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be stored");
+        let thread =
+            storage::create_thread(&workspace.id, None, false).expect("thread should be created");
+        let runs_dir =
+            storage::runs_dir(&workspace.id, &thread.id).expect("runs dir should resolve");
+        fs::create_dir_all(&runs_dir).expect("runs dir should exist");
+
+        let older_run_id = Uuid::new_v4().to_string();
+        let newer_run_id = Uuid::new_v4().to_string();
+        let older_run_dir = runs_dir.join(&older_run_id);
+        let newer_run_dir = runs_dir.join(&newer_run_id);
+        fs::create_dir_all(&older_run_dir).expect("older run dir should exist");
+        fs::create_dir_all(&newer_run_dir).expect("newer run dir should exist");
+        fs::write(older_run_dir.join("output.log"), "older output\n")
+            .expect("older log should write");
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(newer_run_dir.join("output.log"), "newer output\n")
+            .expect("newer log should write");
+
+        storage::set_latest_thread_run_id(&workspace.id, &thread.id, &Uuid::new_v4().to_string())
+            .expect("stale latest run pointer should still write");
+
+        let snapshot =
+            terminal_get_last_log(&workspace.id, &thread.id).expect("snapshot should load");
+        assert_eq!(snapshot.text, "newer output\n");
+
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]

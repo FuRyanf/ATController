@@ -75,6 +75,8 @@ export class TerminalWriteQueue {
 
   private pendingChunks: PendingChunk[] = [];
 
+  private pendingStartIndex = 0;
+
   private pendingBytes = 0;
 
   private highWaterBytes = 0;
@@ -137,8 +139,9 @@ export class TerminalWriteQueue {
     if (this.pendingBytes > this.highWaterBytes) {
       this.highWaterBytes = this.pendingBytes;
     }
-    if (this.pendingChunks.length > this.highWaterChunks) {
-      this.highWaterChunks = this.pendingChunks.length;
+    const pendingChunkCount = this.pendingChunkCount();
+    if (pendingChunkCount > this.highWaterChunks) {
+      this.highWaterChunks = pendingChunkCount;
     }
     this.scheduleDrain();
     this.scheduleDelayedFlushGuard();
@@ -147,6 +150,7 @@ export class TerminalWriteQueue {
   clear() {
     this.epoch += 1;
     this.pendingChunks = [];
+    this.pendingStartIndex = 0;
     this.pendingBytes = 0;
     this.writing = false;
     if (this.scheduledFlushId !== null) {
@@ -173,7 +177,7 @@ export class TerminalWriteQueue {
   }
 
   whenIdle(): Promise<void> {
-    if (!this.writing && this.pendingChunks.length === 0) {
+    if (!this.writing && this.pendingChunkCount() === 0) {
       return Promise.resolve();
     }
     return new Promise((resolve) => {
@@ -183,7 +187,7 @@ export class TerminalWriteQueue {
 
   getStats(): TerminalWriteQueueStats {
     return {
-      pendingChunks: this.pendingChunks.length,
+      pendingChunks: this.pendingChunkCount(),
       pendingBytes: this.pendingBytes,
       highWaterBytes: this.highWaterBytes,
       highWaterChunks: this.highWaterChunks,
@@ -215,7 +219,7 @@ export class TerminalWriteQueue {
     }
     this.delayedFlushGuardId = this.scheduleTimer(() => {
       this.delayedFlushGuardId = null;
-      if (this.pendingChunks.length === 0) {
+      if (this.pendingChunkCount() === 0) {
         return;
       }
       if (this.writing) {
@@ -233,12 +237,19 @@ export class TerminalWriteQueue {
     if (!this.sink) {
       return;
     }
-    if (this.pendingChunks.length === 0) {
+    if (this.pendingChunkCount() === 0) {
       this.resolveIdleWaiters();
       return;
     }
 
-    const queueLatencyMs = Math.max(0, Date.now() - this.pendingChunks[0].enqueuedAtMs);
+    const head = this.pendingChunks[this.pendingStartIndex];
+    if (!head) {
+      this.compactPendingChunks();
+      this.resolveIdleWaiters();
+      return;
+    }
+
+    const queueLatencyMs = Math.max(0, Date.now() - head.enqueuedAtMs);
     this.lastQueueLatencyMs = queueLatencyMs;
     if (queueLatencyMs > this.maxQueueLatencyMs) {
       this.maxQueueLatencyMs = queueLatencyMs;
@@ -258,7 +269,7 @@ export class TerminalWriteQueue {
         return;
       }
       this.writing = false;
-      if (this.pendingChunks.length > 0) {
+      if (this.pendingChunkCount() > 0) {
         this.scheduleDrain();
         this.scheduleDelayedFlushGuard();
         return;
@@ -268,7 +279,7 @@ export class TerminalWriteQueue {
   }
 
   private resolveIdleWaiters() {
-    if (this.writing || this.pendingChunks.length > 0) {
+    if (this.writing || this.pendingChunkCount() > 0) {
       return;
     }
     if (this.idleResolvers.length === 0) {
@@ -281,19 +292,22 @@ export class TerminalWriteQueue {
   }
 
   private takeBatch(): string {
-    if (this.pendingChunks.length === 0) {
+    if (this.pendingChunkCount() === 0) {
       return '';
     }
 
     let batchBytes = 0;
     const parts: string[] = [];
-    while (this.pendingChunks.length > 0) {
-      const head = this.pendingChunks[0];
+    while (this.pendingStartIndex < this.pendingChunks.length) {
+      const head = this.pendingChunks[this.pendingStartIndex];
+      if (!head) {
+        break;
+      }
       if (parts.length > 0 && batchBytes + head.chunk.length > this.maxBatchBytes) {
         break;
       }
       parts.push(head.chunk);
-      this.pendingChunks.shift();
+      this.pendingStartIndex += 1;
       this.pendingBytes -= head.chunk.length;
       batchBytes += head.chunk.length;
       if (batchBytes >= this.maxBatchBytes) {
@@ -301,6 +315,27 @@ export class TerminalWriteQueue {
       }
     }
 
+    this.compactPendingChunks();
     return parts.join('');
+  }
+
+  private pendingChunkCount(): number {
+    return this.pendingChunks.length - this.pendingStartIndex;
+  }
+
+  private compactPendingChunks() {
+    if (this.pendingStartIndex === 0) {
+      return;
+    }
+    if (this.pendingStartIndex >= this.pendingChunks.length) {
+      this.pendingChunks = [];
+      this.pendingStartIndex = 0;
+      return;
+    }
+    if (this.pendingStartIndex < 64 && this.pendingStartIndex * 2 < this.pendingChunks.length) {
+      return;
+    }
+    this.pendingChunks = this.pendingChunks.slice(this.pendingStartIndex);
+    this.pendingStartIndex = 0;
   }
 }

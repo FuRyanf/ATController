@@ -347,13 +347,15 @@ vi.mock('../../src/components/TerminalPanel', () => ({
   TerminalPanel: ({
     content,
     streamState,
-    onData
+    onData,
+    scrollbackLines
   }: {
     content?: string;
     streamState?: { text?: string } | null;
     onData?: (data: string) => void;
+    scrollbackLines?: number;
   }) => (
-    <section data-testid="terminal-panel-mock">
+    <section data-testid="terminal-panel-mock" data-scrollback-lines={scrollbackLines ?? ''}>
       <pre data-testid="terminal-content-mock">{streamState?.text ?? content ?? ''}</pre>
       <button type="button" onClick={() => onData?.('draft')}>
         Type draft
@@ -497,7 +499,8 @@ describe('Terminal launch flags', () => {
         claudeCliPath: '/usr/local/bin/claude',
         appearanceMode: 'system',
         defaultNewThreadFullAccess: true,
-        taskCompletionAlerts: false
+        taskCompletionAlerts: false,
+        terminalScrollbackLines: 100_000
       });
     });
 
@@ -532,10 +535,23 @@ describe('Terminal launch flags', () => {
         claudeCliPath: '/usr/local/bin/claude',
         appearanceMode: 'system',
         defaultNewThreadFullAccess: false,
-        taskCompletionAlerts: true
+        taskCompletionAlerts: true,
+        terminalScrollbackLines: 100_000
       });
       expect(mocks.sendTaskCompletionAlertsEnabledConfirmation).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('passes the saved terminal scrollback setting into terminal panels', async () => {
+    mocks.api.getSettings.mockResolvedValueOnce({
+      claudeCliPath: '/usr/local/bin/claude',
+      terminalScrollbackLines: 250_000
+    });
+
+    render(<App />);
+
+    const terminal = await screen.findByTestId('terminal-panel-mock');
+    expect(terminal).toHaveAttribute('data-scrollback-lines', '250000');
   });
 
   it('does not fire a task completion alert when the active thread finishes while already visible', async () => {

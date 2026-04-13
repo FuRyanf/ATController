@@ -5,6 +5,20 @@ export type TerminalTurnCompletionMode = 'idle' | 'jsonl';
 export type WorkspaceKind = 'local' | 'rdev' | 'ssh';
 export type AppearanceMode = 'dark' | 'light' | 'system';
 
+export const TERMINAL_SCROLLBACK_LINES_MIN = 10_000;
+export const TERMINAL_SCROLLBACK_LINES_DEFAULT = 100_000;
+export const TERMINAL_SCROLLBACK_LINES_MAX = 250_000;
+
+export function normalizeTerminalScrollbackLines(value?: number | null): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return TERMINAL_SCROLLBACK_LINES_DEFAULT;
+  }
+  return Math.min(
+    TERMINAL_SCROLLBACK_LINES_MAX,
+    Math.max(TERMINAL_SCROLLBACK_LINES_MIN, Math.round(value))
+  );
+}
+
 export interface Workspace {
   id: string;
   name: string;
@@ -87,6 +101,7 @@ export interface Settings {
   appearanceMode?: AppearanceMode | null;
   defaultNewThreadFullAccess?: boolean;
   taskCompletionAlerts?: boolean;
+  terminalScrollbackLines?: number;
 }
 
 export interface ImportableClaudeSession {

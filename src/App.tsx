@@ -74,31 +74,32 @@ import {
 import { isRemoteWorkspaceKind } from './lib/workspaceKind';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
-import type {
-  AppearanceMode,
-  AppUpdateInfo,
-  ClaudeTurnCompletionSummary,
-  CreateThreadOptions,
-  GitBranchEntry,
-  GitInfo,
-  GitWorkspaceStatus,
-  ImportableClaudeProject,
-  ImportableClaudeSession,
-  PreparedNativeFork,
-  RunStatus,
-  Settings,
-  SkillInfo,
-  TerminalDataEvent,
-  TerminalExitEvent,
-  TerminalOutputSnapshot,
-  TerminalReadyEvent,
-  TerminalSshAuthStatusEvent,
-  TerminalSshAuthStatusReason,
-  TerminalTurnCompletedEvent,
-  TerminalTurnCompletionMode,
-  TerminalSessionMode,
-  ThreadMetadata,
-  Workspace
+import {
+  normalizeTerminalScrollbackLines,
+  type AppearanceMode,
+  type AppUpdateInfo,
+  type ClaudeTurnCompletionSummary,
+  type CreateThreadOptions,
+  type GitBranchEntry,
+  type GitInfo,
+  type GitWorkspaceStatus,
+  type ImportableClaudeProject,
+  type ImportableClaudeSession,
+  type PreparedNativeFork,
+  type RunStatus,
+  type Settings,
+  type SkillInfo,
+  type TerminalDataEvent,
+  type TerminalExitEvent,
+  type TerminalOutputSnapshot,
+  type TerminalReadyEvent,
+  type TerminalSshAuthStatusEvent,
+  type TerminalSshAuthStatusReason,
+  type TerminalTurnCompletedEvent,
+  type TerminalTurnCompletionMode,
+  type TerminalSessionMode,
+  type ThreadMetadata,
+  type Workspace
 } from './types';
 
 const { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } = apiModule;
@@ -160,7 +161,8 @@ function normalizeSettings(settings?: Settings | null): Settings {
     claudeCliPath: settings?.claudeCliPath ?? null,
     appearanceMode: normalizeAppearanceMode(settings?.appearanceMode),
     defaultNewThreadFullAccess: settings?.defaultNewThreadFullAccess === true,
-    taskCompletionAlerts: settings?.taskCompletionAlerts === true
+    taskCompletionAlerts: settings?.taskCompletionAlerts === true,
+    terminalScrollbackLines: normalizeTerminalScrollbackLines(settings?.terminalScrollbackLines)
   };
 }
 
@@ -674,6 +676,13 @@ function isUnreadJsonlCompletionAttention(
     return false;
   }
   return state.latestCompletionIndex > state.lastSeenCompletionIndex;
+}
+
+function shouldTrackThreadJsonlCompletionAttention(
+  thread: Pick<ThreadMetadata, 'isArchived' | 'claudeSessionId'>,
+  workspaceKind: Workspace['kind'] | undefined | null
+): boolean {
+  return !thread.isArchived && workspaceKind === 'local' && (thread.claudeSessionId?.trim() ?? '').length > 0;
 }
 
 function areThreadAttentionStatesEqual(left: ThreadAttentionState, right: ThreadAttentionState): boolean {
@@ -1407,6 +1416,7 @@ export default function App() {
     setSelectedThread,
     setThreadRunState,
     applyThreadUpdate,
+    releaseRemovedThread,
     markThreadUserInput,
     clearThreadUserInputTimestamps
   } = threadStore;
@@ -1466,7 +1476,8 @@ export default function App() {
       claudeCliPath: null,
       appearanceMode: readStoredAppearanceMode(),
       defaultNewThreadFullAccess: false,
-      taskCompletionAlerts: false
+      taskCompletionAlerts: false,
+      terminalScrollbackLines: undefined
     })
   );
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
@@ -2116,7 +2127,10 @@ export default function App() {
       if (!currentState) {
         return null;
       }
-      if (!normalizedSessionId || currentState.claudeSessionId === normalizedSessionId) {
+      if (!normalizedSessionId) {
+        return commitThreadJsonlCompletionAttentionState(threadId, null, { persistNow: true });
+      }
+      if (currentState.claudeSessionId === normalizedSessionId) {
         return currentState;
       }
       return commitThreadJsonlCompletionAttentionState(threadId, null, { persistNow: true });
@@ -2177,6 +2191,33 @@ export default function App() {
     [workspaceById]
   );
 
+  const resolveTrackedThreadJsonlCompletionAttention = useCallback(
+    (thread: ThreadMetadata) => {
+      const activeSessionId =
+        activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
+      const activeSessionMeta = activeSessionId ? sessionMetaBySessionIdRef.current[activeSessionId] ?? null : null;
+      const activeJsonlClaudeSessionId =
+        activeSessionMeta &&
+        activeSessionMeta.workspaceKind === 'local' &&
+        activeSessionMeta.turnCompletionMode === 'jsonl'
+          ? activeSessionMeta.claudeSessionId?.trim() ?? ''
+          : '';
+
+      if (activeJsonlClaudeSessionId) {
+        return {
+          claudeSessionId: activeJsonlClaudeSessionId,
+          workspaceKind: activeSessionMeta?.workspaceKind ?? null
+        };
+      }
+
+      return {
+        claudeSessionId: thread.claudeSessionId?.trim() ?? '',
+        workspaceKind: workspaceById[thread.workspaceId]?.kind ?? null
+      };
+    },
+    [runStore, workspaceById]
+  );
+
   const markThreadJsonlCompletionSeen = useCallback(
     (threadId: string, persistNow = true) => {
       const currentState = threadJsonlCompletionAttentionByThreadRef.current[threadId] ?? null;
@@ -2195,12 +2236,42 @@ export default function App() {
     [commitThreadJsonlCompletionAttentionState]
   );
 
+  const shouldSeedHistoricalJsonlCompletionAsSeen = useCallback(
+    (threadId: string, completion: ClaudeTurnCompletionSummary) => {
+      const visibleOutputGuard = visibleOutputGuardByThreadRef.current[threadId];
+      if (visibleOutputGuard && visibleOutputGuard.seenAtMs >= completion.completedAtMs) {
+        return true;
+      }
+
+      const attentionState = threadAttentionByThreadRef.current[threadId];
+      if (!hasSeenCompletedAttentionTurn(attentionState)) {
+        return false;
+      }
+
+      const strongestSeenAtMs = Math.max(
+        attentionState?.activeTurnSeenOutputAtMs ?? 0,
+        attentionState?.lastCompletedTurnAtMs ?? 0,
+        attentionState?.lastCompletedTurnLastOutputAtMs ?? 0
+      );
+      return strongestSeenAtMs >= completion.completedAtMs;
+    },
+    []
+  );
+
   const observeThreadJsonlCompletion = useCallback(
     (
       threadId: string,
       claudeSessionId: string,
       completion: ClaudeTurnCompletionSummary,
-      { persistNow = true, allowNotify = true }: { persistNow?: boolean; allowNotify?: boolean } = {}
+      {
+        persistNow = true,
+        allowNotify = true,
+        allowHistoricalSeenBootstrap = false
+      }: {
+        persistNow?: boolean;
+        allowNotify?: boolean;
+        allowHistoricalSeenBootstrap?: boolean;
+      } = {}
     ) => {
       const normalizedSessionId = claudeSessionId.trim();
       if (!normalizedSessionId || completion.completionIndex <= 0) {
@@ -2225,22 +2296,26 @@ export default function App() {
         return baseState ?? null;
       }
 
+      const isVisible = isThreadVisibleToUser(threadId);
+      const seedHistoricalCompletionAsSeen =
+        allowHistoricalSeenBootstrap &&
+        !baseState &&
+        !isVisible &&
+        shouldSeedHistoricalJsonlCompletionAsSeen(threadId, completion);
+
       let nextState: ThreadJsonlCompletionAttentionState = {
         claudeSessionId: normalizedSessionId,
         latestCompletionIndex: completion.completionIndex,
-        lastSeenCompletionIndex: Math.min(
-          baseState?.lastSeenCompletionIndex ?? 0,
-          completion.completionIndex
-        ),
-        lastNotifiedCompletionIndex: Math.min(
-          baseState?.lastNotifiedCompletionIndex ?? 0,
-          completion.completionIndex
-        ),
+        lastSeenCompletionIndex: seedHistoricalCompletionAsSeen
+          ? completion.completionIndex
+          : Math.min(baseState?.lastSeenCompletionIndex ?? 0, completion.completionIndex),
+        lastNotifiedCompletionIndex: seedHistoricalCompletionAsSeen
+          ? completion.completionIndex
+          : Math.min(baseState?.lastNotifiedCompletionIndex ?? 0, completion.completionIndex),
         latestStatus: completion.status,
         latestCompletedAtMs: completion.completedAtMs
       };
 
-      const isVisible = isThreadVisibleToUser(threadId);
       if (isVisible) {
         nextState = {
           ...nextState,
@@ -2280,7 +2355,8 @@ export default function App() {
     [
       commitThreadJsonlCompletionAttentionState,
       isThreadVisibleToUser,
-      settings.taskCompletionAlerts
+      settings.taskCompletionAlerts,
+      shouldSeedHistoricalJsonlCompletionAsSeen
     ]
   );
 
@@ -2289,7 +2365,10 @@ export default function App() {
       threadId: string,
       workspacePath: string,
       claudeSessionId: string,
-      { allowNotify = true }: { allowNotify?: boolean } = {}
+      {
+        allowNotify = true,
+        allowHistoricalSeenBootstrap = false
+      }: { allowNotify?: boolean; allowHistoricalSeenBootstrap?: boolean } = {}
     ) => {
       const normalizedSessionId = claudeSessionId.trim();
       if (!threadId || !workspacePath || !normalizedSessionId) {
@@ -2323,7 +2402,8 @@ export default function App() {
 
       return observeThreadJsonlCompletion(threadId, normalizedSessionId, completion, {
         persistNow: true,
-        allowNotify
+        allowNotify,
+        allowHistoricalSeenBootstrap
       });
     },
     [observeThreadJsonlCompletion, readLatestClaudeTurnCompletion]
@@ -2775,18 +2855,29 @@ export default function App() {
     }
 
     const nextSeededJsonlSessions: Record<string, string> = {};
+    let removedStaleJsonlCompletionAttention = false;
     for (const thread of Object.values(threadsByWorkspace).flat()) {
-      if (thread.isArchived) {
-        continue;
-      }
-      const claudeSessionId = thread.claudeSessionId?.trim() ?? '';
-      if (!claudeSessionId) {
+      const trackedJsonlAttention = resolveTrackedThreadJsonlCompletionAttention(thread);
+      if (
+        !shouldTrackThreadJsonlCompletionAttention(
+          {
+            isArchived: thread.isArchived,
+            claudeSessionId: trackedJsonlAttention.claudeSessionId
+          },
+          trackedJsonlAttention.workspaceKind
+        )
+      ) {
+        if (thread.id in threadJsonlCompletionAttentionByThreadRef.current) {
+          delete threadJsonlCompletionAttentionByThreadRef.current[thread.id];
+          removedStaleJsonlCompletionAttention = true;
+        }
         continue;
       }
       const workspace = workspaces.find((candidate) => candidate.id === thread.workspaceId);
       if (!workspace || workspace.kind !== 'local') {
         continue;
       }
+      const claudeSessionId = trackedJsonlAttention.claudeSessionId;
       nextSeededJsonlSessions[thread.id] = claudeSessionId;
       if (jsonlCompletionSeededSessionIdByThreadRef.current[thread.id] === claudeSessionId) {
         continue;
@@ -2794,8 +2885,13 @@ export default function App() {
       jsonlCompletionSeededSessionIdByThreadRef.current[thread.id] = claudeSessionId;
       resetThreadJsonlCompletionAttentionForSession(thread.id, claudeSessionId);
       void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, claudeSessionId, {
-        allowNotify: false
+        allowNotify: false,
+        allowHistoricalSeenBootstrap: true
       });
+    }
+    if (removedStaleJsonlCompletionAttention) {
+      threadJsonlCompletionAttentionDirtyRef.current = true;
+      setThreadJsonlCompletionAttentionVersion((current) => current + 1);
     }
     jsonlCompletionSeededSessionIdByThreadRef.current = nextSeededJsonlSessions;
 
@@ -2816,6 +2912,7 @@ export default function App() {
   }, [
     applyThreadUpdate,
     reconcileThreadJsonlCompletionAttention,
+    resolveTrackedThreadJsonlCompletionAttention,
     resetThreadJsonlCompletionAttentionForSession,
     threadsByWorkspace,
     workspaces
@@ -3237,16 +3334,30 @@ export default function App() {
   const unreadCompletedTurnByThread = useMemo(() => {
     const unreadByThread: Record<string, true> = {};
     for (const thread of allThreads) {
-      if (thread.isArchived) {
+      const trackedJsonlAttention = resolveTrackedThreadJsonlCompletionAttention(thread);
+      if (
+        !shouldTrackThreadJsonlCompletionAttention(
+          {
+            isArchived: thread.isArchived,
+            claudeSessionId: trackedJsonlAttention.claudeSessionId
+          },
+          trackedJsonlAttention.workspaceKind
+        )
+      ) {
         continue;
       }
-      if (!isUnreadJsonlCompletionAttention(threadJsonlCompletionAttentionByThreadRef.current[thread.id])) {
+      const state = threadJsonlCompletionAttentionByThreadRef.current[thread.id];
+      const claudeSessionId = trackedJsonlAttention.claudeSessionId;
+      if (!state || state.claudeSessionId !== claudeSessionId) {
+        continue;
+      }
+      if (!isUnreadJsonlCompletionAttention(state)) {
         continue;
       }
       unreadByThread[thread.id] = true;
     }
     return unreadByThread;
-  }, [allThreads, threadJsonlCompletionAttentionVersion]);
+  }, [allThreads, resolveTrackedThreadJsonlCompletionAttention, threadJsonlCompletionAttentionVersion]);
 
   const unreadCompletedTurnCount = useMemo(
     () => Object.keys(unreadCompletedTurnByThread).length,
@@ -5264,7 +5375,16 @@ export default function App() {
         setSelectedThread(undefined);
       }
 
-      await refreshThreadsForWorkspace(workspaceId);
+      let refreshed = false;
+      try {
+        await refreshThreadsForWorkspace(workspaceId);
+        refreshed = true;
+      } finally {
+        if (refreshed) {
+          releaseRemovedThread(threadId);
+        }
+        delete deletedThreadIdsRef.current[threadId];
+      }
     },
     [
       applyThreadUpdate,
@@ -5273,6 +5393,7 @@ export default function App() {
       invalidatePendingSessionStart,
       pushToast,
       refreshThreadsForWorkspace,
+      releaseRemovedThread,
       runStore,
       clearTerminalSessionTracking,
       clearThreadWorkingStopTimer,
@@ -6412,6 +6533,11 @@ export default function App() {
         return;
       }
       const claudeSessionId = thread.claudeSessionId?.trim() ?? '';
+      if (sessionMeta.turnCompletionMode === 'jsonl' && sessionMeta.workspaceKind === 'local' && !claudeSessionId) {
+        sessionMeta.claudeSessionId = null;
+        resetThreadJsonlCompletionAttentionForSession(thread.id, null);
+        return;
+      }
       if (!claudeSessionId || sessionMeta.claudeSessionId === claudeSessionId) {
         return;
       }
@@ -6639,8 +6765,10 @@ export default function App() {
       appearanceMode: AppearanceMode;
       defaultNewThreadFullAccess: boolean;
       taskCompletionAlerts: boolean;
+      terminalScrollbackLines: number;
     }) => {
       const taskCompletionAlerts = nextSettings.taskCompletionAlerts;
+      const terminalScrollbackLines = normalizeTerminalScrollbackLines(nextSettings.terminalScrollbackLines);
       const alertsJustEnabled = !settings.taskCompletionAlerts && taskCompletionAlerts;
       if (alertsJustEnabled) {
         taskCompletionAlertBootstrapAttemptedRef.current = true;
@@ -6651,7 +6779,8 @@ export default function App() {
           claudeCliPath: nextSettings.cliPath || null,
           appearanceMode: nextSettings.appearanceMode,
           defaultNewThreadFullAccess: nextSettings.defaultNewThreadFullAccess,
-          taskCompletionAlerts
+          taskCompletionAlerts,
+          terminalScrollbackLines
         })
       );
       setSettings(saved);
@@ -7720,6 +7849,7 @@ export default function App() {
               key={selectedThread.id}
               sessionId={selectedSessionId}
               streamState={selectedTerminalRenderStream}
+              scrollbackLines={settings.terminalScrollbackLines}
               contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
               readOnly={false}
               inputEnabled={
@@ -7800,6 +7930,7 @@ export default function App() {
           workspace={selectedWorkspace}
           sessionId={shellTerminalSessionId}
           streamState={shellTerminalStream}
+          scrollbackLines={settings.terminalScrollbackLines}
           height={shellDrawerHeight}
           starting={shellTerminalStarting}
           blockedMessage={
@@ -7824,6 +7955,7 @@ export default function App() {
         initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
         initialDefaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
         initialTaskCompletionAlerts={settings.taskCompletionAlerts === true}
+        initialTerminalScrollbackLines={normalizeTerminalScrollbackLines(settings.terminalScrollbackLines)}
         detectedCliPath={detectedCliPath}
         copyEnvDiagnosticsDisabled={!selectedWorkspace || selectedWorkspace.kind !== 'local'}
         onClose={() => setSettingsOpen(false)}

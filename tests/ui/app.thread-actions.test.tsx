@@ -366,6 +366,41 @@ describe('Thread actions', () => {
     });
   });
 
+  it('does not resurrect a deleted thread while the follow-up refresh is still pending', async () => {
+    const user = userEvent.setup();
+    let resolveRefresh: ((value: unknown) => void) | null = null;
+
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Rename me/i });
+    mocks.api.listThreads.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRefresh = resolve;
+        })
+    );
+
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => {
+      expect(mocks.api.deleteThread).toHaveBeenCalledWith('ws-1', 'thread-1');
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Rename me/i })).not.toBeInTheDocument();
+    });
+
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 100);
+      });
+    });
+
+    expect(screen.queryByRole('button', { name: /Rename me/i })).not.toBeInTheDocument();
+
+    resolveRefresh?.([]);
+  });
+
   it('closes context menu immediately even if backend delete is slow', async () => {
     const user = userEvent.setup();
     let resolveDelete: (() => void) | null = null;

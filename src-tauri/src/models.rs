@@ -1,6 +1,18 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub const TERMINAL_SCROLLBACK_LINES_MIN: u32 = 10_000;
+pub const TERMINAL_SCROLLBACK_LINES_DEFAULT: u32 = 100_000;
+pub const TERMINAL_SCROLLBACK_LINES_MAX: u32 = 250_000;
+
+fn default_terminal_scrollback_lines() -> u32 {
+    TERMINAL_SCROLLBACK_LINES_DEFAULT
+}
+
+pub fn normalize_terminal_scrollback_lines(value: u32) -> u32 {
+    value.clamp(TERMINAL_SCROLLBACK_LINES_MIN, TERMINAL_SCROLLBACK_LINES_MAX)
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceKind {
@@ -120,6 +132,8 @@ pub struct Settings {
     pub default_new_thread_full_access: bool,
     #[serde(default)]
     pub task_completion_alerts: bool,
+    #[serde(default = "default_terminal_scrollback_lines")]
+    pub terminal_scrollback_lines: u32,
 }
 
 impl Default for Settings {
@@ -129,7 +143,16 @@ impl Default for Settings {
             appearance_mode: AppearanceMode::System,
             default_new_thread_full_access: false,
             task_completion_alerts: false,
+            terminal_scrollback_lines: TERMINAL_SCROLLBACK_LINES_DEFAULT,
         }
+    }
+}
+
+impl Settings {
+    pub fn normalized(mut self) -> Self {
+        self.terminal_scrollback_lines =
+            normalize_terminal_scrollback_lines(self.terminal_scrollback_lines);
+        self
     }
 }
 
@@ -403,7 +426,11 @@ pub struct RunMetadata {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppearanceMode, Settings};
+    use super::{
+        normalize_terminal_scrollback_lines, AppearanceMode, Settings,
+        TERMINAL_SCROLLBACK_LINES_DEFAULT, TERMINAL_SCROLLBACK_LINES_MAX,
+        TERMINAL_SCROLLBACK_LINES_MIN,
+    };
 
     #[test]
     fn settings_default_to_system_appearance_and_standard_access() {
@@ -411,6 +438,10 @@ mod tests {
 
         assert_eq!(settings.appearance_mode, AppearanceMode::System);
         assert!(!settings.default_new_thread_full_access);
+        assert_eq!(
+            settings.terminal_scrollback_lines,
+            TERMINAL_SCROLLBACK_LINES_DEFAULT
+        );
     }
 
     #[test]
@@ -419,5 +450,21 @@ mod tests {
 
         assert_eq!(settings.appearance_mode, AppearanceMode::System);
         assert!(!settings.default_new_thread_full_access);
+        assert_eq!(
+            settings.terminal_scrollback_lines,
+            TERMINAL_SCROLLBACK_LINES_DEFAULT
+        );
+    }
+
+    #[test]
+    fn terminal_scrollback_lines_are_clamped_to_safe_bounds() {
+        assert_eq!(
+            normalize_terminal_scrollback_lines(1),
+            TERMINAL_SCROLLBACK_LINES_MIN
+        );
+        assert_eq!(
+            normalize_terminal_scrollback_lines(TERMINAL_SCROLLBACK_LINES_MAX + 1),
+            TERMINAL_SCROLLBACK_LINES_MAX
+        );
     }
 }

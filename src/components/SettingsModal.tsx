@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 
-import type { AppearanceMode } from '../types';
+import {
+  TERMINAL_SCROLLBACK_LINES_MAX,
+  TERMINAL_SCROLLBACK_LINES_MIN,
+  normalizeTerminalScrollbackLines,
+  type AppearanceMode
+} from '../types';
 import { SettingsActionFooter, SettingsRow, SettingsSection } from './SettingsLayout';
 
 interface SettingsModalProps {
@@ -9,6 +14,7 @@ interface SettingsModalProps {
   initialAppearanceMode: AppearanceMode;
   initialDefaultNewThreadFullAccess: boolean;
   initialTaskCompletionAlerts: boolean;
+  initialTerminalScrollbackLines: number;
   detectedCliPath?: string | null;
   copyEnvDiagnosticsDisabled?: boolean;
   onClose: () => void;
@@ -17,6 +23,7 @@ interface SettingsModalProps {
     appearanceMode: AppearanceMode;
     defaultNewThreadFullAccess: boolean;
     taskCompletionAlerts: boolean;
+    terminalScrollbackLines: number;
   }) => void;
   onCopyEnvDiagnostics?: () => void | Promise<void>;
   onSendTestAlert?: () => void | Promise<void>;
@@ -41,12 +48,19 @@ const APPEARANCE_OPTIONS: Array<{ value: AppearanceMode; label: string; descript
   }
 ];
 
+const SCROLLBACK_FIELD_STEP = 1_000;
+
+function formatScrollbackLines(value: number): string {
+  return value.toLocaleString('en-US');
+}
+
 export function SettingsModal({
   open,
   initialCliPath,
   initialAppearanceMode,
   initialDefaultNewThreadFullAccess,
   initialTaskCompletionAlerts,
+  initialTerminalScrollbackLines,
   detectedCliPath,
   copyEnvDiagnosticsDisabled = false,
   onClose,
@@ -59,6 +73,9 @@ export function SettingsModal({
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(initialAppearanceMode);
   const [defaultNewThreadFullAccess, setDefaultNewThreadFullAccess] = useState(initialDefaultNewThreadFullAccess);
   const [taskCompletionAlerts, setTaskCompletionAlerts] = useState(initialTaskCompletionAlerts);
+  const [terminalScrollbackLinesInput, setTerminalScrollbackLinesInput] = useState(
+    String(normalizeTerminalScrollbackLines(initialTerminalScrollbackLines))
+  );
 
   useEffect(() => {
     if (!open) {
@@ -68,7 +85,15 @@ export function SettingsModal({
     setAppearanceMode(initialAppearanceMode);
     setDefaultNewThreadFullAccess(initialDefaultNewThreadFullAccess);
     setTaskCompletionAlerts(initialTaskCompletionAlerts);
-  }, [initialAppearanceMode, initialCliPath, initialDefaultNewThreadFullAccess, initialTaskCompletionAlerts, open]);
+    setTerminalScrollbackLinesInput(String(normalizeTerminalScrollbackLines(initialTerminalScrollbackLines)));
+  }, [
+    initialAppearanceMode,
+    initialCliPath,
+    initialDefaultNewThreadFullAccess,
+    initialTaskCompletionAlerts,
+    initialTerminalScrollbackLines,
+    open
+  ]);
 
   useEffect(() => {
     if (!open) {
@@ -92,6 +117,10 @@ export function SettingsModal({
   if (!open) {
     return null;
   }
+
+  const terminalScrollbackLines = normalizeTerminalScrollbackLines(
+    Number.parseInt(terminalScrollbackLinesInput, 10)
+  );
 
   return (
     <div className="modal-backdrop">
@@ -157,6 +186,36 @@ export function SettingsModal({
                     </span>
                     <span className="settings-switch-label">{taskCompletionAlerts ? 'On' : 'Off'}</span>
                   </button>
+                }
+              />
+            </SettingsSection>
+
+            <SettingsSection
+              title="Terminal"
+              description="Choose how much terminal history stays available before older lines roll off."
+            >
+              <SettingsRow
+                align="start"
+                label={<label htmlFor="terminal-scrollback-lines">Scrollback lines</label>}
+                description={`Higher values preserve more history but increase terminal memory use. ${formatScrollbackLines(TERMINAL_SCROLLBACK_LINES_MIN)} to ${formatScrollbackLines(TERMINAL_SCROLLBACK_LINES_MAX)} lines.`}
+                controlClassName="settings-row-control-stack"
+                control={
+                  <>
+                    <input
+                      id="terminal-scrollback-lines"
+                      type="number"
+                      min={TERMINAL_SCROLLBACK_LINES_MIN}
+                      max={TERMINAL_SCROLLBACK_LINES_MAX}
+                      step={SCROLLBACK_FIELD_STEP}
+                      inputMode="numeric"
+                      value={terminalScrollbackLinesInput}
+                      onChange={(event) => setTerminalScrollbackLinesInput(event.target.value)}
+                      onBlur={() => setTerminalScrollbackLinesInput(String(terminalScrollbackLines))}
+                    />
+                    <p className="muted">
+                      Active value: {formatScrollbackLines(terminalScrollbackLines)} lines
+                    </p>
+                  </>
                 }
               />
             </SettingsSection>
@@ -261,7 +320,8 @@ export function SettingsModal({
                     cliPath: cliPath.trim(),
                     appearanceMode,
                     defaultNewThreadFullAccess,
-                    taskCompletionAlerts
+                    taskCompletionAlerts,
+                    terminalScrollbackLines
                   })
                 }
               >

@@ -137,6 +137,7 @@ export interface ThreadStore {
     endedAt?: string | null
   ) => void;
   applyThreadUpdate: (thread: ThreadMetadata) => void;
+  releaseRemovedThread: (threadId: string) => void;
   setThreadLastOutputAt: (threadId: string, timestampMs?: number) => void;
   clearThreadLastOutputAt: (threadId: string) => void;
   threadLastOutputAt: (threadId?: string) => number | null;
@@ -152,6 +153,7 @@ export function useThreadStore(): ThreadStore {
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const listRequestIdByWorkspaceRef = useRef<Record<string, number>>({});
   const removedThreadIdsRef = useRef<Record<string, true>>({});
+  const removedThreadWorkspaceIdByThreadRef = useRef<Record<string, string>>({});
   const lastOutputAtByThreadRef = useRef<Record<string, number>>({});
   const lastUserInputAtByThreadRef = useRef<Record<string, number>>(
     loadThreadTimestampMap(LAST_USER_INPUT_AT_STORAGE_KEY)
@@ -167,6 +169,14 @@ export function useThreadStore(): ThreadStore {
     if (listRequestIdByWorkspaceRef.current[workspaceId] !== requestId) {
       return sortedVisibleThreads;
     }
+    const serverThreadIds = new Set(threads.map((thread) => thread.id));
+    for (const [threadId, removedWorkspaceId] of Object.entries(removedThreadWorkspaceIdByThreadRef.current)) {
+      if (removedWorkspaceId !== workspaceId || serverThreadIds.has(threadId)) {
+        continue;
+      }
+      delete removedThreadIdsRef.current[threadId];
+      delete removedThreadWorkspaceIdByThreadRef.current[threadId];
+    }
     setThreadsByWorkspace((current) => ({
       ...current,
       [workspaceId]: sortedVisibleThreads
@@ -180,6 +190,7 @@ export function useThreadStore(): ThreadStore {
         ? await api.createThread(workspaceId, 'claude-code', true)
         : await api.createThread(workspaceId, 'claude-code');
     delete removedThreadIdsRef.current[thread.id];
+    delete removedThreadWorkspaceIdByThreadRef.current[thread.id];
     setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));
     setSelectedThreadId(thread.id);
     return thread;
@@ -205,10 +216,12 @@ export function useThreadStore(): ThreadStore {
 
   const archiveThread = useCallback(async (workspaceId: string, threadId: string) => {
     removedThreadIdsRef.current[threadId] = true;
+    removedThreadWorkspaceIdByThreadRef.current[threadId] = workspaceId;
     try {
       await api.archiveThread(workspaceId, threadId);
     } catch (error) {
       delete removedThreadIdsRef.current[threadId];
+      delete removedThreadWorkspaceIdByThreadRef.current[threadId];
       throw error;
     }
     setThreadsByWorkspace((current) => {
@@ -229,10 +242,12 @@ export function useThreadStore(): ThreadStore {
 
   const deleteThread = useCallback(async (workspaceId: string, threadId: string) => {
     removedThreadIdsRef.current[threadId] = true;
+    removedThreadWorkspaceIdByThreadRef.current[threadId] = workspaceId;
     try {
       await api.deleteThread(workspaceId, threadId);
     } catch (error) {
       delete removedThreadIdsRef.current[threadId];
+      delete removedThreadWorkspaceIdByThreadRef.current[threadId];
       throw error;
     }
     setThreadsByWorkspace((current) => {
@@ -256,6 +271,14 @@ export function useThreadStore(): ThreadStore {
       return;
     }
     setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));
+  }, []);
+
+  const releaseRemovedThread = useCallback((threadId: string) => {
+    if (!threadId) {
+      return;
+    }
+    delete removedThreadIdsRef.current[threadId];
+    delete removedThreadWorkspaceIdByThreadRef.current[threadId];
   }, []);
 
   const setThreadRunState = useCallback(
@@ -404,6 +427,7 @@ export function useThreadStore(): ThreadStore {
       setSelectedThread: setSelectedThreadId,
       setThreadRunState,
       applyThreadUpdate,
+      releaseRemovedThread,
       setThreadLastOutputAt,
       clearThreadLastOutputAt,
       threadLastOutputAt,
@@ -426,6 +450,7 @@ export function useThreadStore(): ThreadStore {
       selectedWorkspaceId,
       setThreadLastOutputAt,
       setThreadRunState,
+      releaseRemovedThread,
       subscribeThreadOutput,
       markThreadUserInput,
       clearThreadUserInputTimestamps,
