@@ -419,6 +419,61 @@ describe('TerminalPanel manual repair', () => {
     delete (globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__;
   });
 
+  it('renders completed Claude snapshots in a plain scrollback view when no session is active', () => {
+    const snapshotText = '\u001b[2JClaude Code\r\nframe one\r\nframe two\r\n';
+    const { container } = render(
+      <TerminalPanel
+        sessionId={null}
+        streamState={{
+          sessionId: 'session-1',
+          phase: 'ready',
+          text: snapshotText,
+          rawEndPosition: snapshotText.length,
+          startPosition: 0,
+          endPosition: snapshotText.length,
+          chunks: [],
+          resetToken: 1
+        }}
+        readOnly
+        inputEnabled={false}
+      />
+    );
+
+    const plainView = container.querySelector('.terminal-fallback');
+    expect(plainView).not.toBeNull();
+    expect(container.querySelector('.xterm-viewport')).toBeNull();
+    expect(plainView?.textContent).toContain('Claude Code');
+    expect(plainView?.textContent).toContain('frame one');
+    expect(plainView?.textContent).not.toContain('\u001b');
+    expect(mocks.terminals).toHaveLength(0);
+  });
+
+  it('keeps non-stateful historical output on xterm when no session is active', async () => {
+    const snapshotText = 'plain shell output\n$ ';
+    const { container } = render(
+      <TerminalPanel
+        sessionId={null}
+        streamState={{
+          sessionId: 'session-1',
+          phase: 'ready',
+          text: snapshotText,
+          rawEndPosition: snapshotText.length,
+          startPosition: 0,
+          endPosition: snapshotText.length,
+          chunks: [],
+          resetToken: 1
+        }}
+        readOnly
+        inputEnabled={false}
+      />
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector('.xterm-viewport')).not.toBeNull();
+      expect(mocks.terminals).toHaveLength(1);
+    });
+  });
+
   it('rebuilds the xterm buffer from the latest content when a repair is requested', async () => {
     const content = 'line 1\nline 2\nline 3';
     const { rerender } = render(

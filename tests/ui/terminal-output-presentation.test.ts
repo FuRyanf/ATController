@@ -57,7 +57,7 @@ describe('terminal output presentation', () => {
     ).toBe(true);
   });
 
-  it('collapses repeated fullscreen snapshots to the latest frame even when the log is under the clamp limit', () => {
+  it('preserves scrollback for fullscreen snapshots when the log is under the clamp limit', () => {
     const clear = '\u001b[2J\u001b[H';
     const frame1 = `${clear}Claude Code\nframe one\n`;
     const frame2 = `${clear}Claude Code\nframe two\n`;
@@ -69,7 +69,7 @@ describe('terminal output presentation', () => {
     });
 
     expect(next.preserveRaw).toBe(true);
-    expect(next.text).toBe(frame2);
-    expect(next.startOffset).toBe(raw.lastIndexOf(frame2));
+    expect(next.text).toBe(raw);
+    expect(next.startOffset).toBe(0);
   });
 });

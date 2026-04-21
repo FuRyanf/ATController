@@ -320,20 +320,6 @@ export function appendTerminalStreamChunk(
     return state;
   }
 
-  const repaintResetWindow = buildResetStateFromRepaintChunk(incomingChunk, maxChars);
-  if (repaintResetWindow) {
-    return {
-      ...state,
-      phase: 'ready',
-      text: repaintResetWindow.text,
-      rawEndPosition: incomingChunk.rawEndPosition,
-      startPosition: repaintResetWindow.startPosition,
-      endPosition: repaintResetWindow.endPosition,
-      chunks: [],
-      resetToken: state.resetToken + 1
-    };
-  }
-
   const visibleChunk = buildVisibleChunk(
     incomingChunk.rawStartPosition,
     incomingChunk.rawEndPosition,
@@ -395,7 +381,7 @@ export function hydrateTerminalSessionStream(
       continue;
     }
     const repaintResetWindow = buildResetStateFromRepaintChunk(normalizedRawChunk, maxChars);
-    if (repaintResetWindow) {
+    if (repaintResetWindow && normalizedRawChunk.rewoundBeforeMinRawStart) {
       nextWindow = repaintResetWindow;
       nextChunks = [];
       nextRawEndPosition = normalizedRawChunk.rawEndPosition;

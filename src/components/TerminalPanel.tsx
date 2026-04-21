@@ -25,7 +25,7 @@ import {
 } from '../lib/terminalFollowState';
 import { shouldScheduleTerminalStreamRepair } from '../lib/terminalStreamRepair';
 import type { TerminalSessionStreamState } from '../lib/terminalSessionStream';
-import { looksLikeStatefulTerminalUi } from '../lib/terminalUiHeuristics';
+import { looksLikeStatefulTerminalUi, stripAnsi } from '../lib/terminalUiHeuristics';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 import { TERMINAL_SCROLLBACK_LINES_DEFAULT, normalizeTerminalScrollbackLines } from '../types';
 
@@ -145,6 +145,36 @@ function getViewportResumeNearBottomThresholdPx(viewport: HTMLElement | null): n
   );
 }
 
+function renderHistoricalTerminalScrollback(text: string): string {
+  if (!text) {
+    return '';
+  }
+
+  return stripAnsi(text)
+    .replace(/\r\n?/gu, '\n')
+    .replace(/[\u0000\b]/gu, '');
+}
+
+function countPlainTextMatches(text: string, query: string): number {
+  if (!text || !query) {
+    return 0;
+  }
+
+  const normalizedText = text.toLocaleLowerCase();
+  const normalizedQuery = query.toLocaleLowerCase();
+  let count = 0;
+  let searchStart = 0;
+  while (searchStart < normalizedText.length) {
+    const matchIndex = normalizedText.indexOf(normalizedQuery, searchStart);
+    if (matchIndex === -1) {
+      break;
+    }
+    count += 1;
+    searchStart = matchIndex + normalizedQuery.length;
+  }
+  return count;
+}
+
 function TerminalPanelComponent({
   sessionId = null,
   streamState = null,
@@ -174,6 +204,14 @@ function TerminalPanelComponent({
       import.meta.env.MODE === 'test' &&
       !(globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__
   );
+  const renderedPlainText = streamState?.text ?? content;
+  const historicalStatefulScrollbackMode =
+    !sessionId &&
+    looksLikeStatefulTerminalUi(renderedPlainText);
+  const plainViewText = historicalStatefulScrollbackMode
+    ? renderHistoricalTerminalScrollback(renderedPlainText)
+    : renderedPlainText;
+  const usePreformattedView = fallback || historicalStatefulScrollbackMode;
   const [followOutputPaused, setFollowOutputPaused] = useState(false);
   const [terminalDebugLines, setTerminalDebugLines] = useState<string[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -1198,7 +1236,7 @@ function TerminalPanelComponent({
   }, [streamState]);
 
   useEffect(() => {
-    if (fallback) {
+    if (usePreformattedView) {
       return;
     }
 
@@ -2008,7 +2046,7 @@ function TerminalPanelComponent({
     clearDeferredInitialReplay,
     clearOptimisticSubmitCursorHide,
     clearPausedViewportScrollTop,
-    fallback,
+    usePreformattedView,
     estimateViewportScrollbackOffset,
     flushOutgoingInput,
     logTerminalDebug,
@@ -2072,9 +2110,10 @@ function TerminalPanelComponent({
       clearSearchResults();
       return;
     }
-    if (fallback) {
-      setSearchResultCount(searchQuery ? 1 : 0);
-      setSearchResultIndex(searchQuery ? 0 : -1);
+    if (usePreformattedView) {
+      const matchCount = countPlainTextMatches(plainViewText, searchQuery);
+      setSearchResultCount(matchCount);
+      setSearchResultIndex(matchCount > 0 ? 0 : -1);
       return;
     }
     if (!searchQuery) {
@@ -2082,7 +2121,7 @@ function TerminalPanelComponent({
       return;
     }
     runTerminalSearch(searchQuery, 'next', true);
-  }, [clearSearchResults, fallback, runTerminalSearch, searchOpen, searchQuery]);
+  }, [clearSearchResults, plainViewText, runTerminalSearch, searchOpen, searchQuery, usePreformattedView]);
 
   useEffect(() => {
     readOnlyRef.current = readOnly;
@@ -2490,7 +2529,7 @@ function TerminalPanelComponent({
         ? '0 results'
         : 'Find';
 
-  if (fallback) {
+  if (usePreformattedView) {
     return (
       <section
         className={searchOpen ? 'terminal-panel terminal-panel-search-open' : 'terminal-panel'}
@@ -2518,7 +2557,7 @@ function TerminalPanelComponent({
               />
             </div>
             <span className="terminal-search-count" data-testid="terminal-search-count">
-              Renderer fallback
+              {historicalStatefulScrollbackMode ? searchResultLabel : 'Renderer fallback'}
             </span>
             <button
               type="button"
@@ -2533,7 +2572,7 @@ function TerminalPanelComponent({
             </button>
           </div>
         ) : null}
-        <pre className="terminal-fallback">{content}</pre>
+        <pre className="terminal-fallback">{plainViewText}</pre>
         {terminalDebugEnabled && terminalDebugLines.length > 0 ? (
           <pre
             aria-hidden="true"
