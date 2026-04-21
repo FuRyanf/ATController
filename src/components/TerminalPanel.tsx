@@ -42,6 +42,7 @@ const VIEWPORT_OFF_BOTTOM_THRESHOLD_PX = 4;
 const VIEWPORT_RESUME_NEAR_BOTTOM_MIN_PX = 96;
 const VIEWPORT_RESUME_NEAR_BOTTOM_MAX_PX = 240;
 const VIEWPORT_OVERLAY_SCROLLBAR_HIT_WIDTH_PX = 24;
+const PROGRAMMATIC_VIEWPORT_SCROLL_SUPPRESSION_MS = 220;
 const DEFERRED_INITIAL_REPLAY_FALLBACK_MS = 1_400;
 const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
 const MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS = 64;
@@ -290,6 +291,7 @@ function TerminalPanelComponent({
   const pendingRepairStateRef = useRef<PendingRepairState | null>(null);
   const deferredInitialReplayTimerRef = useRef<number | null>(null);
   const pendingStatefulResizeDimensionsRef = useRef<{ cols: number; rows: number } | null>(null);
+  const programmaticViewportScrollSuppressUntilRef = useRef(0);
 
   const logTerminalDebug = useCallback(
     (scope: string, data: Record<string, unknown> = {}, term: Terminal | null = terminalRef.current) => {
@@ -546,6 +548,37 @@ function TerminalPanelComponent({
     return notifyResizeDimensionsIfChanged(term.cols, term.rows);
   }, [notifyResizeDimensionsIfChanged]);
 
+  const armProgrammaticViewportScrollSuppression = useCallback(
+    (reason: string, term: Terminal | null = terminalRef.current) => {
+      const nextUntil = Date.now() + PROGRAMMATIC_VIEWPORT_SCROLL_SUPPRESSION_MS;
+      programmaticViewportScrollSuppressUntilRef.current = nextUntil;
+      logTerminalDebug('viewport:scroll-suppress-arm', {
+        reason,
+        until: nextUntil
+      }, term);
+    },
+    [logTerminalDebug]
+  );
+
+  const clearProgrammaticViewportScrollSuppression = useCallback(
+    (reason: string, term: Terminal | null = terminalRef.current) => {
+      if (programmaticViewportScrollSuppressUntilRef.current === 0) {
+        return;
+      }
+      logTerminalDebug('viewport:scroll-suppress-clear', {
+        reason,
+        until: programmaticViewportScrollSuppressUntilRef.current
+      }, term);
+      programmaticViewportScrollSuppressUntilRef.current = 0;
+    },
+    [logTerminalDebug]
+  );
+
+  const isProgrammaticViewportScrollSuppressed = useCallback(
+    () => Date.now() < programmaticViewportScrollSuppressUntilRef.current,
+    []
+  );
+
   const applyMeasuredLocalResize = useCallback((term: Terminal, dims: { cols: number; rows: number } | null) => {
     if (!dims || isNaN(dims.cols) || isNaN(dims.rows)) {
       return;
@@ -553,8 +586,9 @@ function TerminalPanelComponent({
     if (term.cols === dims.cols && term.rows === dims.rows) {
       return;
     }
+    armProgrammaticViewportScrollSuppression('apply-measured-local-resize', term);
     term.resize(dims.cols, dims.rows);
-  }, []);
+  }, [armProgrammaticViewportScrollSuppression]);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     const autoFollow = shouldAutoFollow(followStateRef.current);
@@ -1407,10 +1441,7 @@ function TerminalPanelComponent({
       const fitAndNotify = () => {
         logTerminalDebug('fit:fitAndNotify:start', {}, term);
         const dims = fitAddon.proposeDimensions();
-        if (dims && !isNaN(dims.cols) && !isNaN(dims.rows) &&
-            (term.cols !== dims.cols || term.rows !== dims.rows)) {
-          term.resize(dims.cols, dims.rows);
-        }
+        applyMeasuredLocalResize(term, dims ?? null);
         notifyResizeIfChanged(term);
         if (shouldAutoFollow(followStateRef.current)) {
           scrollToBottomSoon(term);
@@ -1763,6 +1794,7 @@ function TerminalPanelComponent({
       });
 
       const onWheel = (event: WheelEvent) => {
+        clearProgrammaticViewportScrollSuppression('wheel', term);
         armUserViewportInteraction();
         logTerminalDebug('wheel', {
           deltaY: event.deltaY
@@ -1796,6 +1828,10 @@ function TerminalPanelComponent({
           userScrollIntentRef.current ||
           userViewportCapturePendingRef.current ||
           viewportPointerDownRef.current;
+        const ignoreProgrammaticViewportScroll =
+          !userInteracting &&
+          shouldAutoFollow(followStateRef.current) &&
+          isProgrammaticViewportScrollSuppressed();
         logTerminalDebug('viewport:scroll', {
           scrollTop: viewport?.scrollTop ?? null,
           scrollHeight: viewport?.scrollHeight ?? null,
@@ -1803,6 +1839,7 @@ function TerminalPanelComponent({
           distanceFromBottomPx,
           estimatedScrollbackOffset,
           userInteracting,
+          ignoreProgrammaticViewportScroll,
           movingTowardBottom,
           nearBottomResumeThresholdPx,
           pausedViewportScrollTop: pausedViewportScrollTopRef.current
@@ -1852,6 +1889,12 @@ function TerminalPanelComponent({
           !bulkWritingRef.current &&
           shouldAutoFollow(followStateRef.current)
         ) {
+          if (ignoreProgrammaticViewportScroll) {
+            logTerminalDebug('follow:viewport-scroll-ignore-programmatic', {
+              distanceFromBottomPx
+            }, term);
+            return;
+          }
           if (userScrollIntentRef.current) {
             logTerminalDebug('follow:viewport-scroll-pause', {
               distanceFromBottomPx
@@ -1878,6 +1921,7 @@ function TerminalPanelComponent({
         }
       };
       const onViewportPointerDown = (e: PointerEvent) => {
+        clearProgrammaticViewportScrollSuppression('viewport-pointerdown', term);
         // Only set scroll intent when the click lands in the native scrollbar area.
         // el.clientWidth excludes the permanent scrollbar gutter; clicks beyond it are on the track.
         // In macOS overlay-scrollbar mode there is no gutter, so also treat a click near the
@@ -1941,28 +1985,17 @@ function TerminalPanelComponent({
       // dimensions — it does not mutate them — so there is no re-entry risk.
       const observer = new ResizeObserver(() => {
         const currentStreamState = streamState;
-        const shouldForceStatefulResizeResync =
+        const isLiveStatefulResize =
           currentStreamState !== null &&
           sessionRef.current === currentStreamState.sessionId &&
           statefulSessionRef.current &&
           shouldAutoFollow(followStateRef.current);
         const measuredDims = fitAddon.proposeDimensions();
         logTerminalDebug('host:resize-observer', {
-          shouldForceStatefulResizeResync,
+          isLiveStatefulResize,
           measuredCols: measuredDims?.cols ?? null,
           measuredRows: measuredDims?.rows ?? null
         }, term);
-        if (shouldForceStatefulResizeResync) {
-          clearPendingWrites();
-          clearScheduledStreamRepair();
-          if (measuredDims && !isNaN(measuredDims.cols) && !isNaN(measuredDims.rows)) {
-            pendingStatefulResizeDimensionsRef.current = measuredDims;
-            notifyResizeDimensionsIfChanged(measuredDims.cols, measuredDims.rows);
-          }
-          onStatefulRedrawRequestRef.current?.();
-          scheduleTerminalRefresh(term);
-          return;
-        }
         fitPreservingViewport();
       });
       observer.observe(host);
@@ -1991,6 +2024,7 @@ function TerminalPanelComponent({
         bulkWritingRef.current = false;
         isWritingRef.current = false;
         pendingStatefulResizeDimensionsRef.current = null;
+        programmaticViewportScrollSuppressUntilRef.current = 0;
         bulkWriteEpochRef.current += 1;
         fitWithReflowRef.current = null;
         lastReportedTerminalSizeRef.current = null;
@@ -2043,12 +2077,14 @@ function TerminalPanelComponent({
     armOptimisticSubmitCursorHide,
     armUserViewportInteraction,
     capturePausedViewportScrollTop,
+    clearProgrammaticViewportScrollSuppression,
     clearDeferredInitialReplay,
     clearOptimisticSubmitCursorHide,
     clearPausedViewportScrollTop,
     usePreformattedView,
     estimateViewportScrollbackOffset,
     flushOutgoingInput,
+    isProgrammaticViewportScrollSuppressed,
     logTerminalDebug,
     maybeLogQueueHealth,
     openExternalLink,
@@ -2337,6 +2373,9 @@ function TerminalPanelComponent({
     ) {
       applyMeasuredLocalResize(term, pendingStatefulResizeDimensions);
       pendingStatefulResizeDimensionsRef.current = null;
+      if (shouldAutoFollow(followStateRef.current)) {
+        scrollToBottomSoon(term);
+      }
       scheduleTerminalRefresh(term);
     }
     const freezeStatefulWhilePaused =
@@ -2384,7 +2423,7 @@ function TerminalPanelComponent({
       const canReplayVisibleSuffix =
         renderedStreamEndPositionRef.current >= streamState.startPosition &&
         renderedStreamEndPositionRef.current <= streamState.endPosition;
-      if (canReplayVisibleSuffix && !statefulLiveScreen) {
+      if (canReplayVisibleSuffix) {
         const replayOffset = renderedStreamEndPositionRef.current - streamState.startPosition;
         const delta = streamState.text.slice(replayOffset);
         if (delta.length > 0) {

@@ -1,4 +1,4 @@
-import { clampTerminalWindow, stripTerminalBufferSwitchSequences } from './terminalLogClamp';
+import { clampTerminalWindow, extractLatestTerminalScreenWindow } from './terminalLogClamp';
 import { looksLikeStatefulTerminalUi } from './terminalUiHeuristics';
 
 interface PresentTerminalTextOptions {
@@ -42,11 +42,10 @@ export function presentTerminalWindow(
   const preserveRaw = shouldPreserveRawTerminalPresentation(rawText, options.currentText);
   const visibleText =
     preserveRaw || !options.stripHiddenPrompts ? rawText : options.stripHiddenPrompts(rawText);
-  const sanitizedVisibleText =
+  const clamped =
     preserveRaw && looksLikeStatefulTerminalUi(visibleText)
-      ? stripTerminalBufferSwitchSequences(visibleText)
-      : visibleText;
-  const clamped = clampTerminalWindow(sanitizedVisibleText, options.maxChars);
+      ? extractLatestTerminalScreenWindow(visibleText, options.maxChars)
+      : clampTerminalWindow(visibleText, options.maxChars);
   return {
     text: clamped.text,
     startOffset: clamped.startOffset,
@@ -59,7 +58,7 @@ export function presentTerminalEventData(
   options: PresentTerminalEventOptions
 ): string {
   if (shouldPreserveRawTerminalPresentation(rawData, options.currentText)) {
-    return stripTerminalBufferSwitchSequences(rawData);
+    return rawData;
   }
   return options.stripHiddenPrompts ? options.stripHiddenPrompts(rawData) : rawData;
 }

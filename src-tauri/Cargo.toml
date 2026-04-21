@@ -1,6 +1,6 @@
 [package]
 name = "atcontroller"
-version = "0.0.10"
+version = "0.0.11"
 description = "Native macOS desktop control plane for local Claude Code workflows."
 authors = ["ATController contributors"]
 license = "MIT"

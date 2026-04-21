@@ -23,7 +23,7 @@ describe('terminal output presentation', () => {
   });
 
   it('preserves raw event data when the current stream already looks stateful', () => {
-    const rawEvent = '\u001b[12AReading 1 file…';
+    const rawEvent = '\u001b[?1049l\u001b[12AReading 1 file…';
     const stripHiddenPrompts = vi.fn((text: string) => text.replace('Reading', ''));
 
     const next = presentTerminalEventData(rawEvent, {
@@ -57,7 +57,7 @@ describe('terminal output presentation', () => {
     ).toBe(true);
   });
 
-  it('preserves scrollback for fullscreen snapshots when the log is under the clamp limit', () => {
+  it('keeps only the latest fullscreen frame when the log is under the clamp limit', () => {
     const clear = '\u001b[2J\u001b[H';
     const frame1 = `${clear}Claude Code\nframe one\n`;
     const frame2 = `${clear}Claude Code\nframe two\n`;
@@ -69,7 +69,7 @@ describe('terminal output presentation', () => {
     });
 
     expect(next.preserveRaw).toBe(true);
-    expect(next.text).toBe(raw);
-    expect(next.startOffset).toBe(0);
+    expect(next.text).toBe(frame2);
+    expect(next.startOffset).toBe(raw.lastIndexOf(frame2));
   });
 });

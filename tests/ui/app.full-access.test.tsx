@@ -348,11 +348,13 @@ vi.mock('../../src/components/TerminalPanel', () => ({
     content,
     streamState,
     onData,
+    onResize,
     scrollbackLines
   }: {
     content?: string;
     streamState?: { text?: string } | null;
     onData?: (data: string) => void;
+    onResize?: (cols: number, rows: number) => void;
     scrollbackLines?: number;
   }) => (
     <section data-testid="terminal-panel-mock" data-scrollback-lines={scrollbackLines ?? ''}>
@@ -362,6 +364,9 @@ vi.mock('../../src/components/TerminalPanel', () => ({
       </button>
       <button type="button" onClick={() => onData?.('ship it\r')}>
         Submit prompt
+      </button>
+      <button type="button" onClick={() => onResize?.(132, 40)}>
+        Resize terminal
       </button>
     </section>
   )
@@ -993,6 +998,117 @@ describe('Terminal launch flags', () => {
     expect(mocks.api.terminalReadOutput.mock.invocationCallOrder[replacementReadIndex]).toBeLessThan(
       mocks.api.terminalWrite.mock.invocationCallOrder[replayIndex]
     );
+  });
+
+  it('keeps a ready stateful stream in place when the local terminal resizes', async () => {
+    const initialSnapshot = '\u001b[2J\u001b[HClaude Code\nbypass permissions on';
+    const replacementSnapshot = '\u001b[2J\u001b[HClaude Code\nlatest frame only';
+    mocks.api.terminalReadOutput.mockResolvedValue({
+      text: initialSnapshot,
+      startPosition: 0,
+      endPosition: initialSnapshot.length,
+      truncated: false
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(screen.getByTestId('terminal-content-mock').textContent ?? '').toContain('bypass permissions on');
+    });
+
+    mocks.api.terminalReadOutput.mockClear();
+    mocks.api.terminalReadOutput.mockResolvedValue({
+      text: replacementSnapshot,
+      startPosition: 0,
+      endPosition: replacementSnapshot.length,
+      truncated: false
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Resize terminal' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalResize).toHaveBeenCalledWith('session-1', 132, 40);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.api.terminalReadOutput).not.toHaveBeenCalled();
+    const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
+    expect(rendered).toContain('bypass permissions on');
+    expect(rendered).not.toContain('latest frame only');
+  });
+
+  it('rehydrates a ready stateful stream after switching away and back', async () => {
+    const initialSnapshot = '\u001b[2J\u001b[HClaude Code\nold dimensions';
+    const refreshedSnapshot = '\u001b[2J\u001b[HClaude Code\nnew dimensions';
+    const plainSnapshot = 'workspace shell';
+    let useRefreshedSnapshot = false;
+    mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
+      if (sessionId === 'session-1') {
+        const text = useRefreshedSnapshot ? refreshedSnapshot : initialSnapshot;
+        return {
+          text,
+          startPosition: 0,
+          endPosition: text.length,
+          truncated: false
+        };
+      }
+      return {
+        text: plainSnapshot,
+        startPosition: 0,
+        endPosition: plainSnapshot.length,
+        truncated: false
+      };
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(screen.getByTestId('terminal-content-mock').textContent ?? '').toContain('old dimensions');
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Resize terminal' }));
+    await waitFor(() => {
+      expect(mocks.api.terminalResize).toHaveBeenCalledWith('session-1', 132, 40);
+    });
+
+    await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
+    await user.click(await screen.findByRole('button', { name: 'Normal thread' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-2',
+          fullAccessFlag: false
+        })
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('terminal-content-mock').textContent ?? '').toContain(plainSnapshot);
+    });
+
+    useRefreshedSnapshot = true;
+    mocks.api.terminalReadOutput.mockClear();
+
+    const firstThreadButton = document.querySelector('[data-thread-id="thread-1"] .thread-button') as
+      | HTMLButtonElement
+      | null;
+    expect(firstThreadButton).not.toBeNull();
+    await user.click(firstThreadButton as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(mocks.api.terminalReadOutput).toHaveBeenCalledWith('session-1');
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('terminal-content-mock').textContent ?? '').toContain('new dimensions');
+    });
   });
 
   it('toggles full access in-place for rdev without reconnecting', async () => {

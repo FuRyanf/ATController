@@ -250,7 +250,7 @@ describe('terminalSessionStream', () => {
     expect(hydrated.chunks).toEqual([]);
   });
 
-  it('keeps snapshot scrollback when a later buffered repaint chunk arrives during hydration', () => {
+  it('replaces the snapshot with a later buffered repaint chunk during hydration', () => {
     const clear = '\u001b[2J\u001b[H';
     const frame1 = `${clear}Claude Code\nframe one\n`;
     const frame2 = `${clear}Claude Code\nframe two\n`;
@@ -279,19 +279,11 @@ describe('terminalSessionStream', () => {
     );
 
     expect(hydrated.phase).toBe('ready');
-    expect(hydrated.text).toBe(`${frame1}${frame2}`);
-    expect(hydrated.startPosition).toBe(0);
+    expect(hydrated.text).toBe(frame2);
+    expect(hydrated.startPosition).toBe(frame1.length);
     expect(hydrated.endPosition).toBe(frame1.length + frame2.length);
     expect(hydrated.rawEndPosition).toBe(frame1.length + frame2.length);
-    expect(hydrated.chunks).toEqual([
-      {
-        rawStartPosition: frame1.length,
-        rawEndPosition: frame1.length + frame2.length,
-        startPosition: frame1.length,
-        endPosition: frame1.length + frame2.length,
-        data: frame2
-      }
-    ]);
+    expect(hydrated.chunks).toEqual([]);
   });
 
   it('keeps ready-stream scrollback when a repaint chunk arrives after hydration', () => {

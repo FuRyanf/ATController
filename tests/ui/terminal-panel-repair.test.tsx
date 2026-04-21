@@ -1436,7 +1436,7 @@ describe('TerminalPanel manual repair', () => {
     });
   });
 
-  it('requests a stateful resync when the host resizes during live fullscreen rendering', async () => {
+  it('keeps the live xterm buffer when the host resizes during fullscreen rendering', async () => {
     const initialContent = `\u001b[?1049h${Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join('\n')}`;
     const onStatefulRedrawRequest = vi.fn();
     render(
@@ -1487,9 +1487,91 @@ describe('TerminalPanel manual repair', () => {
       await Promise.resolve();
     });
 
-    expect(onStatefulRedrawRequest).toHaveBeenCalledTimes(1);
+    expect(onStatefulRedrawRequest).not.toHaveBeenCalled();
     expect(term.scrollToLine).not.toHaveBeenCalled();
-    expect(term.resize).not.toHaveBeenCalled();
+    expect(term.resize).toHaveBeenCalledWith(80, 24);
+  });
+
+  it('does not surface Jump to latest when a programmatic resize scroll fires during a live fullscreen resize', async () => {
+    const initialContent = `\u001b[?1049h${Array.from({ length: 24 }, (_, index) => `line ${index + 1}`).join('\n')}`;
+    const onStatefulRedrawRequest = vi.fn();
+    const { container, queryByRole } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={{
+          sessionId: 'session-1',
+          phase: 'ready',
+          text: initialContent,
+          rawEndPosition: initialContent.length,
+          startPosition: 0,
+          endPosition: initialContent.length,
+          chunks: [
+            {
+              rawStartPosition: 0,
+              rawEndPosition: initialContent.length,
+              startPosition: 0,
+              endPosition: initialContent.length,
+              data: initialContent
+            }
+          ],
+          resetToken: 1
+        }}
+        readOnly={false}
+        inputEnabled
+        cursorVisible={false}
+        onStatefulRedrawRequest={onStatefulRedrawRequest}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 1000
+    });
+
+    expect(resizeObserverCallback).not.toBeNull();
+    term.cols = 64;
+    term.rows = 20;
+
+    const originalResize = term.resize.getMockImplementation();
+    term.resize.mockImplementation((cols: number, rows: number) => {
+      originalResize?.(cols, rows);
+      if (cols === 80 && rows === 24) {
+        term.buffer.active.baseY = 20;
+        term.buffer.active.viewportY = 20;
+        setViewportMetrics(viewport as HTMLElement, {
+          clientHeight: 240,
+          scrollHeight: 1240,
+          scrollTop: 940
+        });
+        fireEvent.scroll(viewport as HTMLElement);
+      }
+    });
+
+    await act(async () => {
+      resizeObserverCallback?.([], {} as ResizeObserver);
+      await Promise.resolve();
+    });
+
+    expect(onStatefulRedrawRequest).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(term.resize).toHaveBeenCalledWith(80, 24);
+    });
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
   it('restores the latest paused viewport when streamed output lands before fit-preserve capture runs', async () => {
@@ -3251,6 +3333,74 @@ describe('TerminalPanel manual repair', () => {
 
     await waitFor(() => {
       expect(term.write).toHaveBeenCalledWith('ghij', expect.any(Function));
+      expect(term.reset).not.toHaveBeenCalled();
+    });
+  });
+
+  it('replays the visible suffix for a live stateful screen instead of resetting', async () => {
+    const initialText = '\u001b[2J\u001b[HClaude Code\nbypass permissions on';
+    const initialStreamState = {
+      sessionId: 'session-1',
+      phase: 'ready' as const,
+      text: initialText,
+      rawEndPosition: initialText.length,
+      startPosition: 0,
+      endPosition: initialText.length,
+      chunks: [],
+      resetToken: 1
+    };
+    const { rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={initialStreamState}
+        content={initialStreamState.text}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialStreamState.text, expect.any(Function));
+    });
+
+    term.write.mockClear();
+    term.reset.mockClear();
+
+    const suffix = '\nnext';
+    const nextStreamState = {
+      ...initialStreamState,
+      text: `${initialText.slice(2)}${suffix}`,
+      rawEndPosition: initialText.length + suffix.length,
+      startPosition: 2,
+      endPosition: initialText.length + suffix.length,
+      chunks: [
+        {
+          rawStartPosition: initialText.length + suffix.length - 2,
+          rawEndPosition: initialText.length + suffix.length,
+          startPosition: initialText.length + suffix.length - 2,
+          endPosition: initialText.length + suffix.length,
+          data: suffix.slice(-2)
+        }
+      ]
+    };
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={nextStreamState}
+        content={nextStreamState.text}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(suffix, expect.any(Function));
       expect(term.reset).not.toHaveBeenCalled();
     });
   });

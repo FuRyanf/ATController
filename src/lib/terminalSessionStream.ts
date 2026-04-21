@@ -381,7 +381,7 @@ export function hydrateTerminalSessionStream(
       continue;
     }
     const repaintResetWindow = buildResetStateFromRepaintChunk(normalizedRawChunk, maxChars);
-    if (repaintResetWindow && normalizedRawChunk.rewoundBeforeMinRawStart) {
+    if (repaintResetWindow) {
       nextWindow = repaintResetWindow;
       nextChunks = [];
       nextRawEndPosition = normalizedRawChunk.rawEndPosition;

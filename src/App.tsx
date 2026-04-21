@@ -1610,6 +1610,10 @@ export default function App() {
   const terminalHydrationRequestIdByThreadRef = useRef<Record<string, number>>({});
   const lastSentTerminalSizeBySessionRef = useRef<Record<string, { cols: number; rows: number }>>({});
   const selectedSessionIdRef = useRef<string | null>(null);
+  const previousSelectedTerminalBindingRef = useRef<{ threadId: string | null; sessionId: string | null }>({
+    threadId: null,
+    sessionId: null
+  });
   const statefulTerminalResyncTimerRef = useRef<number | null>(null);
   const statefulRedrawRequestTokenRef = useRef(0);
   const autoRecoverInFlightRef = useRef(false);
@@ -4045,6 +4049,7 @@ export default function App() {
       options: {
         forceFreshReadySnapshot?: boolean;
         keepSelectedStatefulHydrationOverlayOnFailure?: boolean;
+        rebindReadyStatefulStream?: boolean;
         requestId?: number;
         retryDelaysMs?: readonly number[];
       } = {}
@@ -4114,14 +4119,21 @@ export default function App() {
       const requiresReadySignal = requiresExplicitSshReadySignal(sessionMeta?.workspaceKind);
       const nextSnapshot = normalizeThreadTerminalSnapshot(threadId, snapshot);
       updateThreadTerminalStream(threadId, (current) => {
+        const hydrationState =
+          options.rebindReadyStatefulStream &&
+          current.sessionId === sessionId &&
+          current.phase === 'ready' &&
+          shouldPreserveRawTerminalPresentation(current.text)
+            ? bindTerminalSessionStream(current, sessionId)
+            : current;
         if (options.forceFreshReadySnapshot) {
           return presentTerminalSnapshot(
-            bindLiveTerminalSessionStream(current, sessionId),
+            bindLiveTerminalSessionStream(hydrationState, sessionId),
             nextSnapshot,
             TERMINAL_LOG_BUFFER_CHARS
           );
         }
-        return hydrateTerminalSessionStream(current, sessionId, nextSnapshot, TERMINAL_LOG_BUFFER_CHARS);
+        return hydrateTerminalSessionStream(hydrationState, sessionId, nextSnapshot, TERMINAL_LOG_BUFFER_CHARS);
       });
       if (
         threadId === selectedThreadIdRef.current &&
@@ -5879,8 +5891,20 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedThread) {
+      previousSelectedTerminalBindingRef.current = {
+        threadId: null,
+        sessionId: null
+      };
       return;
     }
+    const rememberSelectedTerminalBinding = (sessionId: string | null) => {
+      previousSelectedTerminalBindingRef.current = {
+        threadId: selectedThread.id,
+        sessionId
+      };
+    };
+    const currentSelectedBindingSessionId =
+      selectedSessionId ?? activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? null;
     if (
       !allowFreshStartAfterForkFailureByThreadRef.current[selectedThread.id] &&
       isThreadMissingClaimedForkSession(selectedThread)
@@ -5898,35 +5922,44 @@ export default function App() {
       );
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
       setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
+      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
       return;
     }
     // Fork resolution runs in the background — don't block the terminal.
     // The user may need to send the first message before the child JSONL
     // appears (--fork-session clones), so input must stay enabled.
     if (selectedThreadAwaitingForkResolution) {
+      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
       return;
     }
     if (selectedThreadForkResolutionFailureBlocked) {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
       setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
+      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
       return;
     }
     if (selectedThreadResumeFailureBlocked) {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
       setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
+      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
       return;
     }
     if (selectedThreadSshStartupBlockReason) {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
       setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
+      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
       return;
     }
     if ((sessionFailCountByThreadRef.current[selectedThread.id] ?? 0) >= 3) {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
+      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
       return;
     }
-    const existingSessionId = selectedSessionId ?? activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? null;
+    const existingSessionId = currentSelectedBindingSessionId;
     if (existingSessionId) {
+      const canReuseMountedSelectedTerminal =
+        previousSelectedTerminalBindingRef.current.threadId === selectedThread.id &&
+        previousSelectedTerminalBindingRef.current.sessionId === existingSessionId;
       const existingSessionMeta = sessionMetaBySessionIdRef.current[existingSessionId];
       const requiresReadySignal = requiresExplicitSshReadySignal(
         existingSessionMeta?.workspaceKind ?? selectedWorkspace?.kind
@@ -5939,40 +5972,25 @@ export default function App() {
         );
       }
       const stream = terminalStreamsByThreadRef.current[selectedThread.id];
-      const shouldForceStatefulHydration =
+      const hasReadyStatefulStream =
         stream?.sessionId === existingSessionId &&
         stream.phase === 'ready' &&
         shouldPreserveRawTerminalPresentation(stream.text);
-      const lastSentTerminalSize = lastSentTerminalSizeBySessionRef.current[existingSessionId];
-      const shouldSuppressCachedStatefulStream =
-        shouldForceStatefulHydration &&
-        Boolean(
-          lastSentTerminalSize &&
-          (
-            lastSentTerminalSize.cols !== terminalSize.cols ||
-            lastSentTerminalSize.rows !== terminalSize.rows
-          )
+      const hasReadyReusablePlainStream =
+        stream?.sessionId === existingSessionId &&
+        stream.phase === 'ready' &&
+        !shouldPreserveRawTerminalPresentation(stream.text);
+      const shouldRebindReadyStatefulStream =
+        hasReadyStatefulStream && !requiresReadySignal && !canReuseMountedSelectedTerminal;
+      if (hasReadyStatefulStream && !requiresReadySignal && canReuseMountedSelectedTerminal) {
+        // Preserve the live xterm buffer across local resizes. Re-reading a
+        // ready fullscreen snapshot here collapses the stream back down to the
+        // latest repaint frame and discards pre-resize scrollback. Only reuse
+        // the live buffer while the same selected terminal stayed mounted.
+        setReadyByThread((current) =>
+          current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
         );
-      if (shouldForceStatefulHydration) {
-        if (shouldSuppressCachedStatefulStream) {
-          setSelectedStatefulHydrationSessionId((current) =>
-            current === existingSessionId ? current : existingSessionId
-          );
-          setSelectedStatefulHydrationFailedSessionId((current) =>
-            current === existingSessionId ? null : current
-          );
-        }
-        if (!requiresReadySignal) {
-          setReadyByThread((current) =>
-            current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
-          );
-        }
-        void hydrateSessionSnapshot(selectedThread.id, existingSessionId, {
-          forceFreshReadySnapshot: true,
-          keepSelectedStatefulHydrationOverlayOnFailure: shouldSuppressCachedStatefulStream,
-          retryDelaysMs: shouldSuppressCachedStatefulStream ? STATEFUL_TERMINAL_REFRESH_RETRY_DELAYS_MS : []
-        });
-      } else if (stream?.sessionId === existingSessionId && stream.phase === 'ready' && !requiresReadySignal) {
+      } else if (hasReadyReusablePlainStream && !requiresReadySignal) {
         setReadyByThread((current) =>
           current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
         );
@@ -5982,8 +6000,11 @@ export default function App() {
             current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
           );
         }
-        void hydrateSessionSnapshot(selectedThread.id, existingSessionId);
+        void hydrateSessionSnapshot(selectedThread.id, existingSessionId, {
+          rebindReadyStatefulStream: shouldRebindReadyStatefulStream
+        });
       }
+      rememberSelectedTerminalBinding(existingSessionId);
       return;
     }
     setStartingByThread((current) => ({
@@ -5996,6 +6017,7 @@ export default function App() {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
       pushToast(`Failed to start Claude session: ${String(error)}`, 'error');
     });
+    rememberSelectedTerminalBinding(null);
   }, [
     ensureSessionForThread,
     hasCachedTerminalLog,

@@ -1,7 +1,6 @@
 const TRUNCATED_PREFIX_SCAN_CHARS = 4096;
 const CSI_FRAGMENT_REGEX = /^[0-9;?]+[ -/]*[@-~]/;
 const REPAINT_FRAME_LOOKBACK_MULTIPLIER = 1;
-const ALT_BUFFER_SWITCH_REGEX = /\u001b\[\?(?:1049|1047)[hl]/gu;
 const TERMINAL_REPAINT_BOUNDARIES = [
   '\u001b[2J\u001b[H',
   '\u001b[H\u001b[2J',
@@ -168,8 +167,4 @@ export function extractLatestTerminalScreenWindow(
 
 export function clampTerminalLog(text: string, maxChars: number): string {
   return clampTerminalWindow(text, maxChars).text;
-}
-
-export function stripTerminalBufferSwitchSequences(text: string): string {
-  return text.replace(ALT_BUFFER_SWITCH_REGEX, '');
 }
