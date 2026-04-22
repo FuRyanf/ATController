@@ -43,9 +43,9 @@ const LAUNCH_OUTPUT_PARSE_BUFFER_MAX: usize = 16 * 1024;
 const POST_CONNECT_PROMPT_BUFFER_MAX: usize = 16 * 1024;
 const POST_CONNECT_COMMAND_AFTER_SSH_START_TIMEOUT: Duration = Duration::from_secs(6);
 const CLAUDE_TURN_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
-const TERMINAL_STREAM_TAIL_MAX_CHARS: u64 = 280_000;
-const TERMINAL_STREAM_TAIL_TRIM_HYSTERESIS: u64 = 40_000;
+const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const TERMINAL_STREAM_TAIL_MAX_CHARS: u64 = 1_200_000;
+const TERMINAL_STREAM_TAIL_TRIM_HYSTERESIS: u64 = 120_000;
 const _: () = assert!(TERMINAL_STREAM_TAIL_TRIM_HYSTERESIS < TERMINAL_STREAM_TAIL_MAX_CHARS);
 const TERMINAL_ENV_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(8);
 const COMMIT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -2652,6 +2652,19 @@ fn read_log_snapshot(path: &Path) -> Result<(String, bool)> {
     Ok((text, false))
 }
 
+fn snapshot_from_log_path(path: &Path, end_position: u64) -> Result<TerminalOutputSnapshot> {
+    let (text, truncated) = read_log_snapshot(path)?;
+    let text_len = terminal_position_len(&text);
+    let effective_end_position = end_position.max(text_len);
+    let start_position = effective_end_position.saturating_sub(text_len);
+    Ok(TerminalOutputSnapshot {
+        text,
+        start_position,
+        end_position: effective_end_position,
+        truncated,
+    })
+}
+
 pub fn build_context_preview(workspace_path: &str, context_pack: &str) -> Result<ContextPreview> {
     match context_pack.to_lowercase().as_str() {
         "git diff" | "gitdiff" | "git_diff" => build_git_diff_context(workspace_path),
@@ -2904,6 +2917,15 @@ pub fn terminal_read_output(
     let Some(session) = state.terminal_sessions.get(&session_id)? else {
         return Err(anyhow!("Terminal session not found"));
     };
+
+    let end_position = session.output_state.end_position().unwrap_or(0);
+    if session.output_log_path.is_file() {
+        if let Ok(snapshot) = snapshot_from_log_path(&session.output_log_path, end_position) {
+            if !snapshot.text.is_empty() || snapshot.truncated {
+                return Ok(snapshot);
+            }
+        }
+    }
 
     session.output_state.snapshot()
 }
@@ -4883,7 +4905,8 @@ mod tests {
         let path = dir.join("output.log");
 
         let mut file = File::create(&path).expect("should create fixture log");
-        for index in 0..120_000 {
+        let line_count = (TERMINAL_LOG_SNAPSHOT_MAX_BYTES / 8) + 10_000;
+        for index in 0..line_count {
             let _ = writeln!(file, "line-{index:05}");
         }
 
@@ -4897,6 +4920,24 @@ mod tests {
             !snapshot.0.contains("line-00000"),
             "snapshot should contain only the tail and exclude earliest lines"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_from_log_path_uses_supplied_end_position() {
+        let dir =
+            std::env::temp_dir().join(format!("atcontroller-runner-log-end-position-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        let path = dir.join("output.log");
+
+        fs::write(&path, "line 1\nline 2\n").expect("should write fixture log");
+        let snapshot = snapshot_from_log_path(&path, 1_234).expect("should read snapshot");
+        let text_len = terminal_position_len("line 1\nline 2\n");
+        assert_eq!(snapshot.text, "line 1\nline 2\n");
+        assert_eq!(snapshot.end_position, 1_234);
+        assert_eq!(snapshot.start_position, 1_234 - text_len);
+        assert!(!snapshot.truncated);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -6461,22 +6502,22 @@ mod tests {
     #[test]
     fn trim_hysteresis_no_trim_under_threshold() {
         let mut buf = TerminalOutputBuffer::new();
-        // Fill to exactly 320_000 chars (the trigger threshold).
+        let threshold = TERMINAL_STREAM_TAIL_MAX_CHARS + TERMINAL_STREAM_TAIL_TRIM_HYSTERESIS;
         // Trim fires only when text_len is STRICTLY greater than the threshold,
-        // so 320_000 should not trigger a trim.
-        let chunk = "a".repeat(320_000);
+        // so filling exactly to the threshold should not trigger a trim.
+        let chunk = "a".repeat(threshold as usize);
         buf.append(&chunk);
-        assert_eq!(buf.text_len, 320_000);
+        assert_eq!(buf.text_len, threshold);
         assert_eq!(buf.start_position, 0, "no trim should have occurred");
     }
 
     #[test]
     fn trim_hysteresis_trims_above_threshold() {
         let mut buf = TerminalOutputBuffer::new();
-        // Push 320_001 chars — one above the threshold.
-        let chunk = "a".repeat(320_001);
+        let threshold = TERMINAL_STREAM_TAIL_MAX_CHARS + TERMINAL_STREAM_TAIL_TRIM_HYSTERESIS;
+        // Push one above the threshold.
+        let chunk = "a".repeat((threshold + 1) as usize);
         buf.append(&chunk);
-        // After trim, text_len should be approximately 240_000 (MAX - HYSTERESIS).
         assert!(buf.start_position > 0, "trim should have fired");
         let expected_target = TERMINAL_STREAM_TAIL_MAX_CHARS - TERMINAL_STREAM_TAIL_TRIM_HYSTERESIS;
         assert!(
@@ -6491,14 +6532,14 @@ mod tests {
     fn trim_hysteresis_stays_stable_until_threshold_exceeded_again() {
         let mut buf = TerminalOutputBuffer::new();
         // First, trigger a trim.
-        let initial = "a".repeat(320_001);
+        let threshold = TERMINAL_STREAM_TAIL_MAX_CHARS + TERMINAL_STREAM_TAIL_TRIM_HYSTERESIS;
+        let initial = "a".repeat((threshold + 1) as usize);
         buf.append(&initial);
         let after_first_trim = buf.text_len;
         let start_after_first_trim = buf.start_position;
         assert!(start_after_first_trim > 0, "should have trimmed");
 
         // Append more data but not enough to exceed the threshold again.
-        // We need to add enough to reach 320_000 but not exceed it.
         let headroom = (TERMINAL_STREAM_TAIL_MAX_CHARS + TERMINAL_STREAM_TAIL_TRIM_HYSTERESIS)
             - after_first_trim;
         let safe_addition = "b".repeat(headroom as usize);

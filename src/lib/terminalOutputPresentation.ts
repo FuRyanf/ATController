@@ -42,6 +42,9 @@ export function presentTerminalWindow(
   const preserveRaw = shouldPreserveRawTerminalPresentation(rawText, options.currentText);
   const visibleText =
     preserveRaw || !options.stripHiddenPrompts ? rawText : options.stripHiddenPrompts(rawText);
+  // Snapshot text is later replayed through xterm on remount/reset, so
+  // fullscreen/stateful sessions must stay in a replay-safe latest-frame form
+  // rather than preserving every historical redraw control sequence.
   const clamped =
     preserveRaw && looksLikeStatefulTerminalUi(visibleText)
       ? extractLatestTerminalScreenWindow(visibleText, options.maxChars)

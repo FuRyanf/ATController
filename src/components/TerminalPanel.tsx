@@ -6,6 +6,7 @@ import { SearchAddon, type ISearchOptions } from 'xterm-addon-search';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import { Terminal } from 'xterm';
 import { api } from '../lib/api';
+import { LiveTerminalPanel } from './LiveTerminalPanel';
 import {
   clearTerminalDebug,
   formatTerminalDebugEvent,
@@ -89,36 +90,47 @@ interface TerminalPanelProps {
   onFollowOutputPausedChange?: (paused: boolean) => void;
 }
 
+function areTerminalPanelPropsEqual(prevProps: TerminalPanelProps, nextProps: TerminalPanelProps): boolean {
+  return prevProps.sessionId === nextProps.sessionId &&
+    prevProps.streamState === nextProps.streamState &&
+    prevProps.content === nextProps.content &&
+    prevProps.contentByteCount === nextProps.contentByteCount &&
+    prevProps.contentGeneration === nextProps.contentGeneration &&
+    prevProps.contentLimitChars === nextProps.contentLimitChars &&
+    prevProps.scrollbackLines === nextProps.scrollbackLines &&
+    prevProps.readOnly === nextProps.readOnly &&
+    prevProps.inputEnabled === nextProps.inputEnabled &&
+    prevProps.cursorVisible === nextProps.cursorVisible &&
+    prevProps.overlayMessage === nextProps.overlayMessage &&
+    prevProps.preferLiveRedrawOnMount === nextProps.preferLiveRedrawOnMount &&
+    prevProps.focusRequestId === nextProps.focusRequestId &&
+    prevProps.repairRequestId === nextProps.repairRequestId &&
+    prevProps.searchToggleRequestId === nextProps.searchToggleRequestId &&
+    prevProps.onData === nextProps.onData &&
+    prevProps.onResize === nextProps.onResize &&
+    prevProps.onFocusChange === nextProps.onFocusChange &&
+    prevProps.onStatefulRedrawRequest === nextProps.onStatefulRedrawRequest &&
+    prevProps.onFollowOutputPausedChange === nextProps.onFollowOutputPausedChange;
+}
+
 // Memoized to avoid unnecessary re-renders (and xterm canvas flicker) when the
 // parent re-renders due to unrelated state such as background-thread working-state.
 // All callback props (onData, onResize, onFocusChange) must be identity-stable at
 // the call site — the component stores them in refs internally but still needs a
 // render to sync the refs.
 export const TerminalPanel = React.memo(
-  TerminalPanelComponent,
-  (prevProps, nextProps) => {
-    return prevProps.sessionId === nextProps.sessionId &&
-      prevProps.streamState === nextProps.streamState &&
-      prevProps.content === nextProps.content &&
-      prevProps.contentByteCount === nextProps.contentByteCount &&
-      prevProps.contentGeneration === nextProps.contentGeneration &&
-      prevProps.contentLimitChars === nextProps.contentLimitChars &&
-      prevProps.scrollbackLines === nextProps.scrollbackLines &&
-      prevProps.readOnly === nextProps.readOnly &&
-      prevProps.inputEnabled === nextProps.inputEnabled &&
-      prevProps.cursorVisible === nextProps.cursorVisible &&
-      prevProps.overlayMessage === nextProps.overlayMessage &&
-      prevProps.preferLiveRedrawOnMount === nextProps.preferLiveRedrawOnMount &&
-      prevProps.focusRequestId === nextProps.focusRequestId &&
-      prevProps.repairRequestId === nextProps.repairRequestId &&
-      prevProps.searchToggleRequestId === nextProps.searchToggleRequestId &&
-      prevProps.onData === nextProps.onData &&
-      prevProps.onResize === nextProps.onResize &&
-      prevProps.onFocusChange === nextProps.onFocusChange &&
-      prevProps.onStatefulRedrawRequest === nextProps.onStatefulRedrawRequest &&
-      prevProps.onFollowOutputPausedChange === nextProps.onFollowOutputPausedChange;
-  }
+  function TerminalPanelRouter(props: TerminalPanelProps) {
+    const authoritativeLiveSession =
+      Boolean(props.sessionId) &&
+      Boolean(props.streamState);
+    return authoritativeLiveSession
+      ? <LiveTerminalPanel {...props} />
+      : <LegacyTerminalPanel {...props} />;
+  },
+  areTerminalPanelPropsEqual
 );
+
+const LegacyTerminalPanel = React.memo(TerminalPanelComponent, areTerminalPanelPropsEqual);
 
 function hardenTerminalTextInput(host: HTMLElement) {
   const textareas = host.querySelectorAll<HTMLTextAreaElement>(TERMINAL_TEXTAREA_SELECTOR);

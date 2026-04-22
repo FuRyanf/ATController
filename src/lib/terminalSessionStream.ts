@@ -380,6 +380,10 @@ export function hydrateTerminalSessionStream(
     if (!normalizedRawChunk || normalizedRawChunk.data.length === 0) {
       continue;
     }
+    // Hydration produces replay-safe snapshot state for TerminalPanel resets.
+    // If buffered output contains a later fullscreen repaint, collapse to that
+    // authoritative frame instead of replaying historical clear/cursor-control
+    // sequences on remount.
     const repaintResetWindow = buildResetStateFromRepaintChunk(normalizedRawChunk, maxChars);
     if (repaintResetWindow) {
       nextWindow = repaintResetWindow;

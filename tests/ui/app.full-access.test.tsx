@@ -1043,6 +1043,28 @@ describe('Terminal launch flags', () => {
     expect(rendered).not.toContain('latest frame only');
   });
 
+  it('normalizes a fullscreen Claude snapshot to the latest replay-safe frame before rendering', async () => {
+    const clear = '\u001b[2J\u001b[H';
+    const frameOne = `${clear}Claude Code\nframe one\n`;
+    const frameTwo = `${clear}Claude Code\nframe two\n`;
+    const rawSnapshot = `\u001b[?1049h${frameOne}${frameTwo}`;
+    mocks.api.terminalReadOutput.mockResolvedValue({
+      text: rawSnapshot,
+      startPosition: 0,
+      endPosition: rawSnapshot.length,
+      truncated: false
+    });
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
+      expect(rendered).toContain('frame two');
+      expect(rendered).not.toContain('frame one');
+    });
+  });
+
   it('rehydrates a ready stateful stream after switching away and back', async () => {
     const initialSnapshot = '\u001b[2J\u001b[HClaude Code\nold dimensions';
     const refreshedSnapshot = '\u001b[2J\u001b[HClaude Code\nnew dimensions';
