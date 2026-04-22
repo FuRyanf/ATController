@@ -1,9 +1,11 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
   'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Full access thread, or enable full access by default in Settings.';
+
+let resizeObserverCallback: ResizeObserverCallback | null = null;
 
 const mocks = vi.hoisted(() => {
   const baseWorkspace = {
@@ -53,6 +55,233 @@ const mocks = vi.hoisted(() => {
   let threadUpdatedHandler: ((thread: typeof baseThread) => void) | null = null;
   const terminalPositions = new Map<string, number>();
   const terminalSequencePositions = new Map<string, { startPosition: number; endPosition: number }>();
+  const fit = vi.fn();
+  const proposedDimensions = { cols: 80, rows: 24 };
+  const terminals: Array<{
+    open: ReturnType<typeof vi.fn>;
+    loadAddon: ReturnType<typeof vi.fn>;
+    attachCustomKeyEventHandler: ReturnType<typeof vi.fn>;
+    onData: ReturnType<typeof vi.fn>;
+    onScroll: ReturnType<typeof vi.fn>;
+    write: ReturnType<typeof vi.fn>;
+    refresh: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+    resize: ReturnType<typeof vi.fn>;
+    scrollToBottom: ReturnType<typeof vi.fn>;
+    scrollToLine: ReturnType<typeof vi.fn>;
+    focus: ReturnType<typeof vi.fn>;
+    dispose: ReturnType<typeof vi.fn>;
+    options: Record<string, unknown>;
+    cols: number;
+    rows: number;
+    screenLines: string[];
+    wrappedRows: Set<number>;
+    isUserScrolling: boolean;
+    onDataListeners: Set<(data: string) => void>;
+    onScrollListeners: Set<(viewportY: number) => void>;
+    buffer: {
+      active: {
+        baseY: number;
+        viewportY: number;
+        cursorX: number;
+        cursorY: number;
+        length: number;
+        getLine: (row: number) => { isWrapped: boolean; translateToString: (trimRight?: boolean) => string } | undefined;
+      };
+    };
+  }> = [];
+  let useRealTerminalPanel = false;
+
+  const createSearchAddon = () => ({
+    activate: vi.fn(),
+    dispose: vi.fn(),
+    findNext: vi.fn(() => false),
+    findPrevious: vi.fn(() => false),
+    clearDecorations: vi.fn(),
+    clearActiveDecoration: vi.fn(),
+    onDidChangeResults: vi.fn(() => ({ dispose: vi.fn() }))
+  });
+
+  const emitScroll = (term: (typeof terminals)[number]) => {
+    for (const listener of term.onScrollListeners) {
+      listener(term.buffer.active.viewportY);
+    }
+  };
+
+  const syncBufferState = (term: (typeof terminals)[number]) => {
+    const lineCount = Math.max(1, term.screenLines.length);
+    const previousBaseY = term.buffer.active.baseY;
+    const previousViewportY = term.buffer.active.viewportY;
+    term.buffer.active.length = lineCount;
+    term.buffer.active.baseY = Math.max(0, lineCount - term.rows);
+    term.buffer.active.cursorY = Math.max(0, Math.min(term.rows - 1, lineCount - 1 - term.buffer.active.baseY));
+    if (term.isUserScrolling || previousViewportY < previousBaseY) {
+      term.buffer.active.viewportY = Math.min(previousViewportY, term.buffer.active.baseY);
+    } else {
+      term.buffer.active.viewportY = term.buffer.active.baseY;
+    }
+    term.isUserScrolling = term.buffer.active.viewportY < term.buffer.active.baseY;
+  };
+
+  const writePrintableChunk = (term: (typeof terminals)[number], chunk: string) => {
+    if (term.screenLines.length === 0) {
+      term.screenLines.push('');
+    }
+
+    let absoluteRow = term.buffer.active.baseY + term.buffer.active.cursorY;
+    let cursorX = term.buffer.active.cursorX;
+
+    const ensureRow = (row: number) => {
+      while (term.screenLines.length <= row) {
+        term.screenLines.push('');
+      }
+    };
+
+    const writeChar = (char: string) => {
+      ensureRow(absoluteRow);
+      const current = term.screenLines[absoluteRow] ?? '';
+      const padded = cursorX > current.length ? current.padEnd(cursorX, ' ') : current;
+      if (cursorX >= padded.length) {
+        term.screenLines[absoluteRow] = `${padded}${char}`;
+      } else {
+        term.screenLines[absoluteRow] = `${padded.slice(0, cursorX)}${char}${padded.slice(cursorX + 1)}`;
+      }
+      cursorX += 1;
+    };
+
+    for (const char of chunk) {
+      if (char === '\n') {
+        absoluteRow += 1;
+        cursorX = 0;
+        ensureRow(absoluteRow);
+        continue;
+      }
+      if (char === '\r') {
+        cursorX = 0;
+        continue;
+      }
+      if (char === '\u001b') {
+        continue;
+      }
+      writeChar(char);
+    }
+
+    term.buffer.active.cursorX = cursorX;
+    syncBufferState(term);
+    const nextAbsoluteRow = Math.max(0, term.screenLines.length - 1);
+    term.buffer.active.cursorY = Math.max(0, Math.min(term.rows - 1, nextAbsoluteRow - term.buffer.active.baseY));
+  };
+
+  const createTerminal = () => {
+    const term = {
+      open: vi.fn((host: HTMLElement) => {
+        const viewport = document.createElement('div');
+        viewport.className = 'xterm-viewport';
+        host.appendChild(viewport);
+      }),
+      loadAddon: vi.fn(),
+      attachCustomKeyEventHandler: vi.fn(),
+      onDataListeners: new Set<(data: string) => void>(),
+      onData: vi.fn((listener: (data: string) => void) => {
+        term.onDataListeners.add(listener);
+        return {
+          dispose: vi.fn(() => {
+            term.onDataListeners.delete(listener);
+          })
+        };
+      }),
+      onScrollListeners: new Set<(viewportY: number) => void>(),
+      onScroll: vi.fn((listener: (viewportY: number) => void) => {
+        term.onScrollListeners.add(listener);
+        return {
+          dispose: vi.fn(() => {
+            term.onScrollListeners.delete(listener);
+          })
+        };
+      }),
+      write: vi.fn((chunk: string, callback?: () => void) => {
+        const previousBaseY = term.buffer.active.baseY;
+        const previousViewportY = term.buffer.active.viewportY;
+        const cursorMove = /^\u001b\[(\d+);(\d+)H$/.exec(chunk);
+        if (cursorMove) {
+          term.buffer.active.cursorY = Math.max(0, Number(cursorMove[1]) - 1);
+          term.buffer.active.cursorX = Math.max(0, Number(cursorMove[2]) - 1);
+          callback?.();
+          return;
+        }
+        writePrintableChunk(term, chunk);
+        if (term.buffer.active.baseY !== previousBaseY || term.buffer.active.viewportY !== previousViewportY) {
+          emitScroll(term);
+        }
+        callback?.();
+      }),
+      refresh: vi.fn(),
+      reset: vi.fn(() => {
+        term.screenLines = [''];
+        term.wrappedRows.clear();
+        term.buffer.active.cursorX = 0;
+        term.isUserScrolling = false;
+        syncBufferState(term);
+        emitScroll(term);
+      }),
+      resize: vi.fn((cols: number, rows: number) => {
+        const previousViewportY = term.buffer.active.viewportY;
+        term.cols = cols;
+        term.rows = rows;
+        syncBufferState(term);
+        if (term.buffer.active.viewportY !== previousViewportY) {
+          emitScroll(term);
+        }
+      }),
+      scrollToBottom: vi.fn(() => {
+        if (term.buffer.active.viewportY === term.buffer.active.baseY) {
+          return;
+        }
+        term.buffer.active.viewportY = term.buffer.active.baseY;
+        term.isUserScrolling = false;
+        emitScroll(term);
+      }),
+      scrollToLine: vi.fn((line: number) => {
+        const nextViewportY = Math.max(0, Math.min(line, term.buffer.active.baseY));
+        if (nextViewportY === term.buffer.active.viewportY) {
+          return;
+        }
+        term.buffer.active.viewportY = nextViewportY;
+        term.isUserScrolling = nextViewportY < term.buffer.active.baseY;
+        emitScroll(term);
+      }),
+      focus: vi.fn(),
+      dispose: vi.fn(),
+      options: {},
+      cols: 80,
+      rows: 24,
+      screenLines: [''],
+      wrappedRows: new Set<number>(),
+      isUserScrolling: false,
+      buffer: {
+        active: {
+          baseY: 0,
+          viewportY: 0,
+          cursorX: 0,
+          cursorY: 0,
+          length: 1,
+          getLine: (row: number) => {
+            const value = term.screenLines[row];
+            if (typeof value !== 'string') {
+              return undefined;
+            }
+            return {
+              isWrapped: term.wrappedRows.has(row),
+              translateToString: (trimRight?: boolean) => (trimRight ? value.replace(/\s+$/u, '') : value)
+            };
+          }
+        }
+      }
+    };
+    syncBufferState(term);
+    terminals.push(term);
+    return term;
+  };
 
   const terminalStartSessionImpl = async (params: { threadId: string }) => {
     const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0];
@@ -212,6 +441,11 @@ const mocks = vi.hoisted(() => {
     threadUpdatedHandler = null;
     terminalPositions.clear();
     terminalSequencePositions.clear();
+    fit.mockClear();
+    proposedDimensions.cols = 80;
+    proposedDimensions.rows = 24;
+    terminals.length = 0;
+    useRealTerminalPanel = false;
     helperMocks.sendTaskCompletionAlert.mockClear();
     helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockClear();
     helperMocks.sendTaskCompletionAlertsTestNotification.mockClear();
@@ -316,7 +550,18 @@ const mocks = vi.hoisted(() => {
           threadUpdatedHandler = null;
         }
       };
-    })
+    }),
+    createSearchAddon,
+    createTerminal,
+    fit,
+    proposedDimensions,
+    terminals,
+    get useRealTerminalPanel() {
+      return useRealTerminalPanel;
+    },
+    set useRealTerminalPanel(value: boolean) {
+      useRealTerminalPanel = value;
+    }
   };
 });
 
@@ -343,34 +588,77 @@ vi.mock('../../src/lib/taskCompletionAlerts', () => ({
   sendTaskCompletionAlertsTestNotification: mocks.sendTaskCompletionAlertsTestNotification
 }));
 
-vi.mock('../../src/components/TerminalPanel', () => ({
-  TerminalPanel: ({
-    content,
-    streamState,
-    onData,
-    onResize,
-    scrollbackLines
-  }: {
-    content?: string;
-    streamState?: { text?: string } | null;
-    onData?: (data: string) => void;
-    onResize?: (cols: number, rows: number) => void;
-    scrollbackLines?: number;
-  }) => (
-    <section data-testid="terminal-panel-mock" data-scrollback-lines={scrollbackLines ?? ''}>
-      <pre data-testid="terminal-content-mock">{streamState?.text ?? content ?? ''}</pre>
-      <button type="button" onClick={() => onData?.('draft')}>
-        Type draft
-      </button>
-      <button type="button" onClick={() => onData?.('ship it\r')}>
-        Submit prompt
-      </button>
-      <button type="button" onClick={() => onResize?.(132, 40)}>
-        Resize terminal
-      </button>
-    </section>
-  )
+vi.mock('xterm', () => ({
+  Terminal: vi.fn((options: Record<string, unknown> = {}) => {
+    const term = mocks.createTerminal();
+    term.options = { ...options };
+    return term;
+  })
 }));
+
+vi.mock('xterm-addon-fit', () => ({
+  FitAddon: vi.fn(() => ({
+    fit: mocks.fit,
+    proposeDimensions: () => {
+      mocks.fit();
+      return mocks.proposedDimensions;
+    },
+    dispose: vi.fn()
+  }))
+}));
+
+vi.mock('xterm-addon-web-links', () => ({
+  WebLinksAddon: vi.fn(() => ({}))
+}));
+
+vi.mock('xterm-addon-search', () => ({
+  SearchAddon: vi.fn(() => mocks.createSearchAddon())
+}));
+
+vi.mock('../../src/components/TerminalPanel', async () => {
+  const actual = await vi.importActual<typeof import('../../src/components/TerminalPanel')>('../../src/components/TerminalPanel');
+  return {
+    ...actual,
+    TerminalPanel: ({
+      content,
+      streamState,
+      onData,
+      onResize,
+      scrollbackLines,
+      ...props
+    }: {
+      content?: string;
+      streamState?: { text?: string } | null;
+      onData?: (data: string) => void;
+      onResize?: (cols: number, rows: number) => void;
+      scrollbackLines?: number;
+    }) => (
+      mocks.useRealTerminalPanel ? (
+        <actual.TerminalPanel
+          content={content}
+          streamState={streamState}
+          onData={onData}
+          onResize={onResize}
+          scrollbackLines={scrollbackLines}
+          {...props}
+        />
+      ) : (
+        <section data-testid="terminal-panel-mock" data-scrollback-lines={scrollbackLines ?? ''}>
+          <pre data-testid="terminal-content-mock">{streamState?.text ?? content ?? ''}</pre>
+          <button type="button" onClick={() => onData?.('draft')}>
+            Type draft
+          </button>
+          <button type="button" onClick={() => onData?.('ship it\r')}>
+            Submit prompt
+          </button>
+          <button type="button" onClick={() => onResize?.(132, 40)}>
+            Resize terminal
+          </button>
+        </section>
+      )
+    )
+  };
+});
 
 import App from '../../src/App';
 
@@ -1172,4 +1460,74 @@ describe('Terminal launch flags', () => {
     expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'false');
   });
 
+});
+
+describe('App terminal integration', () => {
+  beforeEach(() => {
+    mocks.reset();
+    window.localStorage.clear();
+    mocks.useRealTerminalPanel = true;
+    mocks.terminals.length = 0;
+    mocks.fit.mockClear();
+    mocks.proposedDimensions.cols = 80;
+    mocks.proposedDimensions.rows = 24;
+    resizeObserverCallback = null;
+    (globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__ = true;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverCallback = callback;
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    } as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    mocks.useRealTerminalPanel = false;
+    delete (globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__;
+  });
+
+  it('keeps a single live terminal instance mounted while the initial snapshot hydrates', async () => {
+    let resolveReadOutput:
+      | ((value: { text: string; startPosition: number; endPosition: number; truncated: boolean }) => void)
+      | null = null;
+    mocks.api.terminalReadOutput.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveReadOutput = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const snapshot = '\u001b[2J\u001b[HClaude Code\nframe one';
+
+    await act(async () => {
+      resolveReadOutput?.({
+        text: snapshot,
+        startPosition: 0,
+        endPosition: snapshot.length,
+        truncated: false
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+      expect(mocks.terminals[0]).toBe(term);
+      expect(term.dispose).not.toHaveBeenCalled();
+      expect(term.write).toHaveBeenCalledWith(snapshot, expect.any(Function));
+    });
+  });
 });

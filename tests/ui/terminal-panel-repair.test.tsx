@@ -131,9 +131,15 @@ const mocks = vi.hoisted(() => {
   const createTerminal = () => {
     const term = {
       open: vi.fn((host: HTMLElement) => {
+        const root = document.createElement('div');
+        root.className = 'xterm';
         const viewport = document.createElement('div');
         viewport.className = 'xterm-viewport';
-        viewport.addEventListener('wheel', (event) => {
+        const screen = document.createElement('div');
+        screen.className = 'xterm-screen';
+        const canvas = document.createElement('canvas');
+        screen.appendChild(canvas);
+        root.addEventListener('wheel', (event) => {
           const direction = event.deltaY < 0 ? -1 : event.deltaY > 0 ? 1 : 0;
           if (direction === 0) {
             return;
@@ -149,7 +155,9 @@ const mocks = vi.hoisted(() => {
           term.isUserScrolling = nextViewportY < term.buffer.active.baseY;
           emitScroll(term);
         });
-        host.appendChild(viewport);
+        root.appendChild(viewport);
+        root.appendChild(screen);
+        host.appendChild(root);
       }),
       loadAddon: vi.fn(),
       attachCustomKeyEventHandler: vi.fn(),
@@ -1027,6 +1035,117 @@ describe('TerminalPanel live rendering', () => {
     expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
+  it('establishes paused follow when wheel targets the visible terminal surface', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const screen = container.querySelector('.xterm-screen') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    expect(screen).not.toBeNull();
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 900
+    });
+
+    await act(async () => {
+      fireEvent.wheel(screen as HTMLElement, { deltaY: -32 });
+      fireEvent.scroll(viewport as HTMLElement);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+  });
+
+  it('keeps follow paused after a slight wheel-up near the bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 980
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+      fireEvent.scroll(viewport as HTMLElement);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+  });
+
+  it('does not auto-resume when the viewport is only near the bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 900
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+      fireEvent.scroll(viewport as HTMLElement);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 996
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+      await Promise.resolve();
+    });
+
+    expect(queryByRole('button', { name: 'Jump to latest' })).not.toBeNull();
+
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 1000
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+    });
+  });
+
   it('does not yank the viewport back to bottom when output lands immediately after a user scroll-up gesture', async () => {
     const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
     const { container, getByRole, rerender } = renderLivePanel(initialContent);
@@ -1078,7 +1197,206 @@ describe('TerminalPanel live rendering', () => {
     });
   });
 
-  it('resumes follow when new terminal input arrives while paused', async () => {
+  it('buffers live output while follow is paused and catches up from the latest snapshot on resume', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnew output`;
+    const { container, getByRole, queryByRole, rerender } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 900
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+      fireEvent.scroll(viewport as HTMLElement);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.reset.mockClear();
+    term.write.mockClear();
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={buildStreamState(nextContent, {
+          endPosition: nextContent.length,
+          rawEndPosition: nextContent.length,
+          chunks: [
+            {
+              rawStartPosition: initialContent.length,
+              rawEndPosition: nextContent.length,
+              startPosition: initialContent.length,
+              endPosition: nextContent.length,
+              data: '\nnew output'
+            }
+          ]
+        })}
+        content={nextContent}
+        readOnly={false}
+        inputEnabled
+        cursorVisible={false}
+      />
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(term.reset).not.toHaveBeenCalled();
+    expect(term.write).not.toHaveBeenCalledWith('\nnew output', expect.any(Function));
+    expect(term.write).not.toHaveBeenCalledWith(nextContent, expect.any(Function));
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: 'Jump to latest' }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalled();
+      expect(term.write).toHaveBeenCalledWith(nextContent, expect.any(Function));
+    });
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('freezes a queued append that races with a scroll-up pause and catches up on resume', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnew output`;
+    const { container, getByRole, queryByRole, rerender } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 900
+    });
+
+    term.reset.mockClear();
+    term.write.mockClear();
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          streamState={buildStreamState(nextContent, {
+            endPosition: nextContent.length,
+            rawEndPosition: nextContent.length,
+            chunks: [
+              {
+                rawStartPosition: initialContent.length,
+                rawEndPosition: nextContent.length,
+                startPosition: initialContent.length,
+                endPosition: nextContent.length,
+                data: '\nnew output'
+              }
+            ]
+          })}
+          content={nextContent}
+          readOnly={false}
+          inputEnabled
+          cursorVisible={false}
+        />
+      );
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+      fireEvent.scroll(viewport as HTMLElement);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+    expect(term.write).not.toHaveBeenCalledWith('\nnew output', expect.any(Function));
+    expect(term.write).not.toHaveBeenCalledWith(nextContent, expect.any(Function));
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: 'Jump to latest' }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalled();
+      expect(term.write).toHaveBeenCalledWith(nextContent, expect.any(Function));
+    });
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('does not let a suppressed programmatic scroll event cancel a wheel-initiated pause', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const host = container.querySelector('.terminal-host');
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(host).not.toBeNull();
+    expect(viewport).not.toBeNull();
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 900
+    });
+
+    await act(async () => {
+      resizeObserverCallback?.(
+        [
+          {
+            target: host as Element,
+            contentRect: {
+              width: 760,
+              height: 520,
+              top: 0,
+              left: 0,
+              bottom: 520,
+              right: 760,
+              x: 0,
+              y: 0,
+              toJSON: () => ''
+            }
+          } as ResizeObserverEntry
+        ],
+        {} as ResizeObserver
+      );
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+      await Promise.resolve();
+    });
+
+    term.buffer.active.viewportY = term.buffer.active.baseY;
+    term.isUserScrolling = false;
+
+    await act(async () => {
+      for (const listener of term.onScrollListeners) {
+        listener(term.buffer.active.viewportY);
+      }
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+  });
+
+  it('keeps follow paused when new terminal input arrives while paused', async () => {
     const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
     const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
 
@@ -1111,10 +1429,8 @@ describe('TerminalPanel live rendering', () => {
       await Promise.resolve();
     });
 
-    expect(term.scrollToBottom).toHaveBeenCalled();
-    await waitFor(() => {
-      expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
-    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).not.toBeNull();
   });
 
   it('reports follow pause changes when the user scrolls away from the bottom', async () => {
@@ -1397,6 +1713,68 @@ describe('TerminalPanel live rendering', () => {
       expect(term.reset).toHaveBeenCalled();
       expect(term.write).toHaveBeenCalledWith(nextText, expect.any(Function));
     });
+  });
+
+  it('defers repair-triggered snapshot replay while follow is paused until resume', async () => {
+    const initialText = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextText = Array.from({ length: 48 }, (_, index) => `next ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole, rerender } = renderLivePanel(initialText);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 900
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+      fireEvent.scroll(viewport as HTMLElement);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.reset.mockClear();
+    term.write.mockClear();
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={buildStreamState(nextText, { resetToken: 2 })}
+        content={nextText}
+        readOnly={false}
+        inputEnabled
+        cursorVisible={false}
+        repairRequestId={1}
+      />
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(term.reset).not.toHaveBeenCalled();
+    expect(term.write).not.toHaveBeenCalledWith(nextText, expect.any(Function));
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: 'Jump to latest' }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalled();
+      expect(term.write).toHaveBeenCalledWith(nextText, expect.any(Function));
+    });
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
   it('waits for async snapshot replay before restoring a paused viewport', async () => {

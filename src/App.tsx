@@ -1808,6 +1808,25 @@ export default function App() {
     selectedTerminalLooksStateful &&
     selectedSessionMode !== 'new' &&
     selectedTerminalStream.phase === 'ready';
+  const selectedTerminalOverlayMessage =
+    selectedThreadSshStartupBlockReason
+      ? sshStartupBlockOverlayMessage(selectedThreadSshStartupBlockReason)
+      : selectedThreadForkResolutionFailureBlocked
+      ? 'Forked session could not be confirmed. Start fresh to continue.'
+      : selectedThreadResumeFailureBlocked
+      ? 'Session resume failed. Start fresh to continue.'
+      : selectedStatefulHydrationFailedSessionId === selectedSessionId && Boolean(selectedSessionId)
+      ? 'Could not refresh Claude screen yet. Waiting for new output...'
+      : selectedStatefulHydrationSessionId === selectedSessionId && Boolean(selectedSessionId)
+      ? 'Refreshing Claude screen...'
+      : !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
+      ? 'Starting Claude session...'
+      : undefined;
+  const shouldRenderSelectedTerminalStartupPlaceholder =
+    Boolean(selectedThread) &&
+    !selectedSessionId &&
+    !hasSelectedTerminalContent &&
+    selectedTerminalOverlayMessage === 'Starting Claude session...';
   const selectedThreadWorking = selectedThread ? runStore.isThreadWorking(selectedThread.id) : false;
 
   useEffect(() => {
@@ -7867,44 +7886,34 @@ export default function App() {
 
         <section className="terminal-region">
           {selectedThread ? (
-            <TerminalPanel
-              key={selectedThread.id}
-              sessionId={selectedSessionId}
-              streamState={selectedTerminalRenderStream}
-              scrollbackLines={settings.terminalScrollbackLines}
-              contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
-              readOnly={false}
-              inputEnabled={
-                Boolean(selectedSessionId) &&
-                isSelectedThreadReady &&
-                !isSelectedThreadStarting &&
-                !selectedThreadSshStartupBlockReason
-              }
-              cursorVisible={false}
-              overlayMessage={
-                selectedThreadSshStartupBlockReason
-                  ? sshStartupBlockOverlayMessage(selectedThreadSshStartupBlockReason)
-                  : selectedThreadForkResolutionFailureBlocked
-                  ? 'Forked session could not be confirmed. Start fresh to continue.'
-                  : selectedThreadResumeFailureBlocked
-                  ? 'Session resume failed. Start fresh to continue.'
-                  : selectedStatefulHydrationFailedSessionId === selectedSessionId && Boolean(selectedSessionId)
-                  ? 'Could not refresh Claude screen yet. Waiting for new output...'
-                  : selectedStatefulHydrationSessionId === selectedSessionId && Boolean(selectedSessionId)
-                  ? 'Refreshing Claude screen...'
-                  : !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
-                  ? 'Starting Claude session...'
-                  : undefined
-              }
-              preferLiveRedrawOnMount={selectedTerminalPrefersLiveRedraw}
-              focusRequestId={terminalFocusRequestId}
-              searchToggleRequestId={terminalSearchToggleRequestId}
-              onData={stableTerminalOnData}
-              onResize={stableTerminalOnResize}
-              onFocusChange={handleClaudeTerminalFocusChange}
-              onStatefulRedrawRequest={requestSelectedStatefulTerminalRepair}
-              onFollowOutputPausedChange={handleSelectedTerminalFollowPausedChange}
-            />
+            shouldRenderSelectedTerminalStartupPlaceholder ? (
+              <div className="terminal-empty">Starting Claude session...</div>
+            ) : (
+              <TerminalPanel
+                key={selectedThread.id}
+                sessionId={selectedSessionId}
+                streamState={selectedTerminalRenderStream}
+                scrollbackLines={settings.terminalScrollbackLines}
+                contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
+                readOnly={false}
+                inputEnabled={
+                  Boolean(selectedSessionId) &&
+                  isSelectedThreadReady &&
+                  !isSelectedThreadStarting &&
+                  !selectedThreadSshStartupBlockReason
+                }
+                cursorVisible={false}
+                overlayMessage={selectedTerminalOverlayMessage}
+                preferLiveRedrawOnMount={selectedTerminalPrefersLiveRedraw}
+                focusRequestId={terminalFocusRequestId}
+                searchToggleRequestId={terminalSearchToggleRequestId}
+                onData={stableTerminalOnData}
+                onResize={stableTerminalOnResize}
+                onFocusChange={handleClaudeTerminalFocusChange}
+                onStatefulRedrawRequest={requestSelectedStatefulTerminalRepair}
+                onFollowOutputPausedChange={handleSelectedTerminalFollowPausedChange}
+              />
+            )
           ) : (
             <div className="terminal-empty">Select a thread to start Claude.</div>
           )}

@@ -57,6 +57,7 @@ const mocks = vi.hoisted(() => {
     onScroll: ReturnType<typeof vi.fn>;
     write: ReturnType<typeof vi.fn>;
     refresh: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
     resize: ReturnType<typeof vi.fn>;
     scrollToBottom: ReturnType<typeof vi.fn>;
     scrollToLine: ReturnType<typeof vi.fn>;
@@ -99,6 +100,7 @@ const mocks = vi.hoisted(() => {
         callback?.();
       }),
       refresh: vi.fn(),
+      reset: vi.fn(),
       resize: vi.fn(),
       scrollToBottom: vi.fn(),
       scrollToLine: vi.fn(),

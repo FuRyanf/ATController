@@ -11,8 +11,10 @@ import { looksLikeStatefulTerminalUi } from '../lib/terminalUiHeuristics';
 import { normalizeTerminalScrollbackLines, TERMINAL_SCROLLBACK_LINES_DEFAULT } from '../types';
 
 const VIEWPORT_OFF_BOTTOM_THRESHOLD_LINES = 0;
+const VIEWPORT_OFF_BOTTOM_THRESHOLD_PX = 0;
 const PROGRAMMATIC_SCROLL_SUPPRESSION_MS = 220;
 const USER_SCROLL_PAUSE_COOLDOWN_MS = 220;
+const USER_SCROLL_INTENT_MS = 260;
 const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
 const TERMINAL_SEARCH_HIGHLIGHT_LIMIT = 500;
 const DECTCEM_HIDE = '\x1b[?25l';
@@ -73,6 +75,19 @@ function restoreScrollbackOffset(term: Terminal, offset: number) {
   term.scrollToLine(targetLine);
 }
 
+function getViewportDistanceFromBottomPx(viewport: HTMLElement | null): number | null {
+  if (!viewport) {
+    return null;
+  }
+  const clientHeight = viewport.clientHeight;
+  const scrollHeight = viewport.scrollHeight;
+  const scrollTop = viewport.scrollTop;
+  if (!Number.isFinite(clientHeight) || !Number.isFinite(scrollHeight) || !Number.isFinite(scrollTop)) {
+    return null;
+  }
+  return Math.max(0, scrollHeight - clientHeight - scrollTop);
+}
+
 function openExternalLink(event: MouseEvent, uri: string) {
   event.preventDefault();
   void api.openExternalUrl(uri);
@@ -124,6 +139,10 @@ export function LiveTerminalPanel({
   const renderedEndPositionRef = useRef(streamState?.endPosition ?? 0);
   const renderedTextRef = useRef(streamState?.text ?? '');
   const renderedSessionIdRef = useRef(streamState?.sessionId ?? sessionId ?? null);
+  const committedResetTokenRef = useRef(0);
+  const committedEndPositionRef = useRef(0);
+  const committedTextRef = useRef('');
+  const committedSessionIdRef = useRef<string | null>(null);
   const resetReplayEpochRef = useRef(0);
   const pendingStatefulResizeDimensionsRef = useRef<{ cols: number; rows: number } | null>(null);
   const lastReportedSizeRef = useRef<{ cols: number; rows: number } | null>(null);
@@ -136,6 +155,7 @@ export function LiveTerminalPanel({
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
   const onFollowOutputPausedChangeRef = useRef(onFollowOutputPausedChange);
+  const preferLiveRedrawOnMountRef = useRef(preferLiveRedrawOnMount);
   const sessionIdRef = useRef(sessionId);
   const readOnlyRef = useRef(readOnly);
   const inputEnabledRef = useRef(inputEnabled);
@@ -174,7 +194,7 @@ export function LiveTerminalPanel({
     userScrollIntentTimeoutRef.current = window.setTimeout(() => {
       userScrollIntentTimeoutRef.current = null;
       userScrollIntentRef.current = false;
-    }, 160);
+    }, USER_SCROLL_INTENT_MS);
   }, []);
 
   const armUserScrollPauseCooldown = useCallback(() => {
@@ -257,7 +277,7 @@ export function LiveTerminalPanel({
     const nextRows = Math.max(1, dims.rows);
     const renderedText = streamStateRef.current?.text ?? renderedTextRef.current;
     const preserveAuthoritativeStatefulResize =
-      preferLiveRedrawOnMount &&
+      preferLiveRedrawOnMountRef.current &&
       looksLikeStatefulTerminalUi(renderedText);
     const sizeChanged = term.cols !== nextCols || term.rows !== nextRows;
     if (preserveAuthoritativeStatefulResize && sizeChanged) {
@@ -267,7 +287,7 @@ export function LiveTerminalPanel({
     }
     pendingStatefulResizeDimensionsRef.current = null;
     applyLocalResize(term, { cols: nextCols, rows: nextRows }, { report: true });
-  }, [applyLocalResize, notifyResizeIfChanged, preferLiveRedrawOnMount]);
+  }, [applyLocalResize, notifyResizeIfChanged]);
 
   const applyQueuedStreamAdvance = useCallback((
     term: Terminal,
@@ -279,9 +299,16 @@ export function LiveTerminalPanel({
     renderedEndPositionRef.current = nextStreamState.endPosition;
     renderedTextRef.current = nextStreamState.text;
     enqueueTerminalMutation(term, async () => {
+      if (followOutputPausedRef.current) {
+        return;
+      }
       if (delta.length > 0) {
         await writeTerminalChunkAsync(term, delta);
       }
+      committedSessionIdRef.current = nextStreamState.sessionId ?? sessionIdRef.current ?? null;
+      committedResetTokenRef.current = nextStreamState.resetToken;
+      committedEndPositionRef.current = nextStreamState.endPosition;
+      committedTextRef.current = nextStreamState.text;
       if (!followOutputPausedRef.current) {
         scrollToLatest(term);
       }
@@ -315,6 +342,10 @@ export function LiveTerminalPanel({
         if (terminalRef.current !== term || resetReplayEpochRef.current !== resetReplayEpoch) {
           return;
         }
+        committedSessionIdRef.current = nextStreamState?.sessionId ?? sessionIdRef.current ?? null;
+        committedResetTokenRef.current = nextStreamState?.resetToken ?? 0;
+        committedEndPositionRef.current = nextStreamState?.endPosition ?? nextText.length;
+        committedTextRef.current = nextText;
         if (preserveViewport) {
           restoreScrollbackOffset(term, preserveOffset);
           return;
@@ -328,13 +359,13 @@ export function LiveTerminalPanel({
     }, { resetEpoch: resetReplayEpoch });
   }, [enqueueTerminalMutation, scrollToLatest]);
 
-  const handleFollowOutputScroll = useCallback((term: Terminal) => {
+  const handleFollowOutputScroll = useCallback((term: Terminal, viewport: HTMLElement | null = null) => {
     const isProgrammatic = Date.now() < programmaticScrollSuppressUntilRef.current;
-    const atBottom = isNearBottom(term);
+    const distanceFromBottomPx = getViewportDistanceFromBottomPx(viewport);
+    const atBottom = distanceFromBottomPx === null
+      ? isNearBottom(term)
+      : distanceFromBottomPx <= VIEWPORT_OFF_BOTTOM_THRESHOLD_PX;
     if (isProgrammatic && !userScrollIntentRef.current) {
-      if (preservingViewportDuringReplayRef.current) {
-        return;
-      }
       return;
     }
     if (atBottom) {
@@ -424,6 +455,10 @@ export function LiveTerminalPanel({
   }, [onFollowOutputPausedChange]);
 
   useEffect(() => {
+    preferLiveRedrawOnMountRef.current = preferLiveRedrawOnMount;
+  }, [preferLiveRedrawOnMount]);
+
+  useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
@@ -465,16 +500,11 @@ export function LiveTerminalPanel({
     if (nextSessionId !== sessionIdRef.current) {
       return;
     }
-    if (
-      !looksLikeStatefulTerminalUi(nextStreamState.text) &&
-      !looksLikeStatefulTerminalUi(renderedTextRef.current)
-    ) {
-      return;
-    }
     const staleSnapshot =
-      renderedResetTokenRef.current !== nextStreamState.resetToken ||
-      renderedEndPositionRef.current !== nextStreamState.endPosition ||
-      renderedTextRef.current !== nextStreamState.text;
+      committedSessionIdRef.current !== nextSessionId ||
+      committedResetTokenRef.current !== nextStreamState.resetToken ||
+      committedEndPositionRef.current !== nextStreamState.endPosition ||
+      committedTextRef.current !== nextStreamState.text;
     if (!staleSnapshot) {
       return;
     }
@@ -501,7 +531,7 @@ export function LiveTerminalPanel({
       pendingStatefulResizeDimensionsRef.current = null;
     }
 
-    if (followOutputPausedRef.current && statefulLiveScreen) {
+    if (followOutputPausedRef.current) {
       return;
     }
 
@@ -644,17 +674,14 @@ export function LiveTerminalPanel({
       if (readOnlyRef.current || !inputEnabledRef.current) {
         return;
       }
-      if (followOutputPausedRef.current) {
-        scrollToLatest(term, { force: true });
-      }
       onDataRef.current?.(data);
-      if (!cursorVisibleRef.current && looksLikeStatefulTerminalUi(renderedTextRef.current)) {
+      if (
+        !followOutputPausedRef.current &&
+        !cursorVisibleRef.current &&
+        looksLikeStatefulTerminalUi(renderedTextRef.current)
+      ) {
         writeTerminalChunk(term, DECTCEM_HIDE);
       }
-    });
-
-    const onScrollDisposable = term.onScroll(() => {
-      handleFollowOutputScroll(term);
     });
 
     term.attachCustomKeyEventHandler((event) => {
@@ -703,12 +730,12 @@ export function LiveTerminalPanel({
       armUserScrollIntent();
     };
     const onViewportScroll = () => {
-      handleFollowOutputScroll(term);
+      handleFollowOutputScroll(term, viewport);
     };
     const onPointerUp = () => {
       window.setTimeout(clearUserScrollIntent, 0);
     };
-    viewport?.addEventListener('wheel', onWheel, { passive: true, capture: true });
+    host.addEventListener('wheel', onWheel, { passive: true, capture: true });
     viewport?.addEventListener('pointerdown', onPointerDown);
     viewport?.addEventListener('scroll', onViewportScroll);
     viewport?.addEventListener('pointerup', onPointerUp);
@@ -739,7 +766,7 @@ export function LiveTerminalPanel({
 
     return () => {
       observer.disconnect();
-      viewport?.removeEventListener('wheel', onWheel, true);
+      host.removeEventListener('wheel', onWheel, true);
       viewport?.removeEventListener('pointerdown', onPointerDown);
       viewport?.removeEventListener('scroll', onViewportScroll);
       viewport?.removeEventListener('pointerup', onPointerUp);
@@ -751,7 +778,6 @@ export function LiveTerminalPanel({
       }
       searchResultsDisposable?.dispose?.();
       onDataDisposable.dispose();
-      onScrollDisposable.dispose();
       term.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -810,6 +836,9 @@ export function LiveTerminalPanel({
       return;
     }
     previousRepairRequestRef.current = repairRequestId;
+    if (followOutputPausedRef.current) {
+      return;
+    }
     resetTerminalToSnapshot(term, streamStateRef.current);
   }, [repairRequestId, resetTerminalToSnapshot]);
 
