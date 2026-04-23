@@ -61,6 +61,7 @@ const mocks = vi.hoisted(() => {
     open: ReturnType<typeof vi.fn>;
     loadAddon: ReturnType<typeof vi.fn>;
     attachCustomKeyEventHandler: ReturnType<typeof vi.fn>;
+    onKey: ReturnType<typeof vi.fn>;
     onData: ReturnType<typeof vi.fn>;
     onScroll: ReturnType<typeof vi.fn>;
     write: ReturnType<typeof vi.fn>;
@@ -181,6 +182,7 @@ const mocks = vi.hoisted(() => {
       }),
       loadAddon: vi.fn(),
       attachCustomKeyEventHandler: vi.fn(),
+      onKey: vi.fn(() => ({ dispose: vi.fn() })),
       onDataListeners: new Set<(data: string) => void>(),
       onData: vi.fn((listener: (data: string) => void) => {
         term.onDataListeners.add(listener);

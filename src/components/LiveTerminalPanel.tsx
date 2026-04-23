@@ -88,6 +88,11 @@ function getViewportDistanceFromBottomPx(viewport: HTMLElement | null): number |
   return Math.max(0, scrollHeight - clientHeight - scrollTop);
 }
 
+function dropContainsTerminalText(event: DragEvent) {
+  const types = Array.from(event.dataTransfer?.types ?? []);
+  return types.includes('text/plain') || types.includes('text/uri-list');
+}
+
 function openExternalLink(event: MouseEvent, uri: string) {
   event.preventDefault();
   void api.openExternalUrl(uri);
@@ -299,9 +304,6 @@ export function LiveTerminalPanel({
     renderedEndPositionRef.current = nextStreamState.endPosition;
     renderedTextRef.current = nextStreamState.text;
     enqueueTerminalMutation(term, async () => {
-      if (followOutputPausedRef.current) {
-        return;
-      }
       if (delta.length > 0) {
         await writeTerminalChunkAsync(term, delta);
       }
@@ -531,10 +533,6 @@ export function LiveTerminalPanel({
       pendingStatefulResizeDimensionsRef.current = null;
     }
 
-    if (followOutputPausedRef.current) {
-      return;
-    }
-
     if (renderedSessionIdRef.current !== nextSessionId) {
       renderedSessionIdRef.current = nextSessionId;
       resetTerminalToSnapshot(term, streamState);
@@ -542,6 +540,9 @@ export function LiveTerminalPanel({
     }
 
     if (renderedResetTokenRef.current !== streamState.resetToken) {
+      if (followOutputPausedRef.current) {
+        return;
+      }
       resetTerminalToSnapshot(term, streamState);
       return;
     }
@@ -563,19 +564,15 @@ export function LiveTerminalPanel({
         renderedEndPositionRef.current >= streamState.startPosition &&
         renderedEndPositionRef.current <= streamState.endPosition;
       if (!canReplayVisibleSuffix) {
+        if (followOutputPausedRef.current) {
+          return;
+        }
         resetTerminalToSnapshot(term, streamState);
         return;
       }
       const replayOffset = renderedEndPositionRef.current - streamState.startPosition;
       const visibleSuffix = streamState.text.slice(replayOffset);
-      if (visibleSuffix.length > 0) {
-        writeTerminalChunk(term, visibleSuffix);
-      }
-      renderedEndPositionRef.current = streamState.endPosition;
-      renderedTextRef.current = streamState.text;
-      if (!followOutputPausedRef.current) {
-        scrollToLatest(term);
-      }
+      applyQueuedStreamAdvance(term, streamState, visibleSuffix);
       return;
     }
 
@@ -599,6 +596,9 @@ export function LiveTerminalPanel({
         renderedEndPositionRef.current >= streamState.startPosition &&
         renderedEndPositionRef.current <= streamState.endPosition;
       if (!canReplayVisibleSuffix) {
+        if (followOutputPausedRef.current) {
+          return;
+        }
         resetTerminalToSnapshot(term, streamState);
         return;
       }
@@ -670,6 +670,27 @@ export function LiveTerminalPanel({
       setSearchResultIndex((event?.resultIndex ?? 1) - 1);
     });
 
+    const viewport = host.querySelector<HTMLElement>('.xterm-viewport');
+    const isViewportAlreadyFollowingLatest = () => {
+      if (followOutputPausedRef.current) {
+        return false;
+      }
+      const distanceFromBottomPx = getViewportDistanceFromBottomPx(viewport);
+      if (distanceFromBottomPx !== null) {
+        return distanceFromBottomPx <= 0.5;
+      }
+      return isNearBottom(term);
+    };
+    const resumeViewportForUserInput = () => {
+      if (readOnlyRef.current || !inputEnabledRef.current) {
+        return;
+      }
+      if (isViewportAlreadyFollowingLatest()) {
+        return;
+      }
+      scrollToLatest(term, { force: true });
+    };
+
     const onDataDisposable = term.onData((data) => {
       if (readOnlyRef.current || !inputEnabledRef.current) {
         return;
@@ -684,6 +705,10 @@ export function LiveTerminalPanel({
       }
     });
 
+    const onKeyDisposable = term.onKey(() => {
+      resumeViewportForUserInput();
+    });
+
     term.attachCustomKeyEventHandler((event) => {
       if (
         event.type === 'keydown' &&
@@ -695,6 +720,7 @@ export function LiveTerminalPanel({
         !readOnlyRef.current &&
         inputEnabledRef.current
       ) {
+        resumeViewportForUserInput();
         event.preventDefault();
         event.stopPropagation();
         onDataRef.current?.(MULTILINE_ENTER_SEQUENCE);
@@ -702,17 +728,16 @@ export function LiveTerminalPanel({
       }
       if (
         event.type === 'keydown' &&
-        ['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown'].includes(event.key)
+        ['PageUp', 'PageDown'].includes(event.key)
       ) {
         armUserScrollIntent();
-        if (['PageUp', 'Home', 'ArrowUp'].includes(event.key)) {
+        if (event.key === 'PageUp') {
           pauseFollowForUserScroll();
         }
       }
       return true;
     });
 
-    const viewport = host.querySelector<HTMLElement>('.xterm-viewport');
     const clearUserScrollIntent = () => {
       if (userScrollIntentTimeoutRef.current !== null) {
         window.clearTimeout(userScrollIntentTimeoutRef.current);
@@ -729,6 +754,14 @@ export function LiveTerminalPanel({
     const onPointerDown = () => {
       armUserScrollIntent();
     };
+    const onTerminalUserInput = () => {
+      resumeViewportForUserInput();
+    };
+    const onTerminalTextDrop = (event: DragEvent) => {
+      if (dropContainsTerminalText(event)) {
+        resumeViewportForUserInput();
+      }
+    };
     const onViewportScroll = () => {
       handleFollowOutputScroll(term, viewport);
     };
@@ -736,6 +769,10 @@ export function LiveTerminalPanel({
       window.setTimeout(clearUserScrollIntent, 0);
     };
     host.addEventListener('wheel', onWheel, { passive: true, capture: true });
+    host.addEventListener('input', onTerminalUserInput, true);
+    host.addEventListener('paste', onTerminalUserInput, true);
+    host.addEventListener('compositionend', onTerminalUserInput, true);
+    host.addEventListener('drop', onTerminalTextDrop, true);
     viewport?.addEventListener('pointerdown', onPointerDown);
     viewport?.addEventListener('scroll', onViewportScroll);
     viewport?.addEventListener('pointerup', onPointerUp);
@@ -767,6 +804,10 @@ export function LiveTerminalPanel({
     return () => {
       observer.disconnect();
       host.removeEventListener('wheel', onWheel, true);
+      host.removeEventListener('input', onTerminalUserInput, true);
+      host.removeEventListener('paste', onTerminalUserInput, true);
+      host.removeEventListener('compositionend', onTerminalUserInput, true);
+      host.removeEventListener('drop', onTerminalTextDrop, true);
       viewport?.removeEventListener('pointerdown', onPointerDown);
       viewport?.removeEventListener('scroll', onViewportScroll);
       viewport?.removeEventListener('pointerup', onPointerUp);
@@ -777,6 +818,7 @@ export function LiveTerminalPanel({
         userScrollIntentTimeoutRef.current = null;
       }
       searchResultsDisposable?.dispose?.();
+      onKeyDisposable.dispose();
       onDataDisposable.dispose();
       term.dispose();
       terminalRef.current = null;
@@ -790,7 +832,8 @@ export function LiveTerminalPanel({
     armUserScrollIntent,
     handleFollowOutputScroll,
     pauseFollowForUserScroll,
-    resetTerminalToSnapshot
+    resetTerminalToSnapshot,
+    scrollToLatest
   ]);
 
   useEffect(() => {

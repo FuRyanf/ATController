@@ -53,6 +53,7 @@ const mocks = vi.hoisted(() => {
     open: ReturnType<typeof vi.fn>;
     loadAddon: ReturnType<typeof vi.fn>;
     attachCustomKeyEventHandler: ReturnType<typeof vi.fn>;
+    onKey: ReturnType<typeof vi.fn>;
     onData: ReturnType<typeof vi.fn>;
     onScroll: ReturnType<typeof vi.fn>;
     write: ReturnType<typeof vi.fn>;
@@ -94,6 +95,7 @@ const mocks = vi.hoisted(() => {
         addon.activate?.(term);
       }),
       attachCustomKeyEventHandler: vi.fn(),
+      onKey: vi.fn(() => ({ dispose: vi.fn() })),
       onData: vi.fn(() => ({ dispose: vi.fn() })),
       onScroll: vi.fn(() => ({ dispose: vi.fn() })),
       write: vi.fn((_chunk: string, callback?: () => void) => {

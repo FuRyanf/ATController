@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const DECTCEM_HIDE = '\u001b[?25l';
 const DECTCEM_SHOW = '\u001b[?25h';
+const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
 
 let resizeObserverCallback: ResizeObserverCallback | null = null;
 
@@ -22,6 +23,7 @@ const mocks = vi.hoisted(() => {
     open: ReturnType<typeof vi.fn>;
     loadAddon: ReturnType<typeof vi.fn>;
     attachCustomKeyEventHandler: ReturnType<typeof vi.fn>;
+    onKey: ReturnType<typeof vi.fn>;
     onData: ReturnType<typeof vi.fn>;
     onScroll: ReturnType<typeof vi.fn>;
     write: ReturnType<typeof vi.fn>;
@@ -38,6 +40,7 @@ const mocks = vi.hoisted(() => {
     screenLines: string[];
     wrappedRows: Set<number>;
     isUserScrolling: boolean;
+    onKeyListeners: Set<(event: { key: string; domEvent: KeyboardEvent }) => void>;
     onDataListeners: Set<(data: string) => void>;
     onScrollListeners: Set<(viewportY: number) => void>;
     buffer: {
@@ -61,6 +64,22 @@ const mocks = vi.hoisted(() => {
   const emitData = (term: (typeof terminals)[number], data: string) => {
     for (const listener of term.onDataListeners) {
       listener(data);
+    }
+  };
+
+  const emitKey = (
+    term: (typeof terminals)[number],
+    key: string,
+    domEventInit: KeyboardEventInit = {}
+  ) => {
+    const domEvent = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key,
+      ...domEventInit
+    });
+    for (const listener of term.onKeyListeners) {
+      listener({ key, domEvent });
     }
   };
 
@@ -133,6 +152,8 @@ const mocks = vi.hoisted(() => {
       open: vi.fn((host: HTMLElement) => {
         const root = document.createElement('div');
         root.className = 'xterm';
+        const textarea = document.createElement('textarea');
+        textarea.className = 'xterm-helper-textarea';
         const viewport = document.createElement('div');
         viewport.className = 'xterm-viewport';
         const screen = document.createElement('div');
@@ -155,12 +176,22 @@ const mocks = vi.hoisted(() => {
           term.isUserScrolling = nextViewportY < term.buffer.active.baseY;
           emitScroll(term);
         });
+        root.appendChild(textarea);
         root.appendChild(viewport);
         root.appendChild(screen);
         host.appendChild(root);
       }),
       loadAddon: vi.fn(),
       attachCustomKeyEventHandler: vi.fn(),
+      onKeyListeners: new Set<(event: { key: string; domEvent: KeyboardEvent }) => void>(),
+      onKey: vi.fn((listener: (event: { key: string; domEvent: KeyboardEvent }) => void) => {
+        term.onKeyListeners.add(listener);
+        return {
+          dispose: vi.fn(() => {
+            term.onKeyListeners.delete(listener);
+          })
+        };
+      }),
       onDataListeners: new Set<(data: string) => void>(),
       onData: vi.fn((listener: (data: string) => void) => {
         term.onDataListeners.add(listener);
@@ -267,6 +298,7 @@ const mocks = vi.hoisted(() => {
     createTerminal,
     createSearchAddon,
     emitData,
+    emitKey,
     fit,
     proposedDimensions,
     terminals
@@ -352,6 +384,33 @@ function renderLivePanel(
   );
 }
 
+function renderLegacyPanel(
+  text: string,
+  options: {
+    streamState?: Record<string, unknown>;
+    props?: Record<string, unknown>;
+  } = {}
+) {
+  const streamState = buildStreamState(text, options.streamState);
+  return render(
+    <TerminalPanel
+      sessionId={null}
+      streamState={streamState}
+      content={text}
+      readOnly={false}
+      inputEnabled
+      cursorVisible={false}
+      focusRequestId={0}
+      repairRequestId={0}
+      searchToggleRequestId={0}
+      onData={() => undefined}
+      onResize={() => undefined}
+      onFocusChange={() => undefined}
+      {...options.props}
+    />
+  );
+}
+
 function setViewportMetrics(
   viewport: HTMLElement,
   {
@@ -376,6 +435,23 @@ function setViewportMetrics(
     configurable: true,
     writable: true,
     value: scrollTop
+  });
+}
+
+function setDefaultScrollbackViewport(viewport: HTMLElement, scrollTop = 900) {
+  // With clientHeight=200 and scrollHeight=1200, scrollTop=900 is 100px off bottom.
+  setViewportMetrics(viewport, {
+    clientHeight: 200,
+    scrollHeight: 1200,
+    scrollTop
+  });
+}
+
+async function pauseFollowByWheelScroll(viewport: HTMLElement) {
+  await act(async () => {
+    fireEvent.wheel(viewport, { deltaY: -32 });
+    fireEvent.scroll(viewport);
+    await Promise.resolve();
   });
 }
 
@@ -1009,17 +1085,8 @@ describe('TerminalPanel live rendering', () => {
     const term = mocks.terminals[0];
     const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
     expect(viewport).not.toBeNull();
-    setViewportMetrics(viewport as HTMLElement, {
-      clientHeight: 200,
-      scrollHeight: 1200,
-      scrollTop: 900
-    });
-
-    await act(async () => {
-      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
-      fireEvent.scroll(viewport as HTMLElement);
-      await Promise.resolve();
-    });
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
 
     await waitFor(() => {
       expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
@@ -1197,7 +1264,7 @@ describe('TerminalPanel live rendering', () => {
     });
   });
 
-  it('buffers live output while follow is paused and catches up from the latest snapshot on resume', async () => {
+  it('continues appending live output while follow is paused without snapping to latest', async () => {
     const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
     const nextContent = `${initialContent}\nnew output`;
     const { container, getByRole, queryByRole, rerender } = renderLivePanel(initialContent);
@@ -1209,17 +1276,8 @@ describe('TerminalPanel live rendering', () => {
     const term = mocks.terminals[0];
     const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
     expect(viewport).not.toBeNull();
-    setViewportMetrics(viewport as HTMLElement, {
-      clientHeight: 200,
-      scrollHeight: 1200,
-      scrollTop: 900
-    });
-
-    await act(async () => {
-      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
-      fireEvent.scroll(viewport as HTMLElement);
-      await Promise.resolve();
-    });
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
 
     await waitFor(() => {
       expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
@@ -1227,6 +1285,9 @@ describe('TerminalPanel live rendering', () => {
 
     term.reset.mockClear();
     term.write.mockClear();
+    term.scrollToBottom.mockClear();
+    const pausedBaseY = term.buffer.active.baseY;
+    const pausedViewportY = term.buffer.active.viewportY;
 
     rerender(
       <TerminalPanel
@@ -1256,8 +1317,14 @@ describe('TerminalPanel live rendering', () => {
     });
 
     expect(term.reset).not.toHaveBeenCalled();
-    expect(term.write).not.toHaveBeenCalledWith('\nnew output', expect.any(Function));
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnew output', expect.any(Function));
+    });
     expect(term.write).not.toHaveBeenCalledWith(nextContent, expect.any(Function));
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    expect(term.buffer.active.baseY).toBeGreaterThan(pausedBaseY);
+    expect(term.buffer.active.viewportY).toBe(pausedViewportY);
+    expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
 
     await act(async () => {
       fireEvent.click(getByRole('button', { name: 'Jump to latest' }));
@@ -1265,9 +1332,9 @@ describe('TerminalPanel live rendering', () => {
     });
 
     await waitFor(() => {
-      expect(term.reset).toHaveBeenCalled();
-      expect(term.write).toHaveBeenCalledWith(nextContent, expect.any(Function));
+      expect(term.scrollToBottom).toHaveBeenCalled();
     });
+    expect(term.reset).not.toHaveBeenCalled();
     expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
@@ -1291,6 +1358,7 @@ describe('TerminalPanel live rendering', () => {
 
     term.reset.mockClear();
     term.write.mockClear();
+    term.scrollToBottom.mockClear();
 
     await act(async () => {
       rerender(
@@ -1323,8 +1391,11 @@ describe('TerminalPanel live rendering', () => {
     await waitFor(() => {
       expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
     });
-    expect(term.write).not.toHaveBeenCalledWith('\nnew output', expect.any(Function));
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnew output', expect.any(Function));
+    });
     expect(term.write).not.toHaveBeenCalledWith(nextContent, expect.any(Function));
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
 
     await act(async () => {
       fireEvent.click(getByRole('button', { name: 'Jump to latest' }));
@@ -1332,9 +1403,9 @@ describe('TerminalPanel live rendering', () => {
     });
 
     await waitFor(() => {
-      expect(term.reset).toHaveBeenCalled();
-      expect(term.write).toHaveBeenCalledWith(nextContent, expect.any(Function));
+      expect(term.scrollToBottom).toHaveBeenCalled();
     });
+    expect(term.reset).not.toHaveBeenCalled();
     expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
@@ -1396,7 +1467,7 @@ describe('TerminalPanel live rendering', () => {
     });
   });
 
-  it('keeps follow paused when new terminal input arrives while paused', async () => {
+  it('resumes follow when new terminal key input arrives while paused', async () => {
     const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
     const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
 
@@ -1407,17 +1478,84 @@ describe('TerminalPanel live rendering', () => {
     const term = mocks.terminals[0];
     const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
     expect(viewport).not.toBeNull();
-    setViewportMetrics(viewport as HTMLElement, {
-      clientHeight: 200,
-      scrollHeight: 1200,
-      scrollTop: 900
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
     });
 
+    term.scrollToBottom.mockClear();
     await act(async () => {
-      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
-      fireEvent.scroll(viewport as HTMLElement);
+      mocks.emitKey(term, 'x');
       await Promise.resolve();
     });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('resumes follow when the live viewport drifts off bottom while still following', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      mocks.emitKey(term, 'x');
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('skips live resume work when already following at the bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement, 1000);
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      mocks.emitKey(term, 'x');
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('does not resume follow when onData fires without a user-input event', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
 
     await waitFor(() => {
       expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
@@ -1431,6 +1569,570 @@ describe('TerminalPanel live rendering', () => {
 
     expect(term.scrollToBottom).not.toHaveBeenCalled();
     expect(queryByRole('button', { name: 'Jump to latest' })).not.toBeNull();
+  });
+
+  it('resumes follow when helper textarea dispatches input', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    expect(viewport).not.toBeNull();
+    expect(textarea).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.input(textarea as HTMLTextAreaElement);
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('resumes follow when helper textarea dispatches compositionend', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    expect(viewport).not.toBeNull();
+    expect(textarea).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.compositionEnd(textarea as HTMLTextAreaElement, { data: 'あ' });
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('resumes follow when helper textarea dispatches paste', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    expect(viewport).not.toBeNull();
+    expect(textarea).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent(textarea as HTMLTextAreaElement, new Event('paste', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('resumes follow when text is dropped into the live terminal', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.drop(viewport as HTMLElement, {
+        dataTransfer: { types: ['text/plain'] }
+      });
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('does not resume follow for non-text drops in the live terminal', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.drop(viewport as HTMLElement, {
+        dataTransfer: { types: ['Files'] }
+      });
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).not.toBeNull();
+  });
+
+  it('resumes follow before sending Shift+Enter', async () => {
+    const onData = vi.fn();
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLivePanel(initialContent, {
+      props: { onData }
+    });
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    const customKeyHandler = term.attachCustomKeyEventHandler.mock.calls[0]?.[0] as
+      | ((event: KeyboardEvent) => boolean)
+      | undefined;
+    expect(customKeyHandler).toBeTypeOf('function');
+
+    term.scrollToBottom.mockClear();
+    const event = {
+      type: 'keydown',
+      key: 'Enter',
+      shiftKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn()
+    } as unknown as KeyboardEvent;
+
+    await act(async () => {
+      const result = customKeyHandler?.(event);
+      expect(result).toBe(false);
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(onData).toHaveBeenCalledWith(MULTILINE_ENTER_SEQUENCE);
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel resumes follow when new terminal key input arrives while paused', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      mocks.emitKey(term, 'x');
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel resumes follow when helper textarea dispatches input', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    expect(viewport).not.toBeNull();
+    expect(textarea).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.input(textarea as HTMLTextAreaElement);
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel resumes follow when helper textarea dispatches compositionend', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    expect(viewport).not.toBeNull();
+    expect(textarea).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.compositionEnd(textarea as HTMLTextAreaElement, { data: 'あ' });
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel resumes follow when helper textarea dispatches paste', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    expect(viewport).not.toBeNull();
+    expect(textarea).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent(textarea as HTMLTextAreaElement, new Event('paste', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel resumes follow when text is dropped into the terminal', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.drop(viewport as HTMLElement, {
+        dataTransfer: { types: ['text/plain'] }
+      });
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel does not resume follow for non-text drops', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.drop(viewport as HTMLElement, {
+        dataTransfer: { types: ['Files'] }
+      });
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).not.toBeNull();
+  });
+
+  it('legacy panel resumes follow before sending Shift+Enter', async () => {
+    const onData = vi.fn();
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLegacyPanel(initialContent, {
+      props: { onData }
+    });
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    const customKeyHandler = term.attachCustomKeyEventHandler.mock.calls[0]?.[0] as
+      | ((event: KeyboardEvent) => boolean)
+      | undefined;
+    expect(customKeyHandler).toBeTypeOf('function');
+
+    term.scrollToBottom.mockClear();
+    const event = {
+      type: 'keydown',
+      key: 'Enter',
+      shiftKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn()
+    } as unknown as KeyboardEvent;
+
+    await act(async () => {
+      const result = customKeyHandler?.(event);
+      expect(result).toBe(false);
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(onData).toHaveBeenCalledWith(MULTILINE_ENTER_SEQUENCE);
+    });
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel does not resume follow when onData fires without a user-input event', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, getByRole, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      mocks.emitData(term, 'x');
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).not.toBeNull();
+  });
+
+  it('legacy panel skips resume work when already following at the bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement, 1000);
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      mocks.emitKey(term, 'x');
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel resumes follow when the viewport drifts off bottom while still following', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      mocks.emitKey(term, 'x');
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel resumes follow when helper textarea input arrives while drifted off bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    expect(viewport).not.toBeNull();
+    expect(textarea).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.input(textarea as HTMLTextAreaElement);
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('legacy panel resumes follow when helper textarea paste arrives while drifted off bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, queryByRole } = renderLegacyPanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+    expect(viewport).not.toBeNull();
+    expect(textarea).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent(textarea as HTMLTextAreaElement, new Event('paste', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
+    expect(term.scrollToBottom).toHaveBeenCalled();
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
   it('reports follow pause changes when the user scrolls away from the bottom', async () => {
@@ -1777,32 +2479,18 @@ describe('TerminalPanel live rendering', () => {
     expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
-  it('waits for async snapshot replay before restoring a paused viewport', async () => {
+  it('waits for async snapshot replay before scrolling to latest', async () => {
     const initialText = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
     const nextText = Array.from({ length: 48 }, (_, index) => `next ${index + 1}`).join('\n');
-    const { container, rerender } = renderLivePanel(initialText);
+    const { rerender } = renderLivePanel(initialText);
 
     await waitFor(() => {
       expect(mocks.terminals).toHaveLength(1);
     });
 
     const term = mocks.terminals[0];
-    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
-    expect(viewport).not.toBeNull();
-    setViewportMetrics(viewport as HTMLElement, {
-      clientHeight: 200,
-      scrollHeight: 1200,
-      scrollTop: 900
-    });
-
-    await act(async () => {
-      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
-      fireEvent.scroll(viewport as HTMLElement);
-      await Promise.resolve();
-    });
-
     await waitFor(() => {
-      expect(container.querySelector('.terminal-follow-button')).not.toBeNull();
+      expect(term.write).toHaveBeenCalledWith(initialText, expect.any(Function));
     });
 
     const originalWrite = term.write.getMockImplementation();
@@ -1817,6 +2505,12 @@ describe('TerminalPanel live rendering', () => {
       originalWrite?.(chunk, callback);
     });
 
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+
+    term.reset.mockClear();
+    term.write.mockClear();
     term.scrollToLine.mockClear();
     term.scrollToBottom.mockClear();
 
@@ -1832,7 +2526,11 @@ describe('TerminalPanel live rendering', () => {
     );
 
     await waitFor(() => {
-      expect(term.reset).toHaveBeenCalled();
+      expect(term.write).toHaveBeenCalledWith(nextText, expect.any(Function));
+      expect(releaseSnapshotWrite).toBeTypeOf('function');
+    });
+    await act(async () => {
+      await Promise.resolve();
     });
     expect(term.scrollToLine).not.toHaveBeenCalled();
     expect(term.scrollToBottom).not.toHaveBeenCalled();
@@ -1843,7 +2541,7 @@ describe('TerminalPanel live rendering', () => {
     });
 
     await waitFor(() => {
-      expect(term.scrollToLine).toHaveBeenCalled();
+      expect(term.scrollToBottom).toHaveBeenCalled();
     });
   });
 

@@ -61,6 +61,11 @@ const TERMINAL_SEARCH_DECORATIONS: NonNullable<ISearchOptions['decorations']> = 
   activeMatchColorOverviewRuler: '#8fb7ff'
 };
 
+function dropContainsTerminalText(event: DragEvent) {
+  const types = Array.from(event.dataTransfer?.types ?? []);
+  return types.includes('text/plain') || types.includes('text/uri-list');
+}
+
 interface PendingRepairState {
   preserveViewport: boolean;
   scrollbackOffset: number;
@@ -1358,6 +1363,26 @@ function TerminalPanelComponent({
       if (!cursorVisibleRef.current) {
         term.write(DECTCEM_HIDE);
       }
+      const isViewportAlreadyFollowingLatest = () => {
+        if (!shouldAutoFollow(followStateRef.current)) {
+          return false;
+        }
+        const viewport = getViewportElement();
+        if (viewport) {
+          const targetScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+          return Math.abs(viewport.scrollTop - targetScrollTop) <= 0.5;
+        }
+        return term.buffer.active.viewportY >= term.buffer.active.baseY;
+      };
+      const resumeViewportForUserInput = () => {
+        if (readOnlyRef.current || !inputEnabledRef.current) {
+          return;
+        }
+        if (isViewportAlreadyFollowingLatest()) {
+          return;
+        }
+        resumeFollowOutput(term, 'follow:input-resume');
+      };
       term.attachCustomKeyEventHandler((event) => {
         if (
           event.type === 'keydown' &&
@@ -1368,9 +1393,7 @@ function TerminalPanelComponent({
           !event.altKey
         ) {
           if (!readOnlyRef.current && inputEnabledRef.current) {
-            if (!shouldAutoFollow(followStateRef.current)) {
-              resumeFollowOutput(term, 'follow:input-resume');
-            }
+            resumeViewportForUserInput();
             event.preventDefault();
             event.stopPropagation();
             suppressPlainEnterUntilRef.current = Date.now() + MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS;
@@ -1384,6 +1407,9 @@ function TerminalPanelComponent({
           pauseFollowOutput();
         }
         return true;
+      });
+      const onKeyDisposable = term.onKey(() => {
+        resumeViewportForUserInput();
       });
       terminalRef.current = term;
       writeQueueRef.current.setSink({
@@ -1729,9 +1755,6 @@ function TerminalPanelComponent({
         if (readOnlyRef.current || !inputEnabledRef.current) {
           return;
         }
-        if (!shouldAutoFollow(followStateRef.current)) {
-          resumeFollowOutput(term, 'follow:input-resume');
-        }
 
         if ((data === '\r' || data === '\n') && Date.now() < suppressPlainEnterUntilRef.current) {
           suppressPlainEnterUntilRef.current = 0;
@@ -1823,7 +1846,19 @@ function TerminalPanelComponent({
           logTerminalDebug('follow:wheel-resume-armed', {}, term);
         }
       };
+      const onTerminalUserInput = () => {
+        resumeViewportForUserInput();
+      };
+      const onTerminalTextDrop = (event: DragEvent) => {
+        if (dropContainsTerminalText(event)) {
+          resumeViewportForUserInput();
+        }
+      };
       host.addEventListener('wheel', onWheel, { passive: true, capture: true });
+      host.addEventListener('input', onTerminalUserInput, true);
+      host.addEventListener('paste', onTerminalUserInput, true);
+      host.addEventListener('compositionend', onTerminalUserInput, true);
+      host.addEventListener('drop', onTerminalTextDrop, true);
 
       const viewport = host.querySelector('.xterm-viewport') as HTMLElement | null;
       const onViewportScroll = () => {
@@ -2016,9 +2051,14 @@ function TerminalPanelComponent({
       return () => {
         inputObserver.disconnect();
         observer.disconnect();
+        onKeyDisposable.dispose();
         onDataDisposable.dispose();
         onScrollDisposable.dispose();
-        host.removeEventListener('wheel', onWheel);
+        host.removeEventListener('wheel', onWheel, true);
+        host.removeEventListener('input', onTerminalUserInput, true);
+        host.removeEventListener('paste', onTerminalUserInput, true);
+        host.removeEventListener('compositionend', onTerminalUserInput, true);
+        host.removeEventListener('drop', onTerminalTextDrop, true);
         searchResultsDisposable.dispose();
         if (viewport) {
           viewport.removeEventListener('scroll', onViewportScroll);
@@ -2106,6 +2146,7 @@ function TerminalPanelComponent({
     queueWrite,
     resumeFollowOutput,
     clearScheduledStreamRepair,
+    getViewportElement,
     getPreservedScrollbackOffset,
     schedulePausedViewportCapture,
     schedulePausedViewportRestore,
