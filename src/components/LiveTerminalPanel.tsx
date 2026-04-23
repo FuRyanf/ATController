@@ -547,13 +547,6 @@ export function LiveTerminalPanel({
       return;
     }
 
-    // Plain append output can safely extend scrollback while paused, but
-    // stateful terminal UIs depend on exact cursor/screen state. Defer those
-    // redraw chunks until the user explicitly returns to latest.
-    if (followOutputPausedRef.current && statefulLiveScreen) {
-      return;
-    }
-
     if (streamState.phase !== 'ready') {
       return;
     }
