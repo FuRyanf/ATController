@@ -1338,6 +1338,73 @@ describe('TerminalPanel live rendering', () => {
     expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
+  it('freezes paused stateful live output until follow resumes', async () => {
+    const initialContent = `\u001b[?1049h${Array.from({ length: 48 }, (_, index) => `Claude line ${index + 1}`).join('\n')}`;
+    const nextContent = `${initialContent}\nnext state`;
+    const { container, getByRole, queryByRole, rerender } = renderLivePanel(initialContent);
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    setDefaultScrollbackViewport(viewport as HTMLElement);
+    await pauseFollowByWheelScroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+    });
+
+    term.reset.mockClear();
+    term.write.mockClear();
+    term.scrollToBottom.mockClear();
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        streamState={buildStreamState(nextContent, {
+          endPosition: nextContent.length,
+          rawEndPosition: nextContent.length,
+          chunks: [
+            {
+              rawStartPosition: initialContent.length,
+              rawEndPosition: nextContent.length,
+              startPosition: initialContent.length,
+              endPosition: nextContent.length,
+              data: '\nnext state'
+            }
+          ]
+        })}
+        content={nextContent}
+        readOnly={false}
+        inputEnabled
+        cursorVisible={false}
+      />
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(term.reset).not.toHaveBeenCalled();
+    expect(term.write).not.toHaveBeenCalledWith('\nnext state', expect.any(Function));
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    expect(getByRole('button', { name: 'Jump to latest' })).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: 'Jump to latest' }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalled();
+      expect(term.write).toHaveBeenCalledWith(nextContent, expect.any(Function));
+    });
+    expect(queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
   it('freezes a queued append that races with a scroll-up pause and catches up on resume', async () => {
     const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
     const nextContent = `${initialContent}\nnew output`;
