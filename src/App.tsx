@@ -63,6 +63,7 @@ import {
   terminalSessionStreamKnownRawEndPosition,
   type TerminalSessionStreamState
 } from './lib/terminalSessionStream';
+import { selectTerminalStreamCacheEvictions } from './lib/terminalStreamCache';
 import { looksLikeStatefulTerminalUi, stripAnsi } from './lib/terminalUiHeuristics';
 import {
   loadSkillUsageMap,
@@ -128,6 +129,9 @@ const TERMINAL_LOG_BUFFER_CHARS = 1_200_000;
 const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
 const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
 const TERMINAL_LOG_FLUSH_SAFETY_MS = 48;
+const TERMINAL_STREAM_CACHE_MAX_THREADS = 16;
+const TERMINAL_STREAM_CACHE_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS * 10;
+const TERMINAL_STREAM_CACHE_PRUNE_DELAY_MS = 500;
 const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
 const TERMINAL_RESIZE_DEBOUNCE_MS = 80;
 const STATEFUL_TERMINAL_RESYNC_DEBOUNCE_MS = 160;
@@ -152,6 +156,9 @@ const MAX_VISIBLE_OUTPUT_TAIL_CHARS = 512;
 const IGNORED_SSH_AUTH_STATUS_SESSION_TTL_MS = 5 * 60 * 1000;
 const MAX_IGNORED_SSH_AUTH_STATUS_SESSIONS = 512;
 const IGNORED_SSH_AUTH_STATUS_SESSION_PRUNE_INTERVAL_MS = 10_000;
+const MAX_PENDING_TERMINAL_DATA_SESSIONS = 64;
+const MAX_PENDING_TERMINAL_DATA_EVENTS_PER_SESSION = 64;
+const MAX_PENDING_TERMINAL_DATA_CHARS_PER_SESSION = 256_000;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
 const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
   'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Full access thread, or enable full access by default in Settings.';
@@ -1552,7 +1559,10 @@ export default function App() {
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
   const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
   const terminalStreamsByThreadRef = useRef<Record<string, TerminalSessionStreamState>>({});
+  const terminalStreamAccessedAtByThreadRef = useRef<Record<string, number>>({});
+  const terminalStreamCachePruneTimerRef = useRef<number | null>(null);
   const threadIdBySessionIdRef = useRef<Record<string, string>>({});
+  const pendingTerminalDataBySessionRef = useRef<Record<string, TerminalDataEvent[]>>({});
   const lastTerminalLogByThreadRef = useRef<Record<string, string>>({});
   const workingStopTimerByThreadRef = useRef<Record<string, number>>({});
   const draftAttachmentsByThreadRef = useRef<Record<string, string[]>>({});
@@ -1607,6 +1617,8 @@ export default function App() {
   const terminalOnResizeHandlerRef = useRef<(cols: number, rows: number) => void>(() => undefined);
   const pendingTerminalResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | null>(null);
   const pendingTerminalResizeTimerRef = useRef<number | null>(null);
+  const selectedTerminalStreamRevisionTimerRef = useRef<number | null>(null);
+  const selectedTerminalStreamRevisionSafetyTimerRef = useRef<number | null>(null);
   const terminalHydrationRequestIdByThreadRef = useRef<Record<string, number>>({});
   const lastSentTerminalSizeBySessionRef = useRef<Record<string, { cols: number; rows: number }>>({});
   const selectedSessionIdRef = useRef<string | null>(null);
@@ -1822,11 +1834,6 @@ export default function App() {
       : !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
       ? 'Starting Claude session...'
       : undefined;
-  const shouldRenderSelectedTerminalStartupPlaceholder =
-    Boolean(selectedThread) &&
-    !selectedSessionId &&
-    !hasSelectedTerminalContent &&
-    selectedTerminalOverlayMessage === 'Starting Claude session...';
   const selectedThreadWorking = selectedThread ? runStore.isThreadWorking(selectedThread.id) : false;
 
   useEffect(() => {
@@ -2724,6 +2731,122 @@ export default function App() {
     window.localStorage.removeItem('atcontroller:last-read-at');
   }, []);
 
+  const flushSelectedTerminalStreamRevision = useCallback(() => {
+    if (selectedTerminalStreamRevisionTimerRef.current !== null) {
+      window.clearTimeout(selectedTerminalStreamRevisionTimerRef.current);
+      selectedTerminalStreamRevisionTimerRef.current = null;
+    }
+    if (selectedTerminalStreamRevisionSafetyTimerRef.current !== null) {
+      window.clearTimeout(selectedTerminalStreamRevisionSafetyTimerRef.current);
+      selectedTerminalStreamRevisionSafetyTimerRef.current = null;
+    }
+    setSelectedTerminalStreamRevision((current) => current + 1);
+  }, []);
+
+  const scheduleSelectedTerminalStreamRevision = useCallback(() => {
+    if (selectedTerminalStreamRevisionTimerRef.current !== null) {
+      return;
+    }
+    selectedTerminalStreamRevisionTimerRef.current = window.setTimeout(
+      flushSelectedTerminalStreamRevision,
+      TERMINAL_LOG_FLUSH_INTERVAL_MS
+    );
+    selectedTerminalStreamRevisionSafetyTimerRef.current = window.setTimeout(
+      flushSelectedTerminalStreamRevision,
+      TERMINAL_LOG_FLUSH_SAFETY_MS
+    );
+  }, [flushSelectedTerminalStreamRevision]);
+
+  const pruneTerminalStreamCache = useCallback(() => {
+    const protectedThreadIds = new Set<string>();
+    const selectedThreadId = selectedThreadIdRef.current;
+    if (selectedThreadId) {
+      protectedThreadIds.add(selectedThreadId);
+    }
+    for (const threadId of Object.keys(activeRunsByThreadRef.current)) {
+      protectedThreadIds.add(threadId);
+    }
+    for (const threadId of Object.keys(startingSessionByThreadRef.current)) {
+      protectedThreadIds.add(threadId);
+    }
+
+    const evictedThreadIds = selectTerminalStreamCacheEvictions(
+      Object.entries(terminalStreamsByThreadRef.current).map(([threadId, stream]) => ({
+        threadId,
+        stream,
+        lastAccessedAtMs: terminalStreamAccessedAtByThreadRef.current[threadId] ?? 0,
+        isProtected: protectedThreadIds.has(threadId)
+      })),
+      {
+        maxThreads: TERMINAL_STREAM_CACHE_MAX_THREADS,
+        maxChars: TERMINAL_STREAM_CACHE_MAX_CHARS
+      }
+    );
+    if (evictedThreadIds.length === 0) {
+      return;
+    }
+
+    let evictedSelectedThread = false;
+    for (const threadId of evictedThreadIds) {
+      delete terminalStreamsByThreadRef.current[threadId];
+      delete lastTerminalLogByThreadRef.current[threadId];
+      delete terminalHydrationRequestIdByThreadRef.current[threadId];
+      delete terminalStreamAccessedAtByThreadRef.current[threadId];
+      evictedSelectedThread = evictedSelectedThread || selectedThreadId === threadId;
+    }
+    if (evictedSelectedThread) {
+      scheduleSelectedTerminalStreamRevision();
+    }
+  }, [scheduleSelectedTerminalStreamRevision]);
+
+  const scheduleTerminalStreamCachePrune = useCallback(() => {
+    if (terminalStreamCachePruneTimerRef.current !== null) {
+      return;
+    }
+    terminalStreamCachePruneTimerRef.current = window.setTimeout(() => {
+      terminalStreamCachePruneTimerRef.current = null;
+      pruneTerminalStreamCache();
+    }, TERMINAL_STREAM_CACHE_PRUNE_DELAY_MS);
+  }, [pruneTerminalStreamCache]);
+
+  const queuePendingTerminalDataEvent = useCallback((event: TerminalDataEvent) => {
+    const existing = pendingTerminalDataBySessionRef.current[event.sessionId] ?? [];
+    if (existing.length === 0) {
+      const pendingSessionIds = Object.keys(pendingTerminalDataBySessionRef.current);
+      while (pendingSessionIds.length >= MAX_PENDING_TERMINAL_DATA_SESSIONS) {
+        const oldestSessionId = pendingSessionIds.shift();
+        if (!oldestSessionId) {
+          break;
+        }
+        delete pendingTerminalDataBySessionRef.current[oldestSessionId];
+      }
+    }
+    const next = [...existing, event];
+    let totalChars = next.reduce((total, item) => total + item.data.length, 0);
+    while (
+      next.length > MAX_PENDING_TERMINAL_DATA_EVENTS_PER_SESSION ||
+      totalChars > MAX_PENDING_TERMINAL_DATA_CHARS_PER_SESSION
+    ) {
+      const removed = next.shift();
+      if (!removed) {
+        break;
+      }
+      totalChars = Math.max(0, totalChars - removed.data.length);
+    }
+    pendingTerminalDataBySessionRef.current[event.sessionId] = next;
+  }, []);
+
+  const drainPendingTerminalDataEvents = useCallback((sessionId: string) => {
+    const pendingEvents = pendingTerminalDataBySessionRef.current[sessionId];
+    if (!pendingEvents || pendingEvents.length === 0) {
+      return;
+    }
+    delete pendingTerminalDataBySessionRef.current[sessionId];
+    for (const event of pendingEvents) {
+      terminalDataEventHandlerRef.current(event);
+    }
+  }, []);
+
   const bindSession = useCallback(
     (threadId: string, sessionId: string, startedAt: string) => {
       const previousSessionId = activeRunsByThreadRef.current[threadId]?.sessionId;
@@ -2748,13 +2871,16 @@ export default function App() {
         sessionId
       );
       terminalStreamsByThreadRef.current[threadId] = nextStream;
+      terminalStreamAccessedAtByThreadRef.current[threadId] = Date.now();
       lastTerminalLogByThreadRef.current[threadId] = nextStream.text;
+      scheduleTerminalStreamCachePrune();
       if (selectedThreadIdRef.current === threadId) {
-        setSelectedTerminalStreamRevision((current) => current + 1);
+        flushSelectedTerminalStreamRevision();
       }
       runLifecycleByThreadRef.current[threadId] = createRunLifecycleState();
+      drainPendingTerminalDataEvents(sessionId);
     },
-    [runStore]
+    [drainPendingTerminalDataEvents, flushSelectedTerminalStreamRevision, runStore, scheduleTerminalStreamCachePrune]
   );
 
   const startThreadWorking = useCallback(
@@ -3108,12 +3234,14 @@ export default function App() {
         return;
       }
       terminalStreamsByThreadRef.current[threadId] = next;
+      terminalStreamAccessedAtByThreadRef.current[threadId] = Date.now();
       lastTerminalLogByThreadRef.current[threadId] = next.text;
+      scheduleTerminalStreamCachePrune();
       if (selectedThreadIdRef.current === threadId) {
-        setSelectedTerminalStreamRevision((current) => current + 1);
+        scheduleSelectedTerminalStreamRevision();
       }
     },
-    []
+    [scheduleSelectedTerminalStreamRevision, scheduleTerminalStreamCachePrune]
   );
 
   const normalizeThreadTerminalSnapshot = useCallback(
@@ -3168,10 +3296,11 @@ export default function App() {
     delete terminalStreamsByThreadRef.current[threadId];
     delete lastTerminalLogByThreadRef.current[threadId];
     delete terminalHydrationRequestIdByThreadRef.current[threadId];
+    delete terminalStreamAccessedAtByThreadRef.current[threadId];
     if (selectedThreadIdRef.current === threadId) {
-      setSelectedTerminalStreamRevision((current) => current + 1);
+      flushSelectedTerminalStreamRevision();
     }
-  }, []);
+  }, [flushSelectedTerminalStreamRevision]);
 
   const clearThreadTerminalStreams = useCallback((threadIds: string[]) => {
     let changed = false;
@@ -3187,14 +3316,17 @@ export default function App() {
       if (threadId in terminalHydrationRequestIdByThreadRef.current) {
         delete terminalHydrationRequestIdByThreadRef.current[threadId];
       }
+      if (threadId in terminalStreamAccessedAtByThreadRef.current) {
+        delete terminalStreamAccessedAtByThreadRef.current[threadId];
+      }
       if (selectedThreadIdRef.current === threadId) {
         clearedSelectedThread = true;
       }
     }
     if (changed || clearedSelectedThread) {
-      setSelectedTerminalStreamRevision((current) => current + 1);
+      flushSelectedTerminalStreamRevision();
     }
-  }, []);
+  }, [flushSelectedTerminalStreamRevision]);
 
   const clearThreadWorkingStopTimer = useCallback((threadId: string) => {
     const handle = workingStopTimerByThreadRef.current[threadId];
@@ -3311,6 +3443,7 @@ export default function App() {
       delete sessionMetaBySessionIdRef.current[sessionId];
       delete lastSentTerminalSizeBySessionRef.current[sessionId];
       delete pendingSshStartupAuthStatusBySessionIdRef.current[sessionId];
+      delete pendingTerminalDataBySessionRef.current[sessionId];
       if (pendingTerminalResizeRef.current?.sessionId === sessionId) {
         pendingTerminalResizeRef.current = null;
         if (pendingTerminalResizeTimerRef.current !== null) {
@@ -3432,6 +3565,18 @@ export default function App() {
   useEffect(() => {
     return () => {
       clearAllThreadWorkingStopTimers();
+      if (selectedTerminalStreamRevisionTimerRef.current !== null) {
+        window.clearTimeout(selectedTerminalStreamRevisionTimerRef.current);
+        selectedTerminalStreamRevisionTimerRef.current = null;
+      }
+      if (selectedTerminalStreamRevisionSafetyTimerRef.current !== null) {
+        window.clearTimeout(selectedTerminalStreamRevisionSafetyTimerRef.current);
+        selectedTerminalStreamRevisionSafetyTimerRef.current = null;
+      }
+      if (terminalStreamCachePruneTimerRef.current !== null) {
+        window.clearTimeout(terminalStreamCachePruneTimerRef.current);
+        terminalStreamCachePruneTimerRef.current = null;
+      }
       outputControlCarryByThreadRef.current = {};
       runLifecycleByThreadRef.current = {};
     };
@@ -6143,6 +6288,7 @@ export default function App() {
         sessionMeta?.threadId ??
         threadIdBySessionIdRef.current[event.sessionId];
       if (!threadId) {
+        queuePendingTerminalDataEvent(event);
         return;
       }
 
@@ -6247,6 +6393,7 @@ export default function App() {
       hasUserSentMessageInCurrentSession,
       isIgnoredSshAuthStatusSession,
       noteTurnOutput,
+      queuePendingTerminalDataEvent,
       resolveThreadTurnCompletionMode,
       stripThreadHiddenInjectedPrompts,
       setShellTerminalStream,
@@ -7794,6 +7941,9 @@ export default function App() {
     const outboundData = data;
 
     if (isSelectedThreadStarting || !selectedSessionId) {
+      pendingInputByThreadRef.current[selectedThread.id] =
+        `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
+      void ensureSessionForThread(selectedThread);
       return;
     }
 
@@ -7886,34 +8036,32 @@ export default function App() {
 
         <section className="terminal-region">
           {selectedThread ? (
-            shouldRenderSelectedTerminalStartupPlaceholder ? (
-              <div className="terminal-empty">Starting Claude session...</div>
-            ) : (
-              <TerminalPanel
-                key={selectedThread.id}
-                sessionId={selectedSessionId}
-                streamState={selectedTerminalRenderStream}
-                scrollbackLines={settings.terminalScrollbackLines}
-                contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
-                readOnly={false}
-                inputEnabled={
-                  Boolean(selectedSessionId) &&
-                  isSelectedThreadReady &&
-                  !isSelectedThreadStarting &&
-                  !selectedThreadSshStartupBlockReason
-                }
-                cursorVisible={false}
-                overlayMessage={selectedTerminalOverlayMessage}
-                preferLiveRedrawOnMount={selectedTerminalPrefersLiveRedraw}
-                focusRequestId={terminalFocusRequestId}
-                searchToggleRequestId={terminalSearchToggleRequestId}
-                onData={stableTerminalOnData}
-                onResize={stableTerminalOnResize}
-                onFocusChange={handleClaudeTerminalFocusChange}
-                onStatefulRedrawRequest={requestSelectedStatefulTerminalRepair}
-                onFollowOutputPausedChange={handleSelectedTerminalFollowPausedChange}
-              />
-            )
+            <TerminalPanel
+              key={selectedThread.id}
+              sessionId={selectedSessionId}
+              streamState={selectedTerminalRenderStream}
+              scrollbackLines={settings.terminalScrollbackLines}
+              contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
+              readOnly={false}
+              inputEnabled={
+                !selectedThreadSshStartupBlockReason &&
+                (
+                  selectedWorkspace?.kind === 'ssh'
+                    ? Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting
+                    : true
+                )
+              }
+              cursorVisible={false}
+              overlayMessage={selectedTerminalOverlayMessage}
+              preferLiveRedrawOnMount={selectedTerminalPrefersLiveRedraw}
+              focusRequestId={terminalFocusRequestId}
+              searchToggleRequestId={terminalSearchToggleRequestId}
+              onData={stableTerminalOnData}
+              onResize={stableTerminalOnResize}
+              onFocusChange={handleClaudeTerminalFocusChange}
+              onStatefulRedrawRequest={requestSelectedStatefulTerminalRepair}
+              onFollowOutputPausedChange={handleSelectedTerminalFollowPausedChange}
+            />
           ) : (
             <div className="terminal-empty">Select a thread to start Claude.</div>
           )}

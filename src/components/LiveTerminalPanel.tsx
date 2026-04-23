@@ -131,6 +131,20 @@ export function LiveTerminalPanel({
   onFocusChange,
   onFollowOutputPausedChange
 }: LiveTerminalPanelProps) {
+  const [fallback] = useState(
+    () =>
+      import.meta.env.MODE === 'test' &&
+      !(globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__
+  );
+  if (fallback) {
+    return (
+      <section className="terminal-panel terminal-panel-fallback">
+        <pre>{streamState?.text ?? ''}</pre>
+        {overlayMessage ? <div className="terminal-overlay">{overlayMessage}</div> : null}
+      </section>
+    );
+  }
+
   const normalizedScrollbackLines = normalizeTerminalScrollbackLines(scrollbackLines);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);

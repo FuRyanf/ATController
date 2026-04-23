@@ -125,6 +125,11 @@ function areTerminalPanelPropsEqual(prevProps: TerminalPanelProps, nextProps: Te
 // render to sync the refs.
 export const TerminalPanel = React.memo(
   function TerminalPanelRouter(props: TerminalPanelProps) {
+    const hasBufferedContent = Boolean((props.streamState?.text ?? props.content ?? '').length);
+    if (!props.sessionId && !hasBufferedContent) {
+      return <div className="terminal-empty">{props.overlayMessage ?? ''}</div>;
+    }
+
     // Keep the live terminal mounted for the whole lifetime of a session.
     // Snapshot hydration can lag the session binding by a render or two, and
     // bouncing through the legacy panel in that gap tears down xterm state.

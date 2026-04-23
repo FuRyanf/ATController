@@ -215,6 +215,35 @@ describe('terminalSessionStream', () => {
     ]);
   });
 
+  it('keeps buffered chunks when a stale snapshot overlaps their raw positions but lacks their text', () => {
+    let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
+    state = appendTerminalStreamChunk(
+      state,
+      {
+        sessionId: 'session-1',
+        startPosition: 0,
+        endPosition: 23,
+        data: '\n> Try "create a test"\n'
+      },
+      1_000
+    );
+
+    const hydrated = hydrateTerminalSessionStream(
+      state,
+      'session-1',
+      {
+        text: 'Claude Code banner\n',
+        startPosition: 0,
+        endPosition: 19,
+        truncated: false
+      },
+      1_000
+    );
+
+    expect(hydrated.text).toBe('Claude Code banner\n\n> Try "create a test"\n');
+    expect(hydrated.rawEndPosition).toBe(42);
+  });
+
   it('rewinds to the repaint boundary when hydration lands inside a fullscreen repaint chunk', () => {
     const clear = '\u001b[2J\u001b[H';
     const frame = `${clear}Claude Code\nfresh frame\n`;

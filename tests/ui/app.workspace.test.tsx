@@ -268,6 +268,10 @@ function getWorkspaceOrder(): string[] {
     .filter((value) => value.length > 0);
 }
 
+function recentIsoTimestamp(daysAgo: number): string {
+  return new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
+}
+
 describe('Workspace add flow', () => {
   beforeEach(() => {
     mocks.reset();
@@ -621,8 +625,8 @@ describe('Workspace add flow', () => {
             summary: 'Existing project session',
             firstPrompt: 'resume existing work',
             messageCount: 6,
-            createdAt: '2026-03-10T10:00:00.000Z',
-            modifiedAt: '2026-03-10T11:00:00.000Z',
+            createdAt: recentIsoTimestamp(2),
+            modifiedAt: recentIsoTimestamp(1),
             gitBranch: 'feature/existing'
           }
         ]
@@ -639,8 +643,8 @@ describe('Workspace add flow', () => {
             summary: 'New project session',
             firstPrompt: 'resume new work',
             messageCount: 3,
-            createdAt: '2026-03-11T10:00:00.000Z',
-            modifiedAt: '2026-03-11T12:00:00.000Z',
+            createdAt: recentIsoTimestamp(3),
+            modifiedAt: recentIsoTimestamp(1),
             gitBranch: 'feature/new'
           }
         ]
@@ -771,8 +775,8 @@ describe('Workspace add flow', () => {
             summary: 'Recovered session',
             firstPrompt: 'recover me please',
             messageCount: 6,
-            createdAt: '2026-03-10T10:00:00.000Z',
-            modifiedAt: '2026-03-10T11:00:00.000Z',
+            createdAt: recentIsoTimestamp(2),
+            modifiedAt: recentIsoTimestamp(1),
             gitBranch: 'feature/recover'
           }
         ]

@@ -218,6 +218,23 @@ function trimChunkToRawStart(
   };
 }
 
+function replayBufferedChunkAfterSnapshot(
+  chunk: TerminalStreamChunk,
+  snapshotWindow: Pick<TerminalSessionStreamState, 'text' | 'endPosition'>
+): (TerminalStreamChunk & { rewoundBeforeMinRawStart: boolean }) | null {
+  if (!chunk.data || snapshotWindow.text.includes(chunk.data)) {
+    return null;
+  }
+  return {
+    rawStartPosition: snapshotWindow.endPosition,
+    rawEndPosition: Math.max(chunk.rawEndPosition, snapshotWindow.endPosition + chunk.data.length),
+    startPosition: snapshotWindow.endPosition,
+    endPosition: snapshotWindow.endPosition + chunk.data.length,
+    data: chunk.data,
+    rewoundBeforeMinRawStart: false
+  };
+}
+
 export function bindTerminalSessionStream(
   state: TerminalSessionStreamState,
   sessionId: string | null
@@ -376,7 +393,9 @@ export function hydrateTerminalSessionStream(
   let nextRawEndPosition = snapshot.endPosition;
 
   for (const chunk of state.chunks) {
-    const normalizedRawChunk = trimChunkToRawStart(chunk, snapshot.endPosition);
+    const normalizedRawChunk =
+      trimChunkToRawStart(chunk, snapshot.endPosition) ??
+      replayBufferedChunkAfterSnapshot(chunk, nextWindow);
     if (!normalizedRawChunk || normalizedRawChunk.data.length === 0) {
       continue;
     }
