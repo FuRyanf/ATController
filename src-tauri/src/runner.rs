@@ -1,12 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader as StdBufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -52,6 +53,99 @@ const COMMIT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(90);
 const COMMAND_TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const FORK_CLONE_FINGERPRINT_UUID_LIMIT: usize = 3;
 const FORK_CLONE_FINGERPRINT_SCAN_LIMIT: usize = 64;
+const JSONL_METADATA_CACHE_MAX_ENTRIES: usize = 256;
+const JSONL_METADATA_CACHE_TAIL_HASH_BYTES: u64 = 8 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct JsonlMetadataFingerprint {
+    len: u64,
+    modified: SystemTime,
+    tail_hash: u64,
+}
+
+#[derive(Clone)]
+struct JsonlMetadataCacheEntry<T: Clone> {
+    fingerprint: JsonlMetadataFingerprint,
+    value: T,
+}
+
+type LatestCwdCache = HashMap<PathBuf, JsonlMetadataCacheEntry<Option<String>>>;
+type LatestCompletionCache =
+    HashMap<(PathBuf, String), JsonlMetadataCacheEntry<Option<ClaudeTurnCompletionSummary>>>;
+
+fn latest_cwd_cache() -> &'static Mutex<LatestCwdCache> {
+    static CACHE: OnceLock<Mutex<LatestCwdCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn latest_completion_cache() -> &'static Mutex<LatestCompletionCache> {
+    static CACHE: OnceLock<Mutex<LatestCompletionCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn jsonl_metadata_fingerprint(path: &Path) -> Option<JsonlMetadataFingerprint> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let len = metadata.len();
+    let tail_len = len.min(JSONL_METADATA_CACHE_TAIL_HASH_BYTES);
+
+    let mut file = File::open(path).ok()?;
+    if tail_len > 0 {
+        file.seek(SeekFrom::End(-(tail_len as i64))).ok()?;
+    }
+
+    let mut tail = Vec::with_capacity(tail_len as usize);
+    file.take(tail_len).read_to_end(&mut tail).ok()?;
+
+    let mut hasher = DefaultHasher::new();
+    tail.hash(&mut hasher);
+    Some(JsonlMetadataFingerprint {
+        len,
+        modified,
+        tail_hash: hasher.finish(),
+    })
+}
+
+fn cached_jsonl_metadata_value<K, T, F>(
+    cache: &'static Mutex<HashMap<K, JsonlMetadataCacheEntry<T>>>,
+    key: K,
+    path: &Path,
+    load: F,
+) -> T
+where
+    K: Eq + Hash + Clone,
+    T: Clone,
+    F: FnOnce(&Path) -> T,
+{
+    if let Some(fingerprint) = jsonl_metadata_fingerprint(path) {
+        if let Ok(cache) = cache.lock() {
+            if let Some(entry) = cache.get(&key) {
+                if entry.fingerprint == fingerprint {
+                    return entry.value.clone();
+                }
+            }
+        }
+
+        let value = load(path);
+        if let Ok(mut cache) = cache.lock() {
+            if cache.len() >= JSONL_METADATA_CACHE_MAX_ENTRIES && !cache.contains_key(&key) {
+                if let Some(evicted_key) = cache.keys().next().cloned() {
+                    cache.remove(&evicted_key);
+                }
+            }
+            cache.insert(
+                key,
+                JsonlMetadataCacheEntry {
+                    fingerprint,
+                    value: value.clone(),
+                },
+            );
+        }
+        return value;
+    }
+
+    load(path)
+}
 
 fn run_std_command_with_timeout(
     mut command: StdCommand,
@@ -1935,6 +2029,27 @@ fn latest_claude_session_cwd_from_jsonl(session_path: &Path) -> Option<String> {
     latest_cwd
 }
 
+fn cached_latest_claude_session_cwd_from_jsonl(session_path: &Path) -> Option<String> {
+    cached_jsonl_metadata_value(
+        latest_cwd_cache(),
+        session_path.to_path_buf(),
+        session_path,
+        latest_claude_session_cwd_from_jsonl,
+    )
+}
+
+fn cached_latest_qualifying_claude_turn_completion(
+    session_path: &Path,
+    claude_session_id: &str,
+) -> Option<ClaudeTurnCompletionSummary> {
+    cached_jsonl_metadata_value(
+        latest_completion_cache(),
+        (session_path.to_path_buf(), claude_session_id.to_string()),
+        session_path,
+        |path| latest_qualifying_claude_turn_completion(path, claude_session_id),
+    )
+}
+
 #[cfg(test)]
 fn latest_claude_turn_completion_after(
     session_path: &Path,
@@ -2883,7 +2998,7 @@ pub fn latest_claude_session_cwd(
     }
 
     let session_path = claude_session_jsonl_path(&workspace_path, normalized_session_id)?;
-    let latest_cwd = latest_claude_session_cwd_from_jsonl(&session_path);
+    let latest_cwd = cached_latest_claude_session_cwd_from_jsonl(&session_path);
     Ok(match latest_cwd {
         Some(cwd) if Path::new(&cwd).is_dir() => Some(cwd),
         Some(cwd) if overlay_worktree_repo_root_path(&cwd).is_some() => {
@@ -2904,7 +3019,7 @@ pub fn latest_claude_turn_completion(
     }
 
     let session_path = claude_session_jsonl_path(&workspace_path, normalized_session_id)?;
-    Ok(latest_qualifying_claude_turn_completion(
+    Ok(cached_latest_qualifying_claude_turn_completion(
         &session_path,
         normalized_session_id,
     ))
@@ -4834,6 +4949,151 @@ mod tests {
     }
 
     #[test]
+    fn latest_claude_turn_completion_cache_invalidates_when_jsonl_changes() {
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-turn-completion-cache-{}",
+            Uuid::new_v4()
+        ));
+        let projects_root = temp_root.join("projects");
+        let workspace_path = temp_root.join("workspace-root");
+        fs::create_dir_all(&projects_root).expect("should create projects root");
+        fs::create_dir_all(&workspace_path).expect("should create workspace root");
+
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let claude_session_id = "55555555-5555-5555-5555-555555555555";
+        let project_dir = projects_root.join(claude_project_dir_for_workspace(
+            workspace_path.to_string_lossy().as_ref(),
+        ));
+        let jsonl_path = project_dir.join(format!("{claude_session_id}.jsonl"));
+        fs::create_dir_all(&project_dir).expect("should create project dir");
+        fs::write(
+            &jsonl_path,
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"First\"}]},\"timestamp\":\"1970-01-01T00:00:01Z\"}\n",
+        )
+        .expect("should write initial completion");
+
+        let first_completion = latest_claude_turn_completion(
+            workspace_path.to_string_lossy().to_string(),
+            claude_session_id.to_string(),
+        )
+        .expect("first lookup should succeed");
+        assert_eq!(
+            first_completion,
+            Some(ClaudeTurnCompletionSummary {
+                claude_session_id: claude_session_id.to_string(),
+                completion_index: 1,
+                completed_at_ms: 1_000,
+                status: "Succeeded".to_string(),
+                has_meaningful_output: true,
+            })
+        );
+
+        fs::write(
+            &jsonl_path,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"First\"}]},\"timestamp\":\"1970-01-01T00:00:01Z\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Second\"}]},\"timestamp\":\"1970-01-01T00:00:02Z\"}\n"
+            ),
+        )
+        .expect("should append completion");
+
+        let latest_completion = latest_claude_turn_completion(
+            workspace_path.to_string_lossy().to_string(),
+            claude_session_id.to_string(),
+        )
+        .expect("second lookup should succeed");
+        assert_eq!(
+            latest_completion,
+            Some(ClaudeTurnCompletionSummary {
+                claude_session_id: claude_session_id.to_string(),
+                completion_index: 2,
+                completed_at_ms: 2_000,
+                status: "Succeeded".to_string(),
+                has_meaningful_output: true,
+            })
+        );
+
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn latest_claude_turn_completion_cache_invalidates_same_length_jsonl_rewrite() {
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-turn-completion-cache-same-len-{}",
+            Uuid::new_v4()
+        ));
+        let projects_root = temp_root.join("projects");
+        let workspace_path = temp_root.join("workspace-root");
+        fs::create_dir_all(&projects_root).expect("should create projects root");
+        fs::create_dir_all(&workspace_path).expect("should create workspace root");
+
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let claude_session_id = "66666666-6666-6666-6666-666666666666";
+        let project_dir = projects_root.join(claude_project_dir_for_workspace(
+            workspace_path.to_string_lossy().as_ref(),
+        ));
+        let jsonl_path = project_dir.join(format!("{claude_session_id}.jsonl"));
+        fs::create_dir_all(&project_dir).expect("should create project dir");
+
+        let initial_jsonl = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]},\"timestamp\":\"1970-01-01T00:00:01Z\"}\n";
+        let rewritten_jsonl = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]},\"timestamp\":\"1970-01-01T00:00:03Z\"}\n";
+        assert_eq!(initial_jsonl.len(), rewritten_jsonl.len());
+
+        fs::write(&jsonl_path, initial_jsonl).expect("should write initial completion");
+        let first_completion = latest_claude_turn_completion(
+            workspace_path.to_string_lossy().to_string(),
+            claude_session_id.to_string(),
+        )
+        .expect("first lookup should succeed");
+        assert_eq!(
+            first_completion
+                .as_ref()
+                .map(|summary| summary.completed_at_ms),
+            Some(1_000)
+        );
+
+        fs::write(&jsonl_path, rewritten_jsonl).expect("should rewrite completion");
+        let current_fingerprint =
+            jsonl_metadata_fingerprint(&jsonl_path).expect("fingerprint should load");
+        {
+            let mut cache = latest_completion_cache()
+                .lock()
+                .expect("cache lock should not be poisoned");
+            let cache_entry = cache
+                .get_mut(&(jsonl_path.clone(), claude_session_id.to_string()))
+                .expect("first lookup should populate cache");
+            cache_entry.fingerprint.len = current_fingerprint.len;
+            cache_entry.fingerprint.modified = current_fingerprint.modified;
+        }
+
+        let latest_completion = latest_claude_turn_completion(
+            workspace_path.to_string_lossy().to_string(),
+            claude_session_id.to_string(),
+        )
+        .expect("second lookup should succeed");
+        assert_eq!(
+            latest_completion
+                .as_ref()
+                .map(|summary| summary.completed_at_ms),
+            Some(3_000)
+        );
+
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
     fn latest_qualifying_claude_turn_completion_ignores_no_response_requested() {
         let dir = std::env::temp_dir().join(format!(
             "atcontroller-turn-completion-no-response-{}",
@@ -4926,8 +5186,10 @@ mod tests {
 
     #[test]
     fn snapshot_from_log_path_uses_supplied_end_position() {
-        let dir =
-            std::env::temp_dir().join(format!("atcontroller-runner-log-end-position-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "atcontroller-runner-log-end-position-{}",
+            Uuid::new_v4()
+        ));
         fs::create_dir_all(&dir).expect("should create temp dir");
         let path = dir.join("output.log");
 
@@ -5432,6 +5694,76 @@ mod tests {
 
         let expected_cwd = canonicalize_path_or_original(worktree_path.to_string_lossy().as_ref());
         assert_eq!(latest_cwd.as_deref(), Some(expected_cwd.as_str()));
+
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn latest_claude_session_cwd_cache_invalidates_when_jsonl_changes() {
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
+
+        let temp_root =
+            std::env::temp_dir().join(format!("atcontroller-session-cwd-cache-{}", Uuid::new_v4()));
+        let projects_root = temp_root.join("projects");
+        let workspace_path = temp_root.join("workspace-root");
+        let worktree_path = workspace_path.join(".claude/worktrees/feature1");
+        fs::create_dir_all(&projects_root).expect("should create projects root");
+        fs::create_dir_all(&workspace_path).expect("should create workspace root");
+        fs::create_dir_all(&worktree_path).expect("should create worktree path");
+
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let claude_session_id = "44444444-4444-4444-4444-444444444444";
+        let project_dir = projects_root.join(claude_project_dir_for_workspace(
+            workspace_path.to_string_lossy().as_ref(),
+        ));
+        let jsonl_path = project_dir.join(format!("{claude_session_id}.jsonl"));
+        fs::create_dir_all(&project_dir).expect("should create project dir");
+        fs::write(
+            &jsonl_path,
+            format!(
+                "{{\"cwd\":\"{}\",\"sessionId\":\"{}\",\"type\":\"progress\",\"timestamp\":\"2026-03-21T12:00:00Z\"}}\n",
+                workspace_path.to_string_lossy(),
+                claude_session_id
+            ),
+        )
+        .expect("should write initial jsonl");
+
+        let first_cwd = latest_claude_session_cwd(
+            workspace_path.to_string_lossy().to_string(),
+            claude_session_id.to_string(),
+        )
+        .expect("first lookup should succeed");
+        let expected_first =
+            canonicalize_path_or_original(workspace_path.to_string_lossy().as_ref());
+        assert_eq!(first_cwd.as_deref(), Some(expected_first.as_str()));
+
+        fs::write(
+            &jsonl_path,
+            format!(
+                concat!(
+                    "{{\"cwd\":\"{}\",\"sessionId\":\"{}\",\"type\":\"progress\",\"timestamp\":\"2026-03-21T12:00:00Z\"}}\n",
+                    "{{\"cwd\":\"{}\",\"sessionId\":\"{}\",\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":\"done\"}},\"timestamp\":\"2026-03-21T12:05:00Z\"}}\n"
+                ),
+                workspace_path.to_string_lossy(),
+                claude_session_id,
+                worktree_path.to_string_lossy(),
+                claude_session_id
+            ),
+        )
+        .expect("should append jsonl content");
+
+        let latest_cwd = latest_claude_session_cwd(
+            workspace_path.to_string_lossy().to_string(),
+            claude_session_id.to_string(),
+        )
+        .expect("second lookup should succeed");
+        let expected_latest =
+            canonicalize_path_or_original(worktree_path.to_string_lossy().as_ref());
+        assert_eq!(latest_cwd.as_deref(), Some(expected_latest.as_str()));
 
         std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
         let _ = fs::remove_dir_all(temp_root);

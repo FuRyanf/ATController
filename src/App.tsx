@@ -251,6 +251,16 @@ function removeThreadFlag(map: Record<string, boolean>, threadId: string) {
   return next;
 }
 
+function findThreadById(
+  threadById: Record<string, ThreadMetadata>,
+  threadId: string | null | undefined
+): ThreadMetadata | undefined {
+  if (!threadId) {
+    return undefined;
+  }
+  return threadById[threadId];
+}
+
 function removeRecordEntry<T>(map: Record<string, T>, key: string) {
   if (!(key in map)) {
     return map;
@@ -1502,6 +1512,7 @@ export default function App() {
   const startingSessionByThreadRef = useRef<Record<string, PendingSessionStart>>({});
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
   const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
+  const threadByIdRef = useRef<Record<string, ThreadMetadata>>({});
   const terminalStreamsByThreadRef = useRef<Record<string, TerminalSessionStreamState>>({});
   const terminalStreamAccessedAtByThreadRef = useRef<Record<string, number>>({});
   const terminalStreamCachePruneTimerRef = useRef<number | null>(null);
@@ -2169,10 +2180,7 @@ export default function App() {
     (threadId: string, sessionId?: string | null) => {
       const activeSessionId = sessionId ?? activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
       const sessionMeta = activeSessionId ? sessionMetaBySessionIdRef.current[activeSessionId] ?? null : null;
-      const thread =
-        Object.values(threadsByWorkspaceRef.current)
-          .flat()
-          .find((candidate) => candidate.id === threadId) ?? null;
+      const thread = findThreadById(threadByIdRef.current, threadId);
       const workspaceId = sessionMeta?.workspaceId ?? thread?.workspaceId ?? '';
       const workspace = workspaceId ? workspaceById[workspaceId] ?? null : null;
       const claudeSessionId =
@@ -2349,10 +2357,7 @@ export default function App() {
       });
 
       if (shouldNotify) {
-        const thread =
-          Object.values(threadsByWorkspaceRef.current)
-            .flat()
-            .find((candidate) => candidate.id === threadId) ?? null;
+        const thread = findThreadById(threadByIdRef.current, threadId);
         void sendTaskCompletionAlert({
           threadTitle: thread?.title ?? 'Current thread',
           status: completion.status
@@ -2396,10 +2401,7 @@ export default function App() {
         (activeSessionId
           ? sessionMetaBySessionIdRef.current[activeSessionId]?.claudeSessionId?.trim()
           : '') ||
-        Object.values(threadsByWorkspaceRef.current)
-          .flat()
-          .find((candidate) => candidate.id === threadId)
-          ?.claudeSessionId?.trim() ||
+        findThreadById(threadByIdRef.current, threadId)?.claudeSessionId?.trim() ||
         '';
       if (currentSessionId && currentSessionId !== normalizedSessionId) {
         return null;
@@ -2631,10 +2633,7 @@ export default function App() {
       }
 
       markTurnNotified(threadId, attentionState.lastCompletedTurnIdWithOutput, attentionState.lastCompletedTurnStatus);
-      const thread =
-        Object.values(threadsByWorkspaceRef.current)
-          .flat()
-          .find((candidate) => candidate.id === threadId) ?? null;
+      const thread = findThreadById(threadByIdRef.current, threadId);
 
       void sendTaskCompletionAlert({
         threadTitle: thread?.title ?? 'Current thread',
@@ -2989,6 +2988,8 @@ export default function App() {
   useEffect(() => {
     threadsByWorkspaceRef.current = threadsByWorkspace;
     const nextThreadWorkspaceKinds: Record<string, Workspace['kind']> = {};
+    const nextThreadById: Record<string, ThreadMetadata> = {};
+    const currentThreads = Object.values(threadsByWorkspace).flat();
 
     for (const workspace of workspaces) {
       for (const thread of threadsByWorkspace[workspace.id] ?? []) {
@@ -2998,15 +2999,17 @@ export default function App() {
 
     threadWorkspaceKindByThreadIdRef.current = nextThreadWorkspaceKinds;
 
-    for (const thread of Object.values(threadsByWorkspace).flat()) {
+    for (const thread of currentThreads) {
+      nextThreadById[thread.id] = thread;
       if (!isDefaultThreadTitle(thread.title)) {
         threadTitleInitializedRef.current[thread.id] = true;
       }
     }
+    threadByIdRef.current = nextThreadById;
 
     const nextSeededJsonlSessions: Record<string, string> = {};
     let removedStaleJsonlCompletionAttention = false;
-    for (const thread of Object.values(threadsByWorkspace).flat()) {
+    for (const thread of currentThreads) {
       const trackedJsonlAttention = resolveTrackedThreadJsonlCompletionAttention(thread);
       if (
         !shouldTrackThreadJsonlCompletionAttention(
@@ -3050,7 +3053,7 @@ export default function App() {
       return;
     }
 
-    for (const thread of Object.values(threadsByWorkspace).flat()) {
+    for (const thread of currentThreads) {
       if (!deletedThreadIds[thread.id]) {
         continue;
       }
@@ -3384,10 +3387,7 @@ export default function App() {
         return;
       }
 
-      const thread =
-        Object.values(threadsByWorkspaceRef.current)
-          .flat()
-          .find((candidate) => candidate.id === threadId) ?? null;
+      const thread = findThreadById(threadByIdRef.current, threadId);
       const claudeSessionId = sessionMeta.claudeSessionId?.trim() || thread?.claudeSessionId?.trim() || '';
       if (!claudeSessionId) {
         return;
@@ -3731,9 +3731,7 @@ export default function App() {
       }
 
       const promise = (async () => {
-        const initialThread = Object.values(threadsByWorkspaceRef.current)
-          .flat()
-          .find((candidate) => candidate.id === threadId);
+        const initialThread = findThreadById(threadByIdRef.current, threadId);
         if (!initialThread || deletedThreadIdsRef.current[threadId]) {
           return;
         }
@@ -3759,9 +3757,7 @@ export default function App() {
             return;
           }
 
-          const latestThread = Object.values(threadsByWorkspaceRef.current)
-            .flat()
-            .find((candidate) => candidate.id === threadId);
+          const latestThread = findThreadById(threadByIdRef.current, threadId);
           if (!latestThread) {
             return;
           }
@@ -3831,9 +3827,7 @@ export default function App() {
           });
         }
 
-        const timedOutThread = Object.values(threadsByWorkspaceRef.current)
-          .flat()
-          .find((candidate) => candidate.id === threadId);
+        const timedOutThread = findThreadById(threadByIdRef.current, threadId);
         if (
           timedOutThread &&
           (timedOutThread.pendingForkSourceClaudeSessionId?.trim() ?? '') === sourceClaudeSessionId
@@ -3975,9 +3969,7 @@ export default function App() {
   const clearThreadSkillsAfterSend = useCallback(
     async (threadId: string) => {
       delete pendingSkillClearByThreadRef.current[threadId];
-      const thread = Object.values(threadsByWorkspaceRef.current)
-        .flat()
-        .find((item) => item.id === threadId);
+      const thread = findThreadById(threadByIdRef.current, threadId);
       if (!thread || (thread.enabledSkills?.length ?? 0) === 0) {
         return;
       }
@@ -4630,9 +4622,8 @@ export default function App() {
           return discardStartedSession();
         }
 
-        const threadStillExists = (threadsByWorkspaceRef.current[thread.workspaceId] ?? []).some(
-          (item) => item.id === thread.id
-        );
+        const threadStillExists =
+          findThreadById(threadByIdRef.current, thread.id)?.workspaceId === thread.workspaceId;
         if (!threadStillExists) {
           return discardStartedSession();
         }
@@ -5044,8 +5035,13 @@ export default function App() {
     }
     lastAutoRecoverAttemptAtRef.current = now;
 
-    const thread = (threadsByWorkspaceRef.current[workspaceId] ?? []).find((item) => item.id === threadId);
-    if (!thread || deletedThreadIdsRef.current[thread.id] || startingSessionByThreadRef.current[thread.id]) {
+    const thread = findThreadById(threadByIdRef.current, threadId);
+    if (
+      !thread ||
+      thread.workspaceId !== workspaceId ||
+      deletedThreadIdsRef.current[thread.id] ||
+      startingSessionByThreadRef.current[thread.id]
+    ) {
       return;
     }
     if ((sessionFailCountByThreadRef.current[thread.id] ?? 0) >= 3) {
@@ -5516,7 +5512,7 @@ export default function App() {
         pushToast(`Delete failed: ${String(error)}`, 'error');
         return;
       }
-      const deletedThread = (threadsByWorkspaceRef.current[workspaceId] ?? []).find((thread) => thread.id === threadId);
+      const deletedThread = findThreadById(threadByIdRef.current, threadId);
       if (deletedThread) {
         applyThreadUpdate({
           ...deletedThread,
@@ -5676,7 +5672,7 @@ export default function App() {
       if (selectedWorkspaceIdRef.current !== workspaceId) {
         setSelectedWorkspace(workspaceId);
       }
-      const thread = (threadsByWorkspaceRef.current[workspaceId] ?? []).find((item) => item.id === threadId);
+      const thread = findThreadById(threadByIdRef.current, threadId);
       primeRemoteThreadStartupOnSelection(thread);
       setSelectedThread(threadId);
       setTerminalFocusRequestId((current) => current + 1);
@@ -5733,9 +5729,7 @@ export default function App() {
 
       if (blocked.threadId) {
         setSshStartupBlockedByThread((current) => removeRecordEntry(current, blocked.threadId!));
-        const thread = (threadsByWorkspaceRef.current[blocked.workspaceId] ?? []).find(
-          (item) => item.id === blocked.threadId
-        );
+        const thread = findThreadById(threadByIdRef.current, blocked.threadId);
         if (!thread) {
           pushToast('Unable to locate the blocked thread for retry.', 'error');
           return;
@@ -6680,9 +6674,7 @@ export default function App() {
 
       const workspaceId =
         sessionMeta?.workspaceId ??
-        Object.values(threadsByWorkspaceRef.current)
-          .flat()
-          .find((thread) => thread.id === endedThreadId)?.workspaceId;
+        findThreadById(threadByIdRef.current, endedThreadId)?.workspaceId;
       if (workspaceId) {
         void refreshThreadsForWorkspace(workspaceId);
       }
@@ -7975,6 +7967,10 @@ export default function App() {
                 [wsId]: wsThreads.map(
                   (t) => (t.id === consumedThread.id ? consumedThread : t)
                 ),
+              };
+              threadByIdRef.current = {
+                ...threadByIdRef.current,
+                [consumedThread.id]: consumedThread
               };
               await refreshThreadsForWorkspace(consumedThread.workspaceId);
               delete suppressAutoForkResolutionByThreadRef.current[selectedThread.id];
