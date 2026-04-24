@@ -28,6 +28,7 @@ interface LeftRailProps {
   onRemoveWorkspace: (workspace: Workspace) => Promise<void>;
   getSearchTextForThread?: (threadId: string) => string;
   onCopyResumeCommand: (thread: ThreadMetadata) => void;
+  onOpenResumeCommandInTerminal: (thread: ThreadMetadata) => void;
   onCopyWorkspaceCommand: (workspace: Workspace) => void;
   onImportSession: (workspace: Workspace) => void;
 }
@@ -51,7 +52,7 @@ interface NewThreadMenuState {
 }
 
 const CONTEXT_MENU_WIDTH = 220;
-const THREAD_CONTEXT_MENU_HEIGHT = 160;
+const THREAD_CONTEXT_MENU_HEIGHT = 196;
 const WORKSPACE_CONTEXT_MENU_HEIGHT = 250;
 const NEW_THREAD_CONTEXT_MENU_HEIGHT = 88;
 const CONTEXT_MENU_MARGIN = 8;
@@ -424,6 +425,7 @@ function LeftRailComponent({
   onRemoveWorkspace,
   getSearchTextForThread,
   onCopyResumeCommand,
+  onOpenResumeCommandInTerminal,
   onCopyWorkspaceCommand,
   onImportSession
 }: LeftRailProps) {
@@ -556,6 +558,17 @@ function LeftRailComponent({
     setNewThreadMenu({ workspaceId, ...position });
   }, []);
 
+  const contextThreadWorkspace = contextMenu
+    ? workspaces.find((workspace) => workspace.id === contextMenu.thread.workspaceId) ?? null
+    : null;
+  const contextThreadHasSession = Boolean(contextMenu?.thread.claudeSessionId?.trim());
+  const contextThreadRemote = contextThreadWorkspace?.kind === 'rdev' || contextThreadWorkspace?.kind === 'ssh';
+  const openResumeInTerminalDisabledReason = !contextThreadHasSession
+    ? 'No Claude session ID available'
+    : contextThreadRemote
+      ? 'Open resume in Terminal is only available for local projects. Copy the resume command for remote projects.'
+      : null;
+
   const menuLayer =
     typeof document === 'undefined'
       ? null
@@ -581,6 +594,17 @@ function LeftRailComponent({
                   }}
                 >
                   Copy resume command
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(openResumeInTerminalDisabledReason)}
+                  title={openResumeInTerminalDisabledReason ?? undefined}
+                  onClick={() => {
+                    onOpenResumeCommandInTerminal(contextMenu.thread);
+                    setContextMenu(null);
+                  }}
+                >
+                  Open in Terminal
                 </button>
                 <button
                   type="button"

@@ -66,6 +66,19 @@ import {
 import { selectTerminalStreamCacheEvictions } from './lib/terminalStreamCache';
 import { looksLikeStatefulTerminalUi, stripAnsi } from './lib/terminalUiHeuristics';
 import {
+  appendMeaningfulOutputTail,
+  extractMeaningfulOutputTail,
+  looksLikeShellPromptText,
+  matchesVisibleOutputTail,
+  MAX_VISIBLE_OUTPUT_TAIL_CHARS,
+  normalizeMeaningfulOutputText,
+  trimMeaningfulOutputTail
+} from './lib/visibleOutputTail';
+import {
+  clearThreadSearchText,
+  rememberThreadSearchText
+} from './lib/threadSearchTextCache';
+import {
   loadSkillUsageMap,
   persistSkillUsageMap,
   recordSkillUsage,
@@ -152,7 +165,6 @@ const BRANCH_SWITCH_RESUME_FAILURE_SUPPRESS_MS = 15_000;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
 const MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD = 80;
-const MAX_VISIBLE_OUTPUT_TAIL_CHARS = 512;
 const IGNORED_SSH_AUTH_STATUS_SESSION_TTL_MS = 5 * 60 * 1000;
 const MAX_IGNORED_SSH_AUTH_STATUS_SESSIONS = 512;
 const IGNORED_SSH_AUTH_STATUS_SESSION_PRUNE_INTERVAL_MS = 10_000;
@@ -795,6 +807,35 @@ function buildClaudeInPlaceRestartCommand(sessionId: string, fullAccess: boolean
   return parts.join(' ');
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildClaudeResumeCommand(sessionId: string, fullAccess: boolean): string {
+  const parts = ['claude', '--resume', shellQuote(sessionId)];
+  if (fullAccess) {
+    parts.push('--dangerously-skip-permissions');
+  }
+  return parts.join(' ');
+}
+
+function buildClaudeResumeTerminalCommand(
+  thread: Pick<ThreadMetadata, 'claudeSessionId' | 'fullAccess'>,
+  cwd?: string | null
+): string | null {
+  const sessionId = thread.claudeSessionId?.trim();
+  if (!sessionId) {
+    return null;
+  }
+
+  const command = buildClaudeResumeCommand(sessionId, thread.fullAccess);
+  const workingDirectory = cwd?.trim() ?? '';
+  if (!workingDirectory) {
+    return command;
+  }
+  return `cd ${shellQuote(workingDirectory)} && ${command}`;
+}
+
 function hasShellPromptInSnapshot(snapshot: string): boolean {
   if (!snapshot) {
     return false;
@@ -1224,103 +1265,6 @@ function hasMeaningfulTerminalOutputChunk(chunk: string): boolean {
   return visibleText.trim().length > 0;
 }
 
-function normalizeMeaningfulOutputText(chunk: string): string {
-  if (!chunk) {
-    return '';
-  }
-  const visibleText = stripAnsi(chunk)
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return visibleText;
-}
-
-function looksLikeShellPromptText(chunk: string): boolean {
-  if (!chunk) {
-    return false;
-  }
-
-  const lines = stripAnsi(chunk)
-    .replace(/\r/g, '\n')
-    .split('\n')
-    .map((line) => line.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim())
-    .filter((line) => line.length > 0);
-
-  if (lines.length === 0 || lines.length > 2) {
-    return false;
-  }
-
-  const line = lines[lines.length - 1];
-  if (!/[#$%>]$/.test(line)) {
-    return false;
-  }
-
-  const withoutPrompt = line.slice(0, -1).trim();
-  if (!withoutPrompt) {
-    return true;
-  }
-
-  if (/[.?!]$/.test(withoutPrompt)) {
-    return false;
-  }
-
-  const tokens = withoutPrompt.split(/\s+/);
-  if (tokens.length > 4) {
-    return false;
-  }
-
-  const hasShellLikeToken = tokens.some((token) => /[@/~:[\]()\\]/.test(token));
-  if (!hasShellLikeToken && tokens.length !== 1) {
-    return false;
-  }
-
-  return tokens.every((token) => {
-    if (/^\[[^\]]+\]$/.test(token) || /^\([^)]+\)$/.test(token)) {
-      return true;
-    }
-    return /^[A-Za-z0-9._/+:-]+$/.test(token);
-  });
-}
-
-function extractMeaningfulOutputTail(text: string, maxChars = MAX_VISIBLE_OUTPUT_TAIL_CHARS): string {
-  if (!text) {
-    return '';
-  }
-
-  const lines = stripAnsi(text)
-    .replace(/\r/g, '\n')
-    .split('\n')
-    .map((line) => line.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim())
-    .filter((line) => line.length > 0);
-
-  while (lines.length > 0 && looksLikeShellPromptText(lines[lines.length - 1] ?? '')) {
-    lines.pop();
-  }
-
-  if (lines.length === 0) {
-    return '';
-  }
-
-  const normalized = normalizeMeaningfulOutputText(lines.join('\n'));
-  if (!normalized) {
-    return '';
-  }
-  return normalized.length <= maxChars ? normalized : normalized.slice(normalized.length - maxChars);
-}
-
-function matchesVisibleOutputTail(normalizedChunk: string, visibleTail: string): boolean {
-  if (!normalizedChunk || !visibleTail) {
-    return false;
-  }
-  return (
-    visibleTail === normalizedChunk ||
-    visibleTail.includes(normalizedChunk) ||
-    visibleTail.endsWith(normalizedChunk) ||
-    normalizedChunk.includes(visibleTail) ||
-    normalizedChunk.endsWith(visibleTail)
-  );
-}
-
 function statusFromExit(event: TerminalExitEvent): RunStatus {
   if (event.signal || event.code === 130) {
     return 'Canceled';
@@ -1564,6 +1508,14 @@ export default function App() {
   const threadIdBySessionIdRef = useRef<Record<string, string>>({});
   const pendingTerminalDataBySessionRef = useRef<Record<string, TerminalDataEvent[]>>({});
   const lastTerminalLogByThreadRef = useRef<Record<string, string>>({});
+  const threadSearchTextByThreadRef = useRef<Record<string, string>>({});
+  const selectedStatefulTerminalCacheRef = useRef<{
+    sessionId: string | null;
+    resetToken: number;
+    endPosition: number;
+    textLength: number;
+    value: boolean;
+  } | null>(null);
   const workingStopTimerByThreadRef = useRef<Record<string, number>>({});
   const draftAttachmentsByThreadRef = useRef<Record<string, string[]>>({});
   const inputBufferByThreadRef = useRef<Record<string, string>>({});
@@ -1573,6 +1525,7 @@ export default function App() {
   const deletedThreadIdsRef = useRef<Record<string, true>>({});
   const creatingThreadByWorkspaceRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
+  const pendingSubmittedInputByThreadRef = useRef<Record<string, true>>({});
   const pendingSkillClearByThreadRef = useRef<Record<string, true>>({});
   const hiddenInjectedPromptsByThreadRef = useRef<Record<string, string[]>>({});
   const forkResolutionByThreadRef = useRef<Record<string, Promise<void>>>({});
@@ -1794,11 +1747,36 @@ export default function App() {
     return terminalStreamsByThreadRef.current[selectedThreadId] ?? createTerminalSessionStreamState();
   }, [selectedTerminalStreamRevision, selectedThreadId]);
   const selectedSessionMode = selectedSessionId ? sessionMetaBySessionIdRef.current[selectedSessionId]?.mode ?? null : null;
-  const selectedTerminalLooksStateful =
-    Boolean(selectedThread) &&
-    Boolean(selectedSessionId) &&
-    selectedTerminalStream.sessionId === selectedSessionId &&
-    looksLikeStatefulTerminalUi(selectedTerminalStream.text);
+  const selectedTerminalLooksStateful = useMemo(() => {
+    if (
+      !selectedThread ||
+      !selectedSessionId ||
+      selectedTerminalStream.sessionId !== selectedSessionId
+    ) {
+      return false;
+    }
+
+    const cached = selectedStatefulTerminalCacheRef.current;
+    if (
+      cached &&
+      cached.sessionId === selectedTerminalStream.sessionId &&
+      cached.resetToken === selectedTerminalStream.resetToken &&
+      cached.endPosition === selectedTerminalStream.endPosition &&
+      cached.textLength === selectedTerminalStream.text.length
+    ) {
+      return cached.value;
+    }
+
+    const value = looksLikeStatefulTerminalUi(selectedTerminalStream.text);
+    selectedStatefulTerminalCacheRef.current = {
+      sessionId: selectedTerminalStream.sessionId,
+      resetToken: selectedTerminalStream.resetToken,
+      endPosition: selectedTerminalStream.endPosition,
+      textLength: selectedTerminalStream.text.length,
+      value
+    };
+    return value;
+  }, [selectedSessionId, selectedTerminalStream, selectedThread]);
   const selectedTerminalRenderStream = useMemo(() => {
     if (!selectedSessionId || selectedStatefulHydrationSessionId !== selectedSessionId) {
       return selectedTerminalStream;
@@ -2071,17 +2049,18 @@ export default function App() {
     persistThreadVisibleOutputGuardMap(THREAD_VISIBLE_OUTPUT_GUARD_KEY, visibleOutputGuardByThreadRef.current);
   }, []);
 
-  const rememberThreadVisibleOutput = useCallback((threadId: string, outputText: string, seenAtMs = Date.now()) => {
-    const tail = extractMeaningfulOutputTail(outputText);
-    if (!tail) {
-      return;
+  const rememberThreadVisibleOutputTail = useCallback((threadId: string, tail: string, seenAtMs = Date.now()) => {
+    const normalizedTail = trimMeaningfulOutputTail(tail);
+    if (!normalizedTail) {
+      return false;
     }
     visibleOutputGuardByThreadRef.current[threadId] = {
       seenAtMs,
       baselineUserInputAtMs: lastUserInputAtMsByThreadRef.current[threadId] ?? 0,
-      tail
+      tail: normalizedTail
     };
     visibleOutputGuardDirtyRef.current = true;
+    return true;
   }, []);
 
   const flushThreadJsonlCompletionAttentionState = useCallback(() => {
@@ -2459,16 +2438,14 @@ export default function App() {
     [commitThreadAttentionState]
   );
 
-  const recordThreadVisibleOutput = useCallback(
-    (threadId: string, persistNow = false, seenAtMs = Date.now(), visibleOutputText?: string | null) => {
+  const recordThreadVisibleOutputTail = useCallback(
+    (threadId: string, tail: string, persistNow = false, seenAtMs = Date.now()) => {
       const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      const outputText = visibleOutputText ?? lastTerminalLogByThreadRef.current[threadId] ?? '';
-      const hasVisibleMeaningfulOutput = Boolean(extractMeaningfulOutputTail(outputText));
+      const hasVisibleMeaningfulOutput = rememberThreadVisibleOutputTail(threadId, tail, seenAtMs);
       const shouldPersistActiveTurnSeenOutput =
         hasVisibleMeaningfulOutput &&
         currentState.activeTurnId !== null &&
         currentState.activeTurnSeenOutputAtMs === null;
-      rememberThreadVisibleOutput(threadId, outputText, seenAtMs);
 
       let nextState = currentState;
       if (hasVisibleMeaningfulOutput && currentState.activeTurnId !== null) {
@@ -2496,7 +2473,30 @@ export default function App() {
       }
       return nextState;
     },
-    [commitThreadAttentionState, flushThreadAttentionState, flushVisibleOutputGuardState, rememberThreadVisibleOutput]
+    [
+      commitThreadAttentionState,
+      flushThreadAttentionState,
+      flushVisibleOutputGuardState,
+      rememberThreadVisibleOutputTail
+    ]
+  );
+
+  const recordThreadVisibleOutput = useCallback(
+    (threadId: string, persistNow = false, seenAtMs = Date.now(), visibleOutputText?: string | null) => {
+      const outputText = visibleOutputText ?? lastTerminalLogByThreadRef.current[threadId] ?? '';
+      const tail = extractMeaningfulOutputTail(outputText);
+      return recordThreadVisibleOutputTail(threadId, tail, persistNow, seenAtMs);
+    },
+    [recordThreadVisibleOutputTail]
+  );
+
+  const recordThreadVisibleOutputChunk = useCallback(
+    (threadId: string, persistNow = false, seenAtMs = Date.now(), normalizedChunk: string) => {
+      const currentTail = visibleOutputGuardByThreadRef.current[threadId]?.tail ?? '';
+      const nextTail = appendMeaningfulOutputTail(currentTail, normalizedChunk);
+      return recordThreadVisibleOutputTail(threadId, nextTail, persistNow, seenAtMs);
+    },
+    [recordThreadVisibleOutputTail]
   );
 
   const noteTurnOutput = useCallback(
@@ -2555,12 +2555,11 @@ export default function App() {
       commitThreadAttentionState(threadId, nextAttentionState);
 
       if (isThreadVisibleToUser(threadId)) {
-        const visibleOutputText = `${lastTerminalLogByThreadRef.current[threadId] ?? ''}${stripped.text}`;
-        recordThreadVisibleOutput(threadId, false, nowMs, visibleOutputText);
+        recordThreadVisibleOutputChunk(threadId, false, nowMs, normalized);
       }
       return true;
     },
-    [commitThreadAttentionState, isThreadVisibleToUser, recordThreadVisibleOutput]
+    [commitThreadAttentionState, isThreadVisibleToUser, recordThreadVisibleOutputChunk]
   );
 
   const completeTurn = useCallback(
@@ -2790,6 +2789,7 @@ export default function App() {
     for (const threadId of evictedThreadIds) {
       delete terminalStreamsByThreadRef.current[threadId];
       delete lastTerminalLogByThreadRef.current[threadId];
+      clearThreadSearchText(threadSearchTextByThreadRef.current, threadId);
       delete terminalHydrationRequestIdByThreadRef.current[threadId];
       delete terminalStreamAccessedAtByThreadRef.current[threadId];
       evictedSelectedThread = evictedSelectedThread || selectedThreadId === threadId;
@@ -2873,6 +2873,7 @@ export default function App() {
       terminalStreamsByThreadRef.current[threadId] = nextStream;
       terminalStreamAccessedAtByThreadRef.current[threadId] = Date.now();
       lastTerminalLogByThreadRef.current[threadId] = nextStream.text;
+      rememberThreadSearchText(threadSearchTextByThreadRef.current, threadId, nextStream.text);
       scheduleTerminalStreamCachePrune();
       if (selectedThreadIdRef.current === threadId) {
         flushSelectedTerminalStreamRevision();
@@ -3236,6 +3237,7 @@ export default function App() {
       terminalStreamsByThreadRef.current[threadId] = next;
       terminalStreamAccessedAtByThreadRef.current[threadId] = Date.now();
       lastTerminalLogByThreadRef.current[threadId] = next.text;
+      rememberThreadSearchText(threadSearchTextByThreadRef.current, threadId, next.text);
       scheduleTerminalStreamCachePrune();
       if (selectedThreadIdRef.current === threadId) {
         scheduleSelectedTerminalStreamRevision();
@@ -3290,11 +3292,15 @@ export default function App() {
   );
 
   const clearThreadTerminalStream = useCallback((threadId: string) => {
-    if (!(threadId in terminalStreamsByThreadRef.current)) {
+    const hadTerminalStream = threadId in terminalStreamsByThreadRef.current;
+    const hadTerminalLog = threadId in lastTerminalLogByThreadRef.current;
+    const hadSearchText = threadId in threadSearchTextByThreadRef.current;
+    if (!hadTerminalStream && !hadTerminalLog && !hadSearchText) {
       return;
     }
     delete terminalStreamsByThreadRef.current[threadId];
     delete lastTerminalLogByThreadRef.current[threadId];
+    clearThreadSearchText(threadSearchTextByThreadRef.current, threadId);
     delete terminalHydrationRequestIdByThreadRef.current[threadId];
     delete terminalStreamAccessedAtByThreadRef.current[threadId];
     if (selectedThreadIdRef.current === threadId) {
@@ -3312,6 +3318,9 @@ export default function App() {
       }
       if (threadId in lastTerminalLogByThreadRef.current) {
         delete lastTerminalLogByThreadRef.current[threadId];
+      }
+      if (threadId in threadSearchTextByThreadRef.current) {
+        clearThreadSearchText(threadSearchTextByThreadRef.current, threadId);
       }
       if (threadId in terminalHydrationRequestIdByThreadRef.current) {
         delete terminalHydrationRequestIdByThreadRef.current[threadId];
@@ -3472,6 +3481,11 @@ export default function App() {
     return sessionMetaBySessionIdRef.current[activeSessionId]?.turnCompletionMode ?? 'idle';
   }, []);
 
+  const usesStructuredCompletionForThread = useCallback(
+    (threadId: string) => resolveJsonlCompletionAttentionContext(threadId).usesJsonlAttention,
+    [resolveJsonlCompletionAttentionContext]
+  );
+
   const threadStatusById = useMemo(() => {
     const statusById: Record<string, { isWorking: boolean }> = {};
     for (const thread of allThreads) {
@@ -3522,6 +3536,10 @@ export default function App() {
 
   const scheduleThreadWorkingStop = useCallback(
     (threadId: string, delayMs = THREAD_WORKING_IDLE_TIMEOUT_MS) => {
+      if (usesStructuredCompletionForThread(threadId)) {
+        clearThreadWorkingStopTimer(threadId);
+        return;
+      }
       clearThreadWorkingStopTimer(threadId);
       workingStopTimerByThreadRef.current[threadId] = window.setTimeout(() => {
         delete workingStopTimerByThreadRef.current[threadId];
@@ -3558,7 +3576,8 @@ export default function App() {
       completeTurn,
       notifyCompletedTurnIfNeeded,
       resolveThreadTurnCompletionMode,
-      stopThreadWorking
+      stopThreadWorking,
+      usesStructuredCompletionForThread
     ]
   );
 
@@ -3982,7 +4001,9 @@ export default function App() {
       return;
     }
     const shouldClearSkills = Boolean(pendingSkillClearByThreadRef.current[threadId]);
+    const shouldStartWorking = Boolean(pendingSubmittedInputByThreadRef.current[threadId]);
     delete pendingInputByThreadRef.current[threadId];
+    delete pendingSubmittedInputByThreadRef.current[threadId];
     lastUserInputAtMsByThreadRef.current[threadId] = Date.now();
     try {
       await api.terminalWrite(sessionId, pending);
@@ -3992,10 +4013,15 @@ export default function App() {
       }
       throw error;
     }
+    if (shouldStartWorking) {
+      clearThreadWorkingStopTimer(threadId);
+      startThreadWorking(threadId);
+      scheduleThreadWorkingStop(threadId, THREAD_WORKING_STUCK_TIMEOUT_MS);
+    }
     if (shouldClearSkills) {
       await clearThreadSkillsAfterSend(threadId);
     }
-  }, [clearThreadSkillsAfterSend]);
+  }, [clearThreadSkillsAfterSend, clearThreadWorkingStopTimer, scheduleThreadWorkingStop, startThreadWorking]);
 
   const getThreadDraftInput = useCallback((threadId: string) => inputBufferByThreadRef.current[threadId] ?? '', []);
 
@@ -4380,6 +4406,7 @@ export default function App() {
       bumpSessionStartRequestId(threadId);
       delete startingSessionByThreadRef.current[threadId];
       delete pendingInputByThreadRef.current[threadId];
+      delete pendingSubmittedInputByThreadRef.current[threadId];
       delete pendingSkillClearByThreadRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
     },
@@ -5514,6 +5541,7 @@ export default function App() {
       }
       delete startingSessionByThreadRef.current[threadId];
       delete pendingInputByThreadRef.current[threadId];
+      delete pendingSubmittedInputByThreadRef.current[threadId];
       delete pendingSkillClearByThreadRef.current[threadId];
       delete inputBufferByThreadRef.current[threadId];
       delete inputControlCarryByThreadRef.current[threadId];
@@ -6352,6 +6380,9 @@ export default function App() {
         if (!workingByThreadRef.current[threadId]) {
           return;
         }
+        if (usesStructuredCompletionForThread(threadId)) {
+          return;
+        }
         if (!isStreamingStuck(runLifecycleByThreadRef.current[threadId], nowMs, THREAD_WORKING_STUCK_TIMEOUT_MS)) {
           return;
         }
@@ -6400,6 +6431,7 @@ export default function App() {
       startThreadWorking,
       stopThreadWorking,
       scheduleThreadWorkingStop,
+      usesStructuredCompletionForThread,
       workspaces
     ]
   );
@@ -7257,7 +7289,7 @@ export default function App() {
         pushToast('No Claude session ID available — start a session first.', 'error');
         return;
       }
-      const command = `claude --resume ${sessionId}`;
+      const command = buildClaudeResumeCommand(sessionId, thread.fullAccess);
       void writeTextToClipboard(command)
         .then(() => {
           pushToast('Resume command copied to clipboard.', 'info');
@@ -7267,6 +7299,34 @@ export default function App() {
         });
     },
     [pushToast, writeTextToClipboard]
+  );
+
+  const openResumeCommandInTerminal = useCallback(
+    (thread: ThreadMetadata) => {
+      void (async () => {
+        const workspace = workspaceById[thread.workspaceId] ?? null;
+        if (workspace && isRemoteWorkspaceKind(workspace.kind)) {
+          pushToast('Open resume in Terminal is only available for local projects. Copy the resume command for remote projects.', 'info');
+          return;
+        }
+
+        let cwd = workspace?.path.trim() ?? '';
+        if (workspace?.kind === 'local') {
+          cwd = (await resolveInitialThreadCwd(thread, workspace).catch(() => null))?.trim() || cwd;
+        }
+
+        const command = buildClaudeResumeTerminalCommand(thread, cwd);
+        if (!command) {
+          pushToast('No Claude session ID available — start a session first.', 'error');
+          return;
+        }
+        await api.openTerminalCommand(command);
+        pushToast('Resume command opened in Terminal.', 'info');
+      })().catch((error) => {
+        pushToast(`Failed to open resume command in Terminal: ${String(error)}`, 'error');
+      });
+    },
+    [pushToast, resolveInitialThreadCwd, workspaceById]
   );
 
   const copyWorkspaceCommand = useCallback(
@@ -7593,6 +7653,7 @@ export default function App() {
         delete deletedThreadIdsRef.current[threadId];
         delete startingSessionByThreadRef.current[threadId];
         delete pendingInputByThreadRef.current[threadId];
+        delete pendingSubmittedInputByThreadRef.current[threadId];
         delete pendingSkillClearByThreadRef.current[threadId];
         delete inputBufferByThreadRef.current[threadId];
         delete inputControlCarryByThreadRef.current[threadId];
@@ -7746,7 +7807,7 @@ export default function App() {
   );
 
   const getSearchTextForThread = useCallback((threadId: string) => {
-    return lastTerminalLogByThreadRef.current[threadId] ?? '';
+    return threadSearchTextByThreadRef.current[threadId] ?? '';
   }, []);
 
 
@@ -7871,6 +7932,7 @@ export default function App() {
           if (shouldClearSkills) {
             pendingSkillClearByThreadRef.current[selectedThread.id] = true;
           }
+          pendingSubmittedInputByThreadRef.current[selectedThread.id] = true;
           pendingInputByThreadRef.current[selectedThread.id] =
             `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
           void ensureSessionForThread(selectedThread);
@@ -7929,6 +7991,7 @@ export default function App() {
         if (shouldClearSkills) {
           pendingSkillClearByThreadRef.current[selectedThread.id] = true;
         }
+        pendingSubmittedInputByThreadRef.current[selectedThread.id] = true;
         pendingInputByThreadRef.current[selectedThread.id] =
           `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
         void ensureSessionForThread(selectedThread);
@@ -7992,6 +8055,7 @@ export default function App() {
         getThreadDisplayTimestampMs={threadStore.getThreadDisplayTimestampMs}
         getSearchTextForThread={getSearchTextForThread}
         onCopyResumeCommand={copyResumeCommand}
+        onOpenResumeCommandInTerminal={openResumeCommandInTerminal}
         onCopyWorkspaceCommand={copyWorkspaceCommand}
         onImportSession={onImportSession}
       />

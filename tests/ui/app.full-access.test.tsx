@@ -408,6 +408,7 @@ const mocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
     saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
     detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    latestClaudeSessionCwd: vi.fn(async () => null),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -427,6 +428,7 @@ const mocks = vi.hoisted(() => {
     generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
+    openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
     validateImportableClaudeSession: vi.fn(async () => true),
@@ -461,6 +463,8 @@ const mocks = vi.hoisted(() => {
     api.terminalStartSession.mockImplementation(terminalStartSessionImpl);
     api.terminalReadOutput.mockReset();
     api.terminalReadOutput.mockImplementation(terminalReadOutputImpl);
+    api.latestClaudeSessionCwd.mockReset();
+    api.latestClaudeSessionCwd.mockImplementation(async () => null);
   };
 
   const helperMocks = {
@@ -690,6 +694,54 @@ describe('Terminal launch flags', () => {
     await screen.findByRole('button', { name: /Full Access Thread/i });
     expect(screen.getByTestId('full-access-toggle')).toBeInTheDocument();
     expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('copies full-access resume commands with skip-permissions flag', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Full Access Thread/i });
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Copy resume command' }));
+
+    await waitFor(() => {
+      expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith(
+        "claude --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions"
+      );
+    });
+  });
+
+  it('opens full-access resume commands in Terminal with skip-permissions flag', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Full Access Thread/i });
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Open in Terminal' }));
+
+    await waitFor(() => {
+      expect(mocks.api.openTerminalCommand).toHaveBeenCalledWith(
+        "cd '/tmp/workspace' && claude --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions"
+      );
+    });
+  });
+
+  it('does not offer local Terminal resume for remote threads', async () => {
+    mocks.setWorkspaceKind('ssh');
+    const user = userEvent.setup();
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Full Access Thread/i });
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+
+    const openInTerminal = await screen.findByRole('button', { name: 'Open in Terminal' });
+    expect(openInTerminal).toBeDisabled();
+    expect(openInTerminal).toHaveAttribute(
+      'title',
+      'Open resume in Terminal is only available for local projects. Copy the resume command for remote projects.'
+    );
+    await user.click(openInTerminal);
+    expect(mocks.api.openTerminalCommand).not.toHaveBeenCalled();
   });
 
   it('keeps ssh new threads blocked until the first submitted prompt', async () => {

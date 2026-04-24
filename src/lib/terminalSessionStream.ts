@@ -218,6 +218,46 @@ function trimChunkToRawStart(
   };
 }
 
+function trimChunksToRawWindow(chunks: TerminalStreamChunk[], maxChars: number): TerminalStreamChunk[] {
+  if (chunks.length === 0 || maxChars <= 0) {
+    return chunks;
+  }
+
+  const latestRawEndPosition = chunks[chunks.length - 1]?.rawEndPosition ?? 0;
+  const minRawStartPosition = Math.max(0, latestRawEndPosition - maxChars);
+  let changed = false;
+  const next: TerminalStreamChunk[] = [];
+
+  for (const chunk of chunks) {
+    if (chunk.rawEndPosition <= minRawStartPosition) {
+      changed = true;
+      continue;
+    }
+    if (chunk.rawStartPosition >= minRawStartPosition) {
+      next.push(chunk);
+      continue;
+    }
+
+    const visibleChars = chunk.rawEndPosition - minRawStartPosition;
+    const { text: clampedText, startOffset } = clampTerminalWindow(chunk.data, visibleChars);
+    if (clampedText.length === 0) {
+      changed = true;
+      continue;
+    }
+
+    next.push({
+      rawStartPosition: chunk.rawStartPosition + startOffset,
+      rawEndPosition: chunk.rawEndPosition,
+      startPosition: chunk.endPosition - clampedText.length,
+      endPosition: chunk.endPosition,
+      data: clampedText
+    });
+    changed = true;
+  }
+
+  return changed ? next : chunks;
+}
+
 function replayBufferedChunkAfterSnapshot(
   chunk: TerminalStreamChunk,
   snapshotWindow: Pick<TerminalSessionStreamState, 'text' | 'endPosition'>
@@ -323,7 +363,7 @@ export function appendTerminalStreamChunk(
   };
 
   if (state.phase === 'hydrating') {
-    const nextChunks = appendChunkToBuffer(state.chunks, incomingChunk);
+    const nextChunks = trimChunksToRawWindow(appendChunkToBuffer(state.chunks, incomingChunk), maxChars);
     if (nextChunks === state.chunks) {
       return state;
     }

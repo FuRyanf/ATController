@@ -76,6 +76,43 @@ describe('terminalSessionStream', () => {
     expect(terminalSessionStreamKnownRawEndPosition(next)).toBe(9);
   });
 
+  it('caps buffered hydration chunks to the recent raw window', () => {
+    let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
+
+    for (let index = 0; index < 10; index += 1) {
+      state = appendTerminalStreamChunk(
+        state,
+        {
+          sessionId: 'session-1',
+          startPosition: index,
+          endPosition: index + 1,
+          data: String(index)
+        },
+        5
+      );
+    }
+
+    expect(state.phase).toBe('hydrating');
+    expect(state.chunks.map((chunk) => chunk.data).join('')).toBe('56789');
+    expect(state.chunks[0]?.rawStartPosition).toBe(5);
+    expect(terminalSessionStreamKnownRawEndPosition(state)).toBe(10);
+
+    const hydrated = hydrateTerminalSessionStream(
+      state,
+      'session-1',
+      {
+        text: '',
+        startPosition: 0,
+        endPosition: 0,
+        truncated: false
+      },
+      5
+    );
+
+    expect(hydrated.text).toBe('56789');
+    expect(hydrated.rawEndPosition).toBe(10);
+  });
+
   it('keeps the non-overlapping tail when buffered chunks partially overlap', () => {
     let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
     state = appendTerminalStreamChunk(

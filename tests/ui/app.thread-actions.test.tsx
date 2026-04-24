@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
     id: 'ws-1',
     name: 'Workspace',
     path: '/tmp/workspace',
+    kind: 'local' as const,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -228,6 +229,7 @@ const mocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
     saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
     detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    latestClaudeSessionCwd: vi.fn(async () => null),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -264,6 +266,7 @@ const mocks = vi.hoisted(() => {
     generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
+    openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
     validateImportableClaudeSession: vi.fn(async () => true),
@@ -277,6 +280,8 @@ const mocks = vi.hoisted(() => {
         (fn as { mockClear: () => void }).mockClear();
       }
     });
+    api.latestClaudeSessionCwd.mockReset();
+    api.latestClaudeSessionCwd.mockImplementation(async () => null);
   };
 
   return {
@@ -348,6 +353,40 @@ describe('Thread actions', () => {
     await user.pointer([{ target: row, keys: '[MouseRight]' }]);
 
     expect(screen.queryByRole('button', { name: 'Fork thread' })).toBeNull();
+  });
+
+  it('copies normal resume commands without skip-permissions flag', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Rename me/i });
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Copy resume command' }));
+
+    await waitFor(() => {
+      expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith(
+        "claude --resume '123e4567-e89b-12d3-a456-426614174000'"
+      );
+    });
+    expect(mocks.api.writeTextToClipboard).not.toHaveBeenCalledWith(
+      expect.stringContaining('--dangerously-skip-permissions')
+    );
+  });
+
+  it('opens normal resume commands in Terminal from the workspace folder', async () => {
+    const user = userEvent.setup();
+    mocks.api.latestClaudeSessionCwd.mockResolvedValue('/tmp/workspace/subdir');
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Rename me/i });
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Open in Terminal' }));
+
+    await waitFor(() => {
+      expect(mocks.api.openTerminalCommand).toHaveBeenCalledWith(
+        "cd '/tmp/workspace/subdir' && claude --resume '123e4567-e89b-12d3-a456-426614174000'"
+      );
+    });
   });
 
   it('supports delete from context menu', async () => {
