@@ -116,6 +116,12 @@ import {
   type Workspace
 } from './types';
 
+const CLAUDE_FULL_ACCESS_ARGS = [
+  '--dangerously-skip-permissions',
+  '--permission-mode',
+  'bypassPermissions'
+] as const;
+
 const { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } = apiModule;
 const onTerminalSshAuthStatus =
   apiModule.onTerminalSshAuthStatus ??
@@ -812,7 +818,7 @@ function buildClaudeInPlaceRestartCommand(sessionId: string, fullAccess: boolean
     `'${sessionId}'`
   ];
   if (fullAccess) {
-    parts.push('--dangerously-skip-permissions');
+    parts.push(...CLAUDE_FULL_ACCESS_ARGS);
   }
   return parts.join(' ');
 }
@@ -824,7 +830,7 @@ function shellQuote(value: string): string {
 function buildClaudeResumeCommand(sessionId: string, fullAccess: boolean): string {
   const parts = ['claude', '--resume', shellQuote(sessionId)];
   if (fullAccess) {
-    parts.push('--dangerously-skip-permissions');
+    parts.push(...CLAUDE_FULL_ACCESS_ARGS);
   }
   return parts.join(' ');
 }
@@ -1538,6 +1544,7 @@ export default function App() {
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const pendingSubmittedInputByThreadRef = useRef<Record<string, true>>({});
   const pendingSkillClearByThreadRef = useRef<Record<string, true>>({});
+  const pendingNativeForkCommandByThreadRef = useRef<Record<string, true>>({});
   const hiddenInjectedPromptsByThreadRef = useRef<Record<string, string[]>>({});
   const forkResolutionByThreadRef = useRef<Record<string, Promise<void>>>({});
   const forkResolutionTimeoutNotifiedByThreadRef = useRef<Record<string, true>>({});
@@ -3431,7 +3438,11 @@ export default function App() {
         return remembered;
       }
 
-      const claudeSessionId = thread.claudeSessionId?.trim() ?? '';
+      const pendingForkSourceSessionId = thread.pendingForkSourceClaudeSessionId?.trim() ?? '';
+      const claudeSessionId =
+        !thread.pendingForkLaunchConsumed && isUuidLike(pendingForkSourceSessionId)
+          ? pendingForkSourceSessionId
+          : thread.claudeSessionId?.trim() ?? '';
       if (!claudeSessionId) {
         return workspace.path;
       }
@@ -3880,6 +3891,42 @@ export default function App() {
     ]
   );
 
+  const commitPreparedNativeForkForThread = useCallback(
+    async (threadId: string, preparedNativeFork: PreparedNativeFork) => {
+      const latestThread = findThreadById(threadByIdRef.current, threadId);
+      if (!latestThread || deletedThreadIdsRef.current[threadId]) {
+        return;
+      }
+
+      suppressAutoForkResolutionByThreadRef.current[threadId] = true;
+      try {
+        const consumedThread = await api.commitPreparedThreadPendingFork(
+          latestThread.workspaceId,
+          latestThread.id,
+          preparedNativeFork
+        );
+        applyThreadUpdate(consumedThread);
+        const wsId = consumedThread.workspaceId;
+        const wsThreads = threadsByWorkspaceRef.current[wsId] ?? [];
+        threadsByWorkspaceRef.current = {
+          ...threadsByWorkspaceRef.current,
+          [wsId]: wsThreads.map((thread) => (thread.id === consumedThread.id ? consumedThread : thread))
+        };
+        threadByIdRef.current = {
+          ...threadByIdRef.current,
+          [consumedThread.id]: consumedThread
+        };
+        await refreshThreadsForWorkspace(consumedThread.workspaceId);
+        delete suppressAutoForkResolutionByThreadRef.current[threadId];
+        void resolvePendingThreadFork(consumedThread.id, { notifyOnTimeout: true });
+      } catch (error) {
+        delete suppressAutoForkResolutionByThreadRef.current[threadId];
+        pushToast(`Fork tracking failed: ${String(error)}`, 'error');
+      }
+    },
+    [applyThreadUpdate, pushToast, refreshThreadsForWorkspace, resolvePendingThreadFork]
+  );
+
   const refreshSkillsForWorkspace = useCallback(async (workspace: Workspace) => {
     if (isRemoteWorkspaceKind(workspace.kind)) {
       setSkillsByWorkspaceId((current) => {
@@ -3994,16 +4041,34 @@ export default function App() {
     }
     const shouldClearSkills = Boolean(pendingSkillClearByThreadRef.current[threadId]);
     const shouldStartWorking = Boolean(pendingSubmittedInputByThreadRef.current[threadId]);
+    const shouldTrackNativeFork = Boolean(pendingNativeForkCommandByThreadRef.current[threadId]);
     delete pendingInputByThreadRef.current[threadId];
     delete pendingSubmittedInputByThreadRef.current[threadId];
+    delete pendingNativeForkCommandByThreadRef.current[threadId];
     lastUserInputAtMsByThreadRef.current[threadId] = Date.now();
+    let preparedNativeFork: PreparedNativeFork | null = null;
+    if (shouldTrackNativeFork) {
+      const thread = findThreadById(threadByIdRef.current, threadId);
+      const workspace = thread ? workspaces.find((candidate) => candidate.id === thread.workspaceId) : null;
+      if (thread && workspace && !isRemoteWorkspaceKind(workspace.kind)) {
+        try {
+          preparedNativeFork = await api.prepareThreadNativeFork(thread.workspaceId, thread.id, sessionId);
+        } catch (error) {
+          pushToast(`Fork tracking failed: ${String(error)}`, 'error');
+        }
+      }
+    }
+    let wrote = false;
     try {
-      await api.terminalWrite(sessionId, pending);
+      wrote = await api.terminalWrite(sessionId, pending);
     } catch (error) {
       if (shouldClearSkills) {
         delete pendingSkillClearByThreadRef.current[threadId];
       }
       throw error;
+    }
+    if (wrote && preparedNativeFork) {
+      await commitPreparedNativeForkForThread(threadId, preparedNativeFork);
     }
     if (shouldStartWorking) {
       clearThreadWorkingStopTimer(threadId);
@@ -4013,7 +4078,15 @@ export default function App() {
     if (shouldClearSkills) {
       await clearThreadSkillsAfterSend(threadId);
     }
-  }, [clearThreadSkillsAfterSend, clearThreadWorkingStopTimer, scheduleThreadWorkingStop, startThreadWorking]);
+  }, [
+    clearThreadSkillsAfterSend,
+    clearThreadWorkingStopTimer,
+    commitPreparedNativeForkForThread,
+    pushToast,
+    scheduleThreadWorkingStop,
+    startThreadWorking,
+    workspaces
+  ]);
 
   const getThreadDraftInput = useCallback((threadId: string) => inputBufferByThreadRef.current[threadId] ?? '', []);
 
@@ -4646,7 +4719,7 @@ export default function App() {
         applyThreadUpdate(response.thread);
 
         const startedAt = new Date().toISOString();
-        const sessionCurrentCwd = initialThreadCwd;
+        const sessionCurrentCwd = response.currentCwd?.trim() || initialThreadCwd;
         const claudeSessionId =
           response.thread.claudeSessionId?.trim() ||
           response.resumeSessionId?.trim() ||
@@ -7924,6 +7997,9 @@ export default function App() {
           if (shouldClearSkills) {
             pendingSkillClearByThreadRef.current[selectedThread.id] = true;
           }
+          if (nativeForkCommand) {
+            pendingNativeForkCommandByThreadRef.current[selectedThread.id] = true;
+          }
           pendingSubmittedInputByThreadRef.current[selectedThread.id] = true;
           pendingInputByThreadRef.current[selectedThread.id] =
             `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
@@ -7952,33 +8028,7 @@ export default function App() {
             void clearThreadSkillsAfterSend(selectedThread.id);
           }
           if (wrote && preparedNativeFork) {
-            suppressAutoForkResolutionByThreadRef.current[selectedThread.id] = true;
-            try {
-              const consumedThread = await api.commitPreparedThreadPendingFork(
-                selectedThread.workspaceId,
-                selectedThread.id,
-                preparedNativeFork
-              );
-              applyThreadUpdate(consumedThread);
-              const wsId = consumedThread.workspaceId;
-              const wsThreads = threadsByWorkspaceRef.current[wsId] ?? [];
-              threadsByWorkspaceRef.current = {
-                ...threadsByWorkspaceRef.current,
-                [wsId]: wsThreads.map(
-                  (t) => (t.id === consumedThread.id ? consumedThread : t)
-                ),
-              };
-              threadByIdRef.current = {
-                ...threadByIdRef.current,
-                [consumedThread.id]: consumedThread
-              };
-              await refreshThreadsForWorkspace(consumedThread.workspaceId);
-              delete suppressAutoForkResolutionByThreadRef.current[selectedThread.id];
-              void resolvePendingThreadFork(selectedThread.id, { notifyOnTimeout: true });
-            } catch (error) {
-              delete suppressAutoForkResolutionByThreadRef.current[selectedThread.id];
-              pushToast(`Fork tracking failed: ${String(error)}`, 'error');
-            }
+            await commitPreparedNativeForkForThread(selectedThread.id, preparedNativeFork);
           }
           return;
         }
@@ -7986,6 +8036,9 @@ export default function App() {
         // Session vanished between the start of onData and now.
         if (shouldClearSkills) {
           pendingSkillClearByThreadRef.current[selectedThread.id] = true;
+        }
+        if (nativeForkCommand) {
+          pendingNativeForkCommandByThreadRef.current[selectedThread.id] = true;
         }
         pendingSubmittedInputByThreadRef.current[selectedThread.id] = true;
         pendingInputByThreadRef.current[selectedThread.id] =

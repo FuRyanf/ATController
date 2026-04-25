@@ -696,7 +696,7 @@ describe('Terminal launch flags', () => {
     expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('copies full-access resume commands with skip-permissions flag', async () => {
+  it('copies full-access resume commands with explicit bypass permissions flags', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -706,12 +706,12 @@ describe('Terminal launch flags', () => {
 
     await waitFor(() => {
       expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith(
-        "claude --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions"
+        "claude --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions --permission-mode bypassPermissions"
       );
     });
   });
 
-  it('opens full-access resume commands in Terminal with skip-permissions flag', async () => {
+  it('opens full-access resume commands in Terminal with explicit bypass permissions flags', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -721,7 +721,7 @@ describe('Terminal launch flags', () => {
 
     await waitFor(() => {
       expect(mocks.api.openTerminalCommand).toHaveBeenCalledWith(
-        "cd '/tmp/workspace' && claude --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions"
+        "cd '/tmp/workspace' && claude --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions --permission-mode bypassPermissions"
       );
     });
   });

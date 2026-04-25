@@ -647,6 +647,73 @@ describe('Sidebar behavior', () => {
     expect(screen.queryByRole('button', { name: /First thread \(Original\)/i })).not.toBeInTheDocument();
   });
 
+  it('tracks native /fork that was queued while the terminal session was starting', async () => {
+    const user = userEvent.setup();
+    let resolveStart: (() => void) | null = null;
+    mocks.api.terminalStartSession.mockImplementationOnce(
+      (params: { threadId: string }) =>
+        new Promise<void>((resolve) => {
+          resolveStart = resolve;
+        }).then(() => ({
+          sessionId: `session-${params.threadId}`,
+          sessionMode: 'new' as const,
+          resumeSessionId: null,
+          thread: {
+            id: params.threadId,
+            workspaceId: 'ws-1',
+            agentId: 'claude-code',
+            fullAccess: false,
+            enabledSkills: [] as string[],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            title: 'First thread',
+            isArchived: false,
+            lastRunStatus: 'Idle' as const,
+            lastRunStartedAt: null,
+            lastRunEndedAt: null,
+            claudeSessionId: null,
+            forkedFromClaudeSessionId: null,
+            pendingForkSourceClaudeSessionId: null,
+            pendingForkKnownChildSessionIds: [] as string[],
+            pendingForkRequestedAt: null,
+            pendingForkLaunchConsumed: false,
+            lastResumeAt: null,
+            lastNewSessionAt: new Date().toISOString()
+          }
+        }))
+    );
+    render(<App />);
+
+    await screen.findByRole('button', { name: /First thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'send-native-fork' }));
+    expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
+
+    act(() => {
+      resolveStart?.();
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.prepareThreadNativeFork).toHaveBeenCalledWith('ws-1', 'thread-1', 'session-thread-1');
+    });
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-thread-1', '/fork\r');
+    });
+    await waitFor(() => {
+      expect(mocks.api.commitPreparedThreadPendingFork).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
+        'ws-1',
+        'thread-1',
+        'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+      );
+    });
+  });
+
   it('leaves the source session unclaimed after native /fork so it can be imported', async () => {
     const user = userEvent.setup();
     render(<App />);

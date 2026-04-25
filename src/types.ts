@@ -170,6 +170,7 @@ export interface TerminalStartResponse {
   sessionMode: TerminalSessionMode;
   resumeSessionId?: string | null;
   turnCompletionMode?: TerminalTurnCompletionMode;
+  currentCwd?: string | null;
   thread: ThreadMetadata;
 }
 
