@@ -471,6 +471,18 @@ body.shell-drawer-resizing {
   padding: 0;
 }
 
+.workspace-group.dragging .workspace-group-container {
+  opacity: 0.55;
+}
+
+.workspace-group.drag-over-before .workspace-group-container {
+  box-shadow: inset 0 2px 0 rgba(88, 132, 255, 0.7);
+}
+
+.workspace-group.drag-over-after .workspace-group-container {
+  box-shadow: inset 0 -2px 0 rgba(88, 132, 255, 0.7);
+}
+
 .workspace-group-container {
   border: none;
   border-radius: 0;
@@ -492,10 +504,47 @@ body.shell-drawer-resizing {
 .workspace-group-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-height: 34px;
   padding: 2px 2px;
   transition: background-color var(--motion-fast);
+}
+
+.workspace-drag-button {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  width: 22px;
+  height: 28px;
+  flex: 0 0 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: grab;
+  opacity: 0.62;
+  touch-action: none;
+  user-select: none;
+  transition: opacity var(--motion-fast), background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+}
+
+.workspace-drag-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.workspace-drag-button:hover,
+.workspace-drag-button:focus-visible,
+.workspace-group.dragging .workspace-drag-button {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: var(--line-strong);
+  color: var(--ink);
+  opacity: 1;
+}
+
+.workspace-drag-button:active,
+.workspace-group.dragging .workspace-drag-button {
+  cursor: grabbing;
 }
 
 .workspace-group-button {
@@ -511,8 +560,14 @@ body.shell-drawer-resizing {
   justify-content: space-between;
   gap: var(--space-2);
   text-align: left;
-  cursor: pointer;
+  cursor: grab;
+  user-select: none;
   transition: background-color var(--motion-fast);
+}
+
+.workspace-group-button:active,
+.workspace-group.dragging .workspace-group-button {
+  cursor: grabbing;
 }
 
 .workspace-group:hover .workspace-group-button,

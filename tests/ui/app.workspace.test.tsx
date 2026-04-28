@@ -203,7 +203,7 @@ const mocks = vi.hoisted(() => {
     api,
     reset,
     ...helperMocks,
-    seedWorkspaces: (next: Array<typeof workspaceOne>) => {
+    seedWorkspaces: (next: WorkspaceFixture[]) => {
       workspaceState = next.map((workspace) => ({ ...workspace }));
     },
     sampleWorkspaces: {
@@ -250,22 +250,31 @@ vi.mock('../../src/lib/taskCompletionAlerts', () => ({
 
 import App from '../../src/App';
 
-function createDataTransfer(): DataTransfer {
-  const data = new Map<string, string>();
-  return {
-    dropEffect: 'none',
-    effectAllowed: 'all',
-    setData: (type: string, value: string) => {
-      data.set(type, value);
-    },
-    getData: (type: string) => data.get(type) ?? ''
-  } as unknown as DataTransfer;
-}
-
 function getWorkspaceOrder(): string[] {
   return Array.from(document.querySelectorAll('.workspace-group .workspace-group-name'))
     .map((node) => node.textContent?.trim() ?? '')
     .filter((value) => value.length > 0);
+}
+
+function fireWorkspacePointer(
+  target: EventTarget,
+  type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel',
+  init: MouseEventInit & { pointerId?: number; isPrimary?: boolean } = {}
+) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    ...init
+  });
+  Object.defineProperty(event, 'pointerId', {
+    configurable: true,
+    value: init.pointerId ?? 1
+  });
+  Object.defineProperty(event, 'isPrimary', {
+    configurable: true,
+    value: init.isPrimary ?? true
+  });
+  fireEvent(target, event);
 }
 
 function recentIsoTimestamp(daysAgo: number): string {
@@ -345,43 +354,38 @@ describe('Workspace add flow', () => {
     expect(await screen.findByRole('button', { name: /workspace-added/i })).toBeInTheDocument();
   });
 
-  it('does not reorder workspaces by drag-and-drop when drag is disabled', async () => {
+  it('reorders workspaces by dragging a project row', async () => {
     mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
     render(<App />);
 
     await screen.findByRole('button', { name: /workspace-added/i });
     expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
 
-    const sourceRow = screen.getByRole('button', { name: /workspace-added/i }).closest('.workspace-group-row');
+    const sourceRow = screen.getByRole('button', { name: /workspace-added/i });
     const targetGroup = screen.getByRole('button', { name: /workspace-second/i }).closest('.workspace-group');
-    expect(sourceRow).not.toBeNull();
     expect(targetGroup).not.toBeNull();
 
-    const dataTransfer = createDataTransfer();
-    fireEvent.dragStart(sourceRow as HTMLElement, { dataTransfer });
-    fireEvent.dragOver(targetGroup as HTMLElement, { dataTransfer });
-    fireEvent.drop(targetGroup as HTMLElement, { dataTransfer });
-    fireEvent.dragEnd(sourceRow as HTMLElement, { dataTransfer });
+    const targetElement = targetGroup as HTMLElement;
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => targetElement)
+    });
+    const targetRectSpy = vi.spyOn(targetElement, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 140,
+      left: 0,
+      right: 320,
+      width: 320,
+      height: 40,
+      x: 0,
+      y: 100,
+      toJSON: () => ({})
+    } as DOMRect);
 
-    expect(mocks.api.setWorkspaceOrder).not.toHaveBeenCalled();
-    expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
-  });
-
-  it('reorders workspaces with move arrows when drag events are unavailable', async () => {
-    const user = userEvent.setup();
-    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
-    render(<App />);
-
-    await screen.findByRole('button', { name: /workspace-added/i });
-    expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
-
-    const moveUpFirst = screen.queryByTestId('workspace-move-up-ws-added');
-    const moveDownFirst = screen.getByTestId('workspace-move-down-ws-added');
-    const moveDownLast = screen.queryByTestId('workspace-move-down-ws-second');
-    expect(moveUpFirst).toBeNull();
-    expect(moveDownLast).toBeNull();
-
-    fireEvent.click(moveDownFirst);
+    fireWorkspacePointer(sourceRow, 'pointerdown', { button: 0, buttons: 1, clientX: 20, clientY: 10 });
+    fireWorkspacePointer(window, 'pointermove', { buttons: 1, clientX: 20, clientY: 130 });
+    fireWorkspacePointer(window, 'pointerup', { button: 0, clientX: 20, clientY: 130 });
 
     await waitFor(() => {
       expect(mocks.api.setWorkspaceOrder).toHaveBeenCalledWith(['ws-second', 'ws-added']);
@@ -389,8 +393,208 @@ describe('Workspace add flow', () => {
     await waitFor(() => {
       expect(getWorkspaceOrder()).toEqual(['workspace-second', 'workspace-added']);
     });
+
+    if (originalElementFromPoint) {
+      Object.defineProperty(document, 'elementFromPoint', {
+        configurable: true,
+        value: originalElementFromPoint
+      });
+    } else {
+      delete (document as Partial<Document>).elementFromPoint;
+    }
+    targetRectSpy.mockRestore();
+  });
+
+  it('reorders workspaces by dragging the project grip', async () => {
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
+    render(<App />);
+
+    await screen.findByRole('button', { name: /workspace-added/i });
+    expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
+
+    const sourceRow = screen.getByRole('button', { name: /workspace-added/i });
+    const targetGroup = screen.getByRole('button', { name: /workspace-second/i }).closest('.workspace-group');
+    expect(targetGroup).not.toBeNull();
+
+    const sourceGrip = screen.getByTestId('workspace-drag-ws-added');
+    const targetElement = targetGroup as HTMLElement;
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => targetElement)
+    });
+    const targetRectSpy = vi.spyOn(targetElement, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 140,
+      left: 0,
+      right: 320,
+      width: 320,
+      height: 40,
+      x: 0,
+      y: 100,
+      toJSON: () => ({})
+    } as DOMRect);
+
+    fireWorkspacePointer(sourceGrip, 'pointerdown', { button: 0, buttons: 1, clientX: 20, clientY: 10 });
+    fireWorkspacePointer(window, 'pointermove', { buttons: 1, clientX: 20, clientY: 130 });
+    fireWorkspacePointer(window, 'pointerup', { button: 0, clientX: 20, clientY: 130 });
+
+    await waitFor(() => {
+      expect(mocks.api.setWorkspaceOrder).toHaveBeenCalledWith(['ws-second', 'ws-added']);
+    });
+    await waitFor(() => {
+      expect(getWorkspaceOrder()).toEqual(['workspace-second', 'workspace-added']);
+    });
+
+    if (originalElementFromPoint) {
+      Object.defineProperty(document, 'elementFromPoint', {
+        configurable: true,
+        value: originalElementFromPoint
+      });
+    } else {
+      delete (document as Partial<Document>).elementFromPoint;
+    }
+    targetRectSpy.mockRestore();
+  });
+
+  it('does not reorder workspaces when a drag is released outside the project list', async () => {
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
+    render(<App />);
+
+    await screen.findByRole('button', { name: /workspace-added/i });
+    expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
+
+    const sourceGrip = screen.getByTestId('workspace-drag-ws-added');
+    const targetGroup = screen.getByRole('button', { name: /workspace-second/i }).closest('.workspace-group');
+    const workspaceGroups = document.querySelector('.workspace-groups');
+    expect(targetGroup).not.toBeNull();
+    expect(workspaceGroups).not.toBeNull();
+
+    const targetElement = targetGroup as HTMLElement;
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn((x: number) => (x > 400 ? document.body : targetElement))
+    });
+    const targetRectSpy = vi.spyOn(targetElement, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 140,
+      left: 0,
+      right: 320,
+      width: 320,
+      height: 40,
+      x: 0,
+      y: 100,
+      toJSON: () => ({})
+    } as DOMRect);
+    const groupsRectSpy = vi.spyOn(workspaceGroups as HTMLElement, 'getBoundingClientRect').mockReturnValue({
+      top: 0,
+      bottom: 220,
+      left: 0,
+      right: 320,
+      width: 320,
+      height: 220,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    } as DOMRect);
+
+    fireWorkspacePointer(sourceGrip, 'pointerdown', { button: 0, buttons: 1, clientX: 20, clientY: 10 });
+    fireWorkspacePointer(window, 'pointermove', { buttons: 1, clientX: 20, clientY: 130 });
+    fireWorkspacePointer(window, 'pointerup', { button: 0, clientX: 800, clientY: 130 });
+
+    expect(mocks.api.setWorkspaceOrder).not.toHaveBeenCalled();
+    expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
+
+    if (originalElementFromPoint) {
+      Object.defineProperty(document, 'elementFromPoint', {
+        configurable: true,
+        value: originalElementFromPoint
+      });
+    } else {
+      delete (document as Partial<Document>).elementFromPoint;
+    }
+    targetRectSpy.mockRestore();
+    groupsRectSpy.mockRestore();
+  });
+
+  it('cancels active workspace drags when the window loses focus', async () => {
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
+    render(<App />);
+
+    await screen.findByRole('button', { name: /workspace-added/i });
+
+    const sourceGrip = screen.getByTestId('workspace-drag-ws-added');
+    const targetGroup = screen.getByRole('button', { name: /workspace-second/i }).closest('.workspace-group');
+    expect(targetGroup).not.toBeNull();
+
+    const targetElement = targetGroup as HTMLElement;
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => targetElement)
+    });
+    const targetRectSpy = vi.spyOn(targetElement, 'getBoundingClientRect').mockReturnValue({
+      top: 100,
+      bottom: 140,
+      left: 0,
+      right: 320,
+      width: 320,
+      height: 40,
+      x: 0,
+      y: 100,
+      toJSON: () => ({})
+    } as DOMRect);
+
+    fireWorkspacePointer(sourceGrip, 'pointerdown', { button: 0, buttons: 1, clientX: 20, clientY: 10 });
+    fireWorkspacePointer(window, 'pointermove', { buttons: 1, clientX: 20, clientY: 130 });
+    expect(document.querySelector('.workspace-group.dragging')).not.toBeNull();
+
+    fireEvent.blur(window);
+    fireWorkspacePointer(window, 'pointerup', { button: 0, clientX: 20, clientY: 130 });
+
+    expect(mocks.api.setWorkspaceOrder).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(document.querySelector('.workspace-group.dragging')).toBeNull();
+    });
+
+    if (originalElementFromPoint) {
+      Object.defineProperty(document, 'elementFromPoint', {
+        configurable: true,
+        value: originalElementFromPoint
+      });
+    } else {
+      delete (document as Partial<Document>).elementFromPoint;
+    }
+    targetRectSpy.mockRestore();
+  });
+
+  it('reorders workspaces with the project grip keyboard shortcuts', async () => {
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
+    render(<App />);
+
+    await screen.findByRole('button', { name: /workspace-added/i });
+    fireEvent.keyDown(screen.getByTestId('workspace-drag-ws-second'), { key: 'ArrowUp' });
+
+    await waitFor(() => {
+      expect(mocks.api.setWorkspaceOrder).toHaveBeenCalledWith(['ws-second', 'ws-added']);
+    });
+    await waitFor(() => {
+      expect(getWorkspaceOrder()).toEqual(['workspace-second', 'workspace-added']);
+    });
+  });
+
+  it('uses drag affordances instead of move arrow buttons', async () => {
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
+    render(<App />);
+
+    await screen.findByRole('button', { name: /workspace-added/i });
+
+    expect(screen.getByTestId('workspace-drag-ws-added')).toBeInTheDocument();
+    expect(screen.getByTestId('workspace-drag-ws-second')).toBeInTheDocument();
+    expect(screen.getByTestId('workspace-drag-ws-added')).toHaveAttribute('aria-keyshortcuts', 'ArrowUp ArrowDown');
+    expect(screen.queryByTestId('workspace-move-up-ws-added')).toBeNull();
     expect(screen.queryByTestId('workspace-move-down-ws-added')).toBeNull();
-    expect(screen.getByTestId('workspace-move-up-ws-added')).toBeInTheDocument();
   });
 
   it('adds an ssh workspace from the add-project modal', async () => {

@@ -57,6 +57,30 @@ const WORKSPACE_CONTEXT_MENU_HEIGHT = 250;
 const NEW_THREAD_CONTEXT_MENU_HEIGHT = 88;
 const CONTEXT_MENU_MARGIN = 8;
 
+type WorkspaceDropPosition = 'before' | 'after';
+
+interface WorkspaceDragState {
+  draggedWorkspaceId: string;
+  overWorkspaceId?: string;
+  dropPosition?: WorkspaceDropPosition;
+}
+
+interface WorkspaceDragSession {
+  workspaceId: string;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  dragging: boolean;
+  overWorkspaceId?: string;
+  dropPosition?: WorkspaceDropPosition;
+  cleanup: () => void;
+}
+
+interface WorkspaceDragTarget {
+  element: HTMLElement;
+  workspaceId: string;
+}
+
 function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
   return kind === 'rdev' || kind === 'ssh';
 }
@@ -133,18 +157,15 @@ function DotsIcon() {
   );
 }
 
-function ArrowUpIcon() {
+function GripIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 18V6M12 6l-4.5 4.5M12 6l4.5 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function ArrowDownIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 6v12M12 18l-4.5-4.5M12 18l4.5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <circle cx="9" cy="6.5" r="1.25" fill="currentColor" />
+      <circle cx="15" cy="6.5" r="1.25" fill="currentColor" />
+      <circle cx="9" cy="12" r="1.25" fill="currentColor" />
+      <circle cx="15" cy="12" r="1.25" fill="currentColor" />
+      <circle cx="9" cy="17.5" r="1.25" fill="currentColor" />
+      <circle cx="15" cy="17.5" r="1.25" fill="currentColor" />
     </svg>
   );
 }
@@ -208,20 +229,46 @@ function formatRecencyShort(activityTimestampMs: number | null, nowMs: number): 
   return `${diffDays}d`;
 }
 
-function buildShiftedWorkspaceIds(workspaces: Workspace[], workspaceId: string, offset: -1 | 1): string[] | null {
+function buildDraggedWorkspaceIds(
+  workspaces: Workspace[],
+  draggedWorkspaceId: string,
+  targetWorkspaceId: string,
+  position: WorkspaceDropPosition
+): string[] | null {
+  if (draggedWorkspaceId === targetWorkspaceId) {
+    return null;
+  }
+
   const ids = workspaces.map((workspace) => workspace.id);
-  const fromIndex = ids.indexOf(workspaceId);
+  const fromIndex = ids.indexOf(draggedWorkspaceId);
   if (fromIndex < 0) {
     return null;
   }
-  const toIndex = fromIndex + offset;
-  if (toIndex < 0 || toIndex >= ids.length) {
+
+  ids.splice(fromIndex, 1);
+  const targetIndex = ids.indexOf(targetWorkspaceId);
+  if (targetIndex < 0) {
     return null;
   }
-  const moving = ids[fromIndex];
-  ids[fromIndex] = ids[toIndex];
-  ids[toIndex] = moving;
+
+  ids.splice(position === 'after' ? targetIndex + 1 : targetIndex, 0, draggedWorkspaceId);
   return ids;
+}
+
+function resolveWorkspaceDropPositionFromRect(
+  clientY: number,
+  targetRect: DOMRect,
+  workspaces: Workspace[],
+  draggedWorkspaceId: string,
+  targetWorkspaceId: string
+): WorkspaceDropPosition {
+  if (targetRect.height > 0) {
+    return clientY >= targetRect.top + targetRect.height / 2 ? 'after' : 'before';
+  }
+
+  const draggedIndex = workspaces.findIndex((workspace) => workspace.id === draggedWorkspaceId);
+  const targetIndex = workspaces.findIndex((workspace) => workspace.id === targetWorkspaceId);
+  return draggedIndex < targetIndex ? 'after' : 'before';
 }
 
 interface ThreadRowProps {
@@ -436,9 +483,13 @@ function LeftRailComponent({
   const [workspaceContextMenu, setWorkspaceContextMenu] = React.useState<WorkspaceContextMenuState | null>(null);
   const [newThreadMenu, setNewThreadMenu] = React.useState<NewThreadMenuState | null>(null);
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
+  const [workspaceDragState, setWorkspaceDragState] = React.useState<WorkspaceDragState | null>(null);
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const newThreadMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const workspaceGroupsRef = React.useRef<HTMLUListElement | null>(null);
+  const workspaceDragSessionRef = React.useRef<WorkspaceDragSession | null>(null);
+  const suppressWorkspaceClickRef = React.useRef(false);
   const renderCountRef = React.useRef(0);
   renderCountRef.current += 1;
 
@@ -447,6 +498,12 @@ function LeftRailComponent({
   React.useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
     return () => window.clearInterval(id);
+  }, []);
+
+  React.useEffect(() => {
+    return () => {
+      workspaceDragSessionRef.current?.cleanup();
+    };
   }, []);
 
   React.useEffect(() => {
@@ -556,6 +613,291 @@ function LeftRailComponent({
     setContextMenu(null);
     setWorkspaceContextMenu(null);
     setNewThreadMenu({ workspaceId, ...position });
+  }, []);
+
+  const findWorkspaceDragTarget = React.useCallback((clientX: number, clientY: number, draggedWorkspaceId?: string): WorkspaceDragTarget | null => {
+    if (typeof document === 'undefined' || typeof document.elementFromPoint !== 'function') {
+      return null;
+    }
+
+    const groupsRect = workspaceGroupsRef.current?.getBoundingClientRect();
+    if (
+      groupsRect &&
+      groupsRect.width > 0 &&
+      groupsRect.height > 0 &&
+      (clientX < groupsRect.left ||
+        clientX > groupsRect.right ||
+        clientY < groupsRect.top ||
+        clientY > groupsRect.bottom)
+    ) {
+      return null;
+    }
+
+    const findDropElementForWorkspace = (workspaceId: string): HTMLElement | null => {
+      return (
+        Array.from(document.querySelectorAll<HTMLElement>('[data-workspace-drop-target-id]')).find(
+          (candidate) => candidate.dataset.workspaceDropTargetId === workspaceId
+        ) ?? null
+      );
+    };
+
+    const element = document.elementFromPoint(clientX, clientY);
+    const workspaceElement = element?.closest('[data-workspace-id]') as HTMLElement | null;
+    const workspaceId = workspaceElement?.dataset.workspaceId;
+    if (workspaceId && workspaceId !== draggedWorkspaceId) {
+      return { element: findDropElementForWorkspace(workspaceId) ?? workspaceElement, workspaceId };
+    }
+
+    let nearestTarget: { element: HTMLElement; workspaceId: string; distance: number } | null = null;
+    for (const candidate of Array.from(document.querySelectorAll<HTMLElement>('[data-workspace-drop-target-id]'))) {
+      const candidateWorkspaceId = candidate.dataset.workspaceDropTargetId;
+      if (!candidateWorkspaceId || candidateWorkspaceId === draggedWorkspaceId) {
+        continue;
+      }
+
+      const rect = candidate.getBoundingClientRect();
+      const distance =
+        clientY < rect.top
+          ? rect.top - clientY
+          : clientY > rect.bottom
+            ? clientY - rect.bottom
+            : 0;
+      const maxDistance = Math.max(48, rect.height * 1.5);
+      if (distance > maxDistance) {
+        continue;
+      }
+      if (!nearestTarget || distance < nearestTarget.distance) {
+        nearestTarget = {
+          element: candidate,
+          workspaceId: candidateWorkspaceId,
+          distance
+        };
+      }
+    }
+
+    return nearestTarget ? { element: nearestTarget.element, workspaceId: nearestTarget.workspaceId } : null;
+  }, []);
+
+  const updateWorkspacePointerDrag = React.useCallback(
+    (clientX: number, clientY: number, draggedWorkspaceId: string) => {
+      const target = findWorkspaceDragTarget(clientX, clientY, draggedWorkspaceId);
+      if (!target || target.workspaceId === draggedWorkspaceId) {
+        if (workspaceDragSessionRef.current?.workspaceId === draggedWorkspaceId) {
+          workspaceDragSessionRef.current.overWorkspaceId = undefined;
+          workspaceDragSessionRef.current.dropPosition = undefined;
+        }
+        setWorkspaceDragState((current) =>
+          current?.draggedWorkspaceId === draggedWorkspaceId &&
+          current.overWorkspaceId === undefined &&
+          current.dropPosition === undefined
+            ? current
+            : { draggedWorkspaceId }
+        );
+        return;
+      }
+
+      const dropPosition = resolveWorkspaceDropPositionFromRect(
+        clientY,
+        target.element.getBoundingClientRect(),
+        workspaces,
+        draggedWorkspaceId,
+        target.workspaceId
+      );
+      if (workspaceDragSessionRef.current?.workspaceId === draggedWorkspaceId) {
+        workspaceDragSessionRef.current.overWorkspaceId = target.workspaceId;
+        workspaceDragSessionRef.current.dropPosition = dropPosition;
+      }
+      setWorkspaceDragState((current) =>
+        current?.draggedWorkspaceId === draggedWorkspaceId &&
+        current.overWorkspaceId === target.workspaceId &&
+        current.dropPosition === dropPosition
+          ? current
+          : {
+              draggedWorkspaceId,
+              overWorkspaceId: target.workspaceId,
+              dropPosition
+            }
+      );
+    },
+    [findWorkspaceDragTarget, workspaces]
+  );
+
+  const startWorkspacePointerDrag = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>, workspaceId: string) => {
+      if (event.isPrimary === false || (typeof event.button === 'number' && event.button > 0) || workspaces.length < 2) {
+        return;
+      }
+
+      const captureElement = event.currentTarget;
+      const pointerId = event.pointerId;
+      if (typeof captureElement.setPointerCapture === 'function') {
+        try {
+          captureElement.setPointerCapture(pointerId);
+        } catch {
+          // Pointer capture can fail if the pointer already ended; global listeners still handle the drag.
+        }
+      }
+      workspaceDragSessionRef.current?.cleanup();
+      let move: (moveEvent: PointerEvent) => void;
+      let finish: (finishEvent: PointerEvent) => void;
+      let cancel: () => void;
+      let onLostPointerCapture: (lostEvent: PointerEvent) => void;
+      let onVisibilityChange: () => void;
+      const cleanup = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', finish);
+        window.removeEventListener('pointercancel', cancel);
+        window.removeEventListener('blur', cancel);
+        captureElement.removeEventListener('lostpointercapture', onLostPointerCapture);
+        document.removeEventListener('mouseleave', cancel);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        if (
+          typeof captureElement.hasPointerCapture === 'function' &&
+          typeof captureElement.releasePointerCapture === 'function' &&
+          captureElement.hasPointerCapture(pointerId)
+        ) {
+          captureElement.releasePointerCapture(pointerId);
+        }
+      };
+      move = (moveEvent: PointerEvent) => {
+        const session = workspaceDragSessionRef.current;
+        if (!session || moveEvent.pointerId !== session.pointerId) {
+          return;
+        }
+
+        const movementX = moveEvent.clientX - session.startX;
+        const movementY = moveEvent.clientY - session.startY;
+        const movementDistance = Math.hypot(movementX, movementY);
+        if (!session.dragging) {
+          if (movementDistance < 5) {
+            return;
+          }
+          session.dragging = true;
+          suppressWorkspaceClickRef.current = true;
+          setContextMenu(null);
+          setWorkspaceContextMenu(null);
+          setNewThreadMenu(null);
+          setWorkspaceDragState({ draggedWorkspaceId: session.workspaceId });
+        }
+
+        moveEvent.preventDefault();
+        updateWorkspacePointerDrag(moveEvent.clientX, moveEvent.clientY, session.workspaceId);
+      };
+      finish = (finishEvent: PointerEvent) => {
+        const session = workspaceDragSessionRef.current;
+        if (!session || finishEvent.pointerId !== session.pointerId) {
+          return;
+        }
+
+        session.cleanup();
+        workspaceDragSessionRef.current = null;
+        if (!session.dragging) {
+          return;
+        }
+
+        finishEvent.preventDefault();
+        setWorkspaceDragState(null);
+        window.setTimeout(() => {
+          suppressWorkspaceClickRef.current = false;
+        }, 0);
+
+        const target = findWorkspaceDragTarget(finishEvent.clientX, finishEvent.clientY, session.workspaceId);
+        if (!target || target.workspaceId === session.workspaceId) {
+          return;
+        }
+
+        const dropPosition = resolveWorkspaceDropPositionFromRect(
+          finishEvent.clientY,
+          target.element.getBoundingClientRect(),
+          workspaces,
+          session.workspaceId,
+          target.workspaceId
+        );
+        const nextWorkspaceOrder = buildDraggedWorkspaceIds(
+          workspaces,
+          session.workspaceId,
+          target.workspaceId,
+          dropPosition
+        );
+        if (!nextWorkspaceOrder) {
+          return;
+        }
+        void onReorderWorkspaces(nextWorkspaceOrder);
+      };
+      cancel = () => {
+        workspaceDragSessionRef.current?.cleanup();
+        workspaceDragSessionRef.current = null;
+        suppressWorkspaceClickRef.current = false;
+        setWorkspaceDragState(null);
+      };
+      onLostPointerCapture = (lostEvent: PointerEvent) => {
+        if (lostEvent.pointerId === pointerId) {
+          cancel();
+        }
+      };
+      onVisibilityChange = () => {
+        if (document.visibilityState === 'hidden') {
+          cancel();
+        }
+      };
+
+      workspaceDragSessionRef.current = {
+        workspaceId,
+        pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dragging: false,
+        cleanup
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', finish);
+      window.addEventListener('pointercancel', cancel);
+      window.addEventListener('blur', cancel);
+      captureElement.addEventListener('lostpointercapture', onLostPointerCapture);
+      document.addEventListener('mouseleave', cancel);
+      document.addEventListener('visibilitychange', onVisibilityChange);
+    },
+    [findWorkspaceDragTarget, onReorderWorkspaces, updateWorkspacePointerDrag, workspaces]
+  );
+
+  const keyboardReorderWorkspace = React.useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>, workspaceId: string) => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      const currentIndex = workspaces.findIndex((workspace) => workspace.id === workspaceId);
+      if (currentIndex < 0) {
+        return;
+      }
+
+      const targetIndex = event.key === 'ArrowUp' ? currentIndex - 1 : currentIndex + 1;
+      const targetWorkspace = workspaces[targetIndex];
+      if (!targetWorkspace) {
+        return;
+      }
+
+      const nextWorkspaceOrder = buildDraggedWorkspaceIds(
+        workspaces,
+        workspaceId,
+        targetWorkspace.id,
+        event.key === 'ArrowUp' ? 'before' : 'after'
+      );
+      if (!nextWorkspaceOrder) {
+        return;
+      }
+      void onReorderWorkspaces(nextWorkspaceOrder);
+    },
+    [onReorderWorkspaces, workspaces]
+  );
+
+  const cancelWorkspacePointerDrag = React.useCallback(() => {
+    workspaceDragSessionRef.current?.cleanup();
+    workspaceDragSessionRef.current = null;
+    suppressWorkspaceClickRef.current = false;
+    setWorkspaceDragState(null);
   }, []);
 
   const contextThreadWorkspace = contextMenu
@@ -772,8 +1114,8 @@ function LeftRailComponent({
       </div>
 
       <div className="thread-groups">
-        <ul className="workspace-groups">
-          {workspaces.map((workspace, workspaceIndex) => {
+        <ul className="workspace-groups" ref={workspaceGroupsRef}>
+          {workspaces.map((workspace) => {
             const isSelectedWorkspace = workspace.id === selectedWorkspaceId;
             const isExpanded = expandedWorkspaceIds[workspace.id] !== false;
             const isRemoteWorkspace = isRemoteWorkspaceKind(workspace.kind);
@@ -795,26 +1137,61 @@ function LeftRailComponent({
                 className={
                   [
                     'workspace-group',
-                    isSelectedWorkspace ? 'selected' : ''
+                    isSelectedWorkspace ? 'selected' : '',
+                    workspaceDragState?.draggedWorkspaceId === workspace.id ? 'dragging' : '',
+                    workspaceDragState?.overWorkspaceId === workspace.id && workspaceDragState.dropPosition
+                      ? `drag-over-${workspaceDragState.dropPosition}`
+                      : ''
                   ]
                     .filter(Boolean)
                     .join(' ')
                 }
                 data-expanded={isExpanded ? 'true' : 'false'}
+                data-workspace-id={workspace.id}
               >
                 <div className="workspace-group-container">
                   <div className="workspace-group-row">
+                    {workspaces.length > 1 ? (
+                      <button
+                        type="button"
+                        className="workspace-drag-button"
+                        aria-label="Reorder project"
+                        aria-describedby={`workspace-name-${workspace.id}`}
+                        aria-keyshortcuts="ArrowUp ArrowDown"
+                        title={`Drag ${workspace.name} to reorder, or use arrow keys`}
+                        data-testid={`workspace-drag-${workspace.id}`}
+                        onPointerDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          startWorkspacePointerDrag(event, workspace.id);
+                        }}
+                        onKeyDown={(event) => keyboardReorderWorkspace(event, workspace.id)}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
+                      >
+                        <GripIcon />
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="workspace-group-button"
+                      data-workspace-drop-target-id={workspace.id}
                       onClick={() => {
+                        if (suppressWorkspaceClickRef.current) {
+                          suppressWorkspaceClickRef.current = false;
+                          return;
+                        }
                         setExpandedWorkspaceIds((current) => ({
                           ...current,
                           [workspace.id]: !(current[workspace.id] ?? true)
                         }));
                       }}
+                      onPointerDown={(event) => startWorkspacePointerDrag(event, workspace.id)}
                       onContextMenu={(event) => {
                         event.preventDefault();
+                        cancelWorkspacePointerDrag();
                         const { x, y } = clampMenuCoordinate(
                           event.clientX,
                           event.clientY,
@@ -856,7 +1233,7 @@ function LeftRailComponent({
                         <span className="workspace-folder-icon" aria-hidden="true">
                           <FolderIcon />
                         </span>
-                        <span className="workspace-group-name">{workspace.name}</span>
+                        <span className="workspace-group-name" id={`workspace-name-${workspace.id}`}>{workspace.name}</span>
                         {isRemoteWorkspace ? <span className="workspace-kind-tag">{workspace.kind}</span> : null}
                         {gitPullEnabled ? (
                           <span
@@ -870,48 +1247,6 @@ function LeftRailComponent({
                       </span>
                     </button>
                     <span className="workspace-group-actions">
-                      {workspaceIndex > 0 ? (
-                        <button
-                          type="button"
-                          className="workspace-action-button workspace-order-button"
-                          aria-label="Move project up"
-                          title="Move project up"
-                          data-testid={`workspace-move-up-${workspace.id}`}
-                          tabIndex={-1}
-                          onClick={async (event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            const nextWorkspaceOrder = buildShiftedWorkspaceIds(workspaces, workspace.id, -1);
-                            if (!nextWorkspaceOrder) {
-                              return;
-                            }
-                            await onReorderWorkspaces(nextWorkspaceOrder);
-                          }}
-                        >
-                          <ArrowUpIcon />
-                        </button>
-                      ) : null}
-                      {workspaceIndex < workspaces.length - 1 ? (
-                        <button
-                          type="button"
-                          className="workspace-action-button workspace-order-button"
-                          aria-label="Move project down"
-                          title="Move project down"
-                          data-testid={`workspace-move-down-${workspace.id}`}
-                          tabIndex={-1}
-                          onClick={async (event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            const nextWorkspaceOrder = buildShiftedWorkspaceIds(workspaces, workspace.id, 1);
-                            if (!nextWorkspaceOrder) {
-                              return;
-                            }
-                            await onReorderWorkspaces(nextWorkspaceOrder);
-                          }}
-                        >
-                          <ArrowDownIcon />
-                        </button>
-                      ) : null}
                       <button
                         type="button"
                         className="workspace-action-button"
