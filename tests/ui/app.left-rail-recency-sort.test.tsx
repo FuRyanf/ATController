@@ -961,6 +961,52 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
+  it('clears the working dot when a turn completion has no JSONL attention context', async () => {
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: 'new',
+        resumeSessionId: null,
+        turnCompletionMode: 'jsonl',
+        thread: mocks.getThread(params.threadId)
+      }));
+
+      const user = userEvent.setup();
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+      });
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: false,
+          completedAtMs: Date.now(),
+          completionIndex: null
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+      });
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+    }
+  });
+
   it('does not duplicate completion attention or notifications when reconciliation is followed by the same completion event', async () => {
     window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-older');
     window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');

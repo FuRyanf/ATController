@@ -125,8 +125,29 @@ fn has_repository_operation_in_progress(workspace_path: &str) -> Result<bool> {
         return Ok(false);
     };
 
-    let markers = ["MERGE_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply"];
-    Ok(markers
+    let head_markers = [
+        "MERGE_HEAD",
+        "REBASE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+    ];
+    if head_markers
+        .iter()
+        .any(|marker| fs::metadata(git_dir.join(marker)).is_ok())
+    {
+        return Ok(true);
+    }
+
+    let rebase_markers = [
+        "rebase-merge/head-name",
+        "rebase-merge/onto",
+        "rebase-merge/msgnum",
+        "rebase-apply/head-name",
+        "rebase-apply/onto",
+        "rebase-apply/rebasing",
+        "rebase-apply/applying",
+    ];
+    Ok(rebase_markers
         .iter()
         .any(|marker| fs::metadata(git_dir.join(marker)).is_ok()))
 }
@@ -148,6 +169,106 @@ fn has_upstream(workspace_path: &str) -> Result<bool> {
         ],
     )?;
     Ok(!upstream.trim().is_empty())
+}
+
+fn local_branch_exists(workspace_path: &str, branch_name: &str) -> Result<bool> {
+    let ref_name = format!("refs/heads/{branch_name}");
+    run_git_success(
+        workspace_path,
+        &["show-ref", "--verify", "--quiet", &ref_name],
+    )
+}
+
+fn remote_tracking_branch_exists(workspace_path: &str, remote_branch: &str) -> Result<bool> {
+    let ref_name = format!("refs/remotes/{remote_branch}");
+    run_git_success(
+        workspace_path,
+        &["show-ref", "--verify", "--quiet", &ref_name],
+    )
+}
+
+fn branch_from_remote_head(remote_head: &str, remote_name: &str) -> Option<String> {
+    let trimmed = remote_head.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let remote_prefix = format!("{remote_name}/");
+    trimmed
+        .strip_prefix(&remote_prefix)
+        .filter(|branch| !branch.trim().is_empty())
+        .map(|branch| branch.to_string())
+}
+
+fn origin_default_branch(workspace_path: &str) -> Result<Option<String>> {
+    let remote_head = run_git(
+        workspace_path,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )?;
+    let Some(branch) = branch_from_remote_head(&remote_head, "origin") else {
+        return Ok(None);
+    };
+
+    let normalized = validate_branch_name(&branch)?;
+    run_git_checked(
+        workspace_path,
+        &["check-ref-format", "--branch", normalized],
+    )?;
+    Ok(Some(normalized.to_string()))
+}
+
+fn default_pull_branch(workspace_path: &str) -> Result<Option<String>> {
+    if let Some(branch) = origin_default_branch(workspace_path)? {
+        return Ok(Some(branch));
+    }
+
+    for branch in ["master", "main"] {
+        let remote_branch = format!("origin/{branch}");
+        if local_branch_exists(workspace_path, branch)?
+            || remote_tracking_branch_exists(workspace_path, &remote_branch)?
+        {
+            return Ok(Some(branch.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
+fn checkout_pull_branch(workspace_path: &str, branch_name: &str) -> Result<()> {
+    let normalized = validate_branch_name(branch_name)?;
+    run_git_checked(
+        workspace_path,
+        &["check-ref-format", "--branch", normalized],
+    )?;
+
+    let current_branch = run_git_checked(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if current_branch == normalized {
+        return Ok(());
+    }
+
+    if let Err(error) = run_git_checked(workspace_path, &["checkout", normalized]) {
+        if local_branch_exists(workspace_path, normalized)? {
+            return Err(error);
+        }
+
+        let remote_branch = format!("origin/{normalized}");
+        if remote_tracking_branch_exists(workspace_path, &remote_branch)? {
+            run_git_checked(
+                workspace_path,
+                &["checkout", "--track", "-b", normalized, &remote_branch],
+            )
+            .map(|_| ())
+        } else {
+            Err(error)
+        }
+    } else {
+        Ok(())
+    }
 }
 
 fn normalize_path_for_compare(path: &Path) -> PathBuf {
@@ -456,8 +577,12 @@ pub fn auto_pull_on_master(workspace_path: &str) -> Result<bool> {
         return Ok(false);
     }
 
+    let Some(default_branch) = default_pull_branch(workspace_path)? else {
+        return Ok(false);
+    };
+
     let branch = run_git(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    if branch != "master" {
+    if branch != default_branch {
         return Ok(false);
     }
 
@@ -501,20 +626,24 @@ pub fn git_pull_master_for_new_thread(workspace_path: &str) -> Result<GitPullFor
         });
     }
 
-    let branch = run_git_checked(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    if branch != "master" {
-        if let Err(error) = run_git_checked(workspace_path, &["checkout", "master"]) {
-            return Ok(GitPullForNewThreadResult {
-                outcome: "failed".to_string(),
-                message: format!("Git checkout failed: {error}"),
-            });
-        }
+    let Some(pull_branch) = default_pull_branch(workspace_path)? else {
+        return Ok(GitPullForNewThreadResult {
+            outcome: "skipped".to_string(),
+            message: "Skipped git pull: no default branch found to pull.".to_string(),
+        });
+    };
+
+    if let Err(error) = checkout_pull_branch(workspace_path, &pull_branch) {
+        return Ok(GitPullForNewThreadResult {
+            outcome: "failed".to_string(),
+            message: format!("Git checkout failed: {error}"),
+        });
     }
 
     if !has_upstream(workspace_path)? {
         return Ok(GitPullForNewThreadResult {
             outcome: "skipped".to_string(),
-            message: "Skipped git pull: master has no upstream tracking branch.".to_string(),
+            message: format!("Skipped git pull: {pull_branch} has no upstream tracking branch."),
         });
     }
 
@@ -531,12 +660,12 @@ pub fn git_pull_master_for_new_thread(workspace_path: &str) -> Result<GitPullFor
     let message = match after_pull_commit {
         Some(commit) => {
             if before_pull_commit.as_deref() == Some(commit.as_str()) {
-                format!("Master already up to date at commit {commit}.")
+                format!("{pull_branch} already up to date at commit {commit}.")
             } else {
-                format!("Checked out master and pulled latest changes to commit {commit}.")
+                format!("Checked out {pull_branch} and pulled latest changes to commit {commit}.")
             }
         }
-        None => "Checked out master and pulled latest changes.".to_string(),
+        None => format!("Checked out {pull_branch} and pulled latest changes."),
     };
 
     Ok(GitPullForNewThreadResult {
@@ -572,6 +701,11 @@ mod tests {
             .status()
             .expect("git command should execute");
         assert!(status.success(), "git {:?} failed", args);
+    }
+
+    fn configure_test_author(workdir: &Path) {
+        git(workdir, &["config", "user.email", "test@example.com"]);
+        git(workdir, &["config", "user.name", "ATController Test"]);
     }
 
     #[test]
@@ -638,6 +772,37 @@ mod tests {
     }
 
     #[test]
+    fn repository_operation_detection_ignores_empty_stale_rebase_directories() {
+        let temp_repo =
+            std::env::temp_dir().join(format!("atcontroller-git-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
+
+        git(&temp_repo, &["init"]);
+        let git_dir = resolve_git_dir(temp_repo.to_string_lossy().as_ref())
+            .expect("git dir should resolve")
+            .expect("git dir should exist");
+
+        fs::create_dir_all(git_dir.join("rebase-merge"))
+            .expect("failed to create stale rebase dir");
+        assert!(
+            !has_repository_operation_in_progress(temp_repo.to_string_lossy().as_ref())
+                .expect("operation state should resolve")
+        );
+
+        fs::write(
+            git_dir.join("rebase-merge").join("head-name"),
+            "refs/heads/main\n",
+        )
+        .expect("failed to write active rebase marker");
+        assert!(
+            has_repository_operation_in_progress(temp_repo.to_string_lossy().as_ref())
+                .expect("operation state should resolve")
+        );
+
+        let _ = fs::remove_dir_all(temp_repo);
+    }
+
+    #[test]
     fn parses_ahead_behind_counts() {
         assert_eq!(parse_ahead_behind("3\t2"), (3, 2));
         assert_eq!(parse_ahead_behind(""), (0, 0));
@@ -659,8 +824,7 @@ mod tests {
         fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
 
         git(&temp_repo, &["init"]);
-        git(&temp_repo, &["config", "user.email", "test@example.com"]);
-        git(&temp_repo, &["config", "user.name", "ATController Test"]);
+        configure_test_author(&temp_repo);
         fs::write(temp_repo.join("README.md"), "initial\n").expect("failed to write file");
         git(&temp_repo, &["add", "README.md"]);
         git(&temp_repo, &["commit", "-m", "initial"]);
@@ -671,6 +835,73 @@ mod tests {
         assert!(!pulled);
 
         let _ = fs::remove_dir_all(temp_repo);
+    }
+
+    #[test]
+    fn git_pull_for_new_thread_uses_origin_default_branch_when_it_is_main() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-git-pull-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let seed_repo = temp_root.join("seed");
+        let origin_repo = temp_root.join("origin.git");
+        let workspace_repo = temp_root.join("workspace");
+        fs::create_dir_all(&seed_repo).expect("failed to create seed repo");
+
+        git(&seed_repo, &["init"]);
+        configure_test_author(&seed_repo);
+        fs::write(seed_repo.join("README.md"), "initial\n").expect("failed to write seed file");
+        git(&seed_repo, &["add", "README.md"]);
+        git(&seed_repo, &["commit", "-m", "initial"]);
+        git(&seed_repo, &["branch", "-M", "main"]);
+
+        fs::create_dir_all(&origin_repo).expect("failed to create origin repo");
+        git(&origin_repo, &["init", "--bare"]);
+        git(&origin_repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        let origin_path = origin_repo.to_string_lossy().to_string();
+        git(&seed_repo, &["remote", "add", "origin", &origin_path]);
+        git(&seed_repo, &["push", "-u", "origin", "main"]);
+
+        git(
+            &temp_root,
+            &[
+                "clone",
+                &origin_path,
+                workspace_repo.to_string_lossy().as_ref(),
+            ],
+        );
+        configure_test_author(&workspace_repo);
+        git(&workspace_repo, &["checkout", "-b", "feature/test"]);
+
+        fs::write(seed_repo.join("README.md"), "updated\n").expect("failed to update seed file");
+        git(&seed_repo, &["add", "README.md"]);
+        git(&seed_repo, &["commit", "-m", "update main"]);
+        git(&seed_repo, &["push", "origin", "main"]);
+
+        let result = git_pull_master_for_new_thread(workspace_repo.to_string_lossy().as_ref())
+            .expect("git pull pre-step should run");
+
+        assert_eq!(result.outcome, "pulled");
+        assert!(
+            result.message.contains("main"),
+            "message should name the pulled default branch: {}",
+            result.message
+        );
+        assert_eq!(
+            run_git_checked(
+                workspace_repo.to_string_lossy().as_ref(),
+                &["rev-parse", "--abbrev-ref", "HEAD"]
+            )
+            .expect("branch should resolve"),
+            "main"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace_repo.join("README.md"))
+                .expect("workspace README should be readable"),
+            "updated\n"
+        );
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]

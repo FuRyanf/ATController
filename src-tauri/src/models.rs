@@ -121,6 +121,14 @@ pub enum AppearanceMode {
     Dark,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ClaudePermissionMode {
+    #[default]
+    FullAccess,
+    AutoMode,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -128,6 +136,8 @@ pub struct Settings {
     pub claude_cli_path: Option<String>,
     #[serde(default)]
     pub appearance_mode: AppearanceMode,
+    #[serde(default)]
+    pub claude_permission_mode: ClaudePermissionMode,
     #[serde(default)]
     pub default_new_thread_full_access: bool,
     #[serde(default)]
@@ -141,6 +151,7 @@ impl Default for Settings {
         Self {
             claude_cli_path: None,
             appearance_mode: AppearanceMode::System,
+            claude_permission_mode: ClaudePermissionMode::FullAccess,
             default_new_thread_full_access: false,
             task_completion_alerts: false,
             terminal_scrollback_lines: TERMINAL_SCROLLBACK_LINES_DEFAULT,
@@ -428,7 +439,7 @@ pub struct RunMetadata {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_terminal_scrollback_lines, AppearanceMode, Settings,
+        normalize_terminal_scrollback_lines, AppearanceMode, ClaudePermissionMode, Settings,
         TERMINAL_SCROLLBACK_LINES_DEFAULT, TERMINAL_SCROLLBACK_LINES_MAX,
         TERMINAL_SCROLLBACK_LINES_MIN,
     };
@@ -438,6 +449,10 @@ mod tests {
         let settings = Settings::default();
 
         assert_eq!(settings.appearance_mode, AppearanceMode::System);
+        assert_eq!(
+            settings.claude_permission_mode,
+            ClaudePermissionMode::FullAccess
+        );
         assert!(!settings.default_new_thread_full_access);
         assert_eq!(
             settings.terminal_scrollback_lines,
@@ -450,6 +465,10 @@ mod tests {
         let settings: Settings = serde_json::from_str("{}").expect("settings should deserialize");
 
         assert_eq!(settings.appearance_mode, AppearanceMode::System);
+        assert_eq!(
+            settings.claude_permission_mode,
+            ClaudePermissionMode::FullAccess
+        );
         assert!(!settings.default_new_thread_full_access);
         assert_eq!(
             settings.terminal_scrollback_lines,

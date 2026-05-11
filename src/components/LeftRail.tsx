@@ -10,6 +10,7 @@ interface LeftRailProps {
   selectedThreadId?: string;
   threadSearch: string;
   defaultNewThreadFullAccess?: boolean;
+  elevatedAccessLabel?: string;
   creatingThreadByWorkspace?: Record<string, boolean>;
   isThreadWorking?: (threadId: string) => boolean;
   unreadCompletedTurnByThread?: Record<string, true>;
@@ -454,6 +455,7 @@ function LeftRailComponent({
   selectedThreadId,
   threadSearch,
   defaultNewThreadFullAccess = false,
+  elevatedAccessLabel = 'Full access',
   creatingThreadByWorkspace = {},
   isThreadWorking,
   unreadCompletedTurnByThread = {},
@@ -483,6 +485,7 @@ function LeftRailComponent({
   const [workspaceContextMenu, setWorkspaceContextMenu] = React.useState<WorkspaceContextMenuState | null>(null);
   const [newThreadMenu, setNewThreadMenu] = React.useState<NewThreadMenuState | null>(null);
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
+  const elevatedAccessLabelLower = elevatedAccessLabel.toLowerCase();
   const [workspaceDragState, setWorkspaceDragState] = React.useState<WorkspaceDragState | null>(null);
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
@@ -1008,8 +1011,8 @@ function LeftRailComponent({
                     }}
                   >
                     {workspaceContextMenu.workspace.gitPullOnMasterForNewThreads
-                      ? 'Disable git pull on master for new threads'
-                      : 'Enable git pull on master for new threads'}
+                      ? 'Disable git pull on default branch for new threads'
+                      : 'Enable git pull on default branch for new threads'}
                   </button>
                 ) : null}
                 <button
@@ -1061,7 +1064,7 @@ function LeftRailComponent({
                     await onNewThreadInWorkspace(workspaceId, { fullAccess: true });
                   }}
                 >
-                  Full access thread
+                  {elevatedAccessLabel} thread
                 </button>
               </div>
             ) : null}
@@ -1238,10 +1241,10 @@ function LeftRailComponent({
                         {gitPullEnabled ? (
                           <span
                             className="workspace-git-pull-label"
-                            title="Upon new threads, master is checked out and pulled automatically."
-                            aria-label="master pull enabled for new threads"
+                            title="Upon new threads, the default branch is checked out and pulled automatically."
+                            aria-label="default branch pull enabled for new threads"
                           >
-                            master pull enabled
+                            default branch pull enabled
                           </span>
                         ) : null}
                       </span>
@@ -1296,7 +1299,7 @@ function LeftRailComponent({
                           <span className="workspace-new-thread-icon" aria-hidden="true">
                             <PlusIcon />
                           </span>
-                          <span>{defaultNewThreadFullAccess ? 'New full access thread' : 'New thread'}</span>
+                          <span>{defaultNewThreadFullAccess ? `New ${elevatedAccessLabelLower} thread` : 'New thread'}</span>
                         </button>
                         <button
                           type="button"

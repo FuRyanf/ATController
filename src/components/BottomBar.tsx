@@ -17,6 +17,7 @@ interface BottomBarProps {
   attachmentsEnabled: boolean;
   fullAccessUpdating?: boolean;
   fullAccessToggleBlockedReason?: string | null;
+  elevatedAccessLabel?: string;
   gitInfo: GitInfo | null;
   onPickAttachments: () => Promise<void>;
   onAddAttachmentPaths: (paths: string[]) => boolean;
@@ -246,6 +247,7 @@ export function BottomBar({
   attachmentsEnabled,
   fullAccessUpdating = false,
   fullAccessToggleBlockedReason = null,
+  elevatedAccessLabel = 'Full access',
   gitInfo,
   onPickAttachments,
   onAddAttachmentPaths,
@@ -752,7 +754,7 @@ export function BottomBar({
             .filter(Boolean)
             .join(' ')}
           data-testid="full-access-toggle"
-          aria-label="Toggle full access"
+          aria-label={`Toggle ${elevatedAccessLabel}`}
           aria-pressed={selectedThread?.fullAccess ?? false}
           aria-disabled={fullAccessToggleBlocked || undefined}
           disabled={!selectedThread || fullAccessUpdating}
@@ -764,7 +766,7 @@ export function BottomBar({
           }}
           title={
             fullAccessToggleBlockedReason ??
-            (!selectedThread ? 'Select a thread' : selectedThread.fullAccess ? 'Disable full access' : 'Enable full access')
+            (!selectedThread ? 'Select a thread' : selectedThread.fullAccess ? `Disable ${elevatedAccessLabel}` : `Enable ${elevatedAccessLabel}`)
           }
         >
           <span className="full-access-icon" aria-hidden="true">
@@ -779,7 +781,7 @@ export function BottomBar({
               />
             </svg>
           </span>
-          <span className="full-access-label">{fullAccessUpdating ? 'Updating...' : 'Full access'}</span>
+          <span className="full-access-label">{fullAccessUpdating ? 'Updating...' : elevatedAccessLabel}</span>
           <span className="full-access-chevron" aria-hidden="true">
             <svg viewBox="0 0 24 24">
               <path d="M7 10.5 12 15l5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" />

@@ -726,6 +726,34 @@ describe('Terminal launch flags', () => {
     });
   });
 
+  it('uses auto mode labels and resume flags when selected in settings', async () => {
+    mocks.api.getSettings.mockResolvedValueOnce({
+      claudeCliPath: '/usr/local/bin/claude',
+      claudePermissionMode: 'autoMode',
+      defaultNewThreadFullAccess: true
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Full Access Thread/i });
+    expect(screen.getByTestId('full-access-toggle')).toHaveTextContent('Auto mode');
+    expect(screen.getByTestId('workspace-new-thread-ws-1')).toHaveTextContent('New auto mode thread');
+
+    await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
+    expect(await screen.findByRole('button', { name: 'Auto mode thread' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Copy resume command' }));
+
+    await waitFor(() => {
+      expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith(
+        "claude --resume '123e4567-e89b-12d3-a456-426614174000' --permission-mode auto"
+      );
+    });
+  });
+
   it('does not offer local Terminal resume for remote threads', async () => {
     mocks.setWorkspaceKind('ssh');
     const user = userEvent.setup();
@@ -845,6 +873,7 @@ describe('Terminal launch flags', () => {
       expect(mocks.api.saveSettings).toHaveBeenCalledWith({
         claudeCliPath: '/usr/local/bin/claude',
         appearanceMode: 'system',
+        claudePermissionMode: 'fullAccess',
         defaultNewThreadFullAccess: true,
         taskCompletionAlerts: false,
         terminalScrollbackLines: 100_000
@@ -881,6 +910,7 @@ describe('Terminal launch flags', () => {
       expect(mocks.api.saveSettings).toHaveBeenCalledWith({
         claudeCliPath: '/usr/local/bin/claude',
         appearanceMode: 'system',
+        claudePermissionMode: 'fullAccess',
         defaultNewThreadFullAccess: false,
         taskCompletionAlerts: true,
         terminalScrollbackLines: 100_000

@@ -17,6 +17,7 @@ describe('SettingsModal', () => {
         open
         initialCliPath="/usr/local/bin/claude"
         initialAppearanceMode="system"
+        initialClaudePermissionMode="fullAccess"
         initialDefaultNewThreadFullAccess={false}
         initialTaskCompletionAlerts={true}
         initialTerminalScrollbackLines={100_000}
@@ -35,8 +36,9 @@ describe('SettingsModal', () => {
     expect(onSendTestAlert).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole('radio', { name: 'Dark' }));
+    await user.click(screen.getByRole('radio', { name: 'Auto mode' }));
     await user.click(screen.getByRole('button', { name: 'Use detected path' }));
-    await user.click(screen.getByRole('switch', { name: /Start new threads with Full access/i }));
+    await user.click(screen.getByRole('switch', { name: /Start new threads with Auto mode/i }));
     await user.click(screen.getByRole('switch', { name: /Task completion alerts/i }));
     await user.clear(screen.getByRole('spinbutton', { name: /Scrollback lines/i }));
     await user.type(screen.getByRole('spinbutton', { name: /Scrollback lines/i }), '300000');
@@ -45,6 +47,7 @@ describe('SettingsModal', () => {
     expect(onSave).toHaveBeenCalledWith({
       cliPath: '/opt/homebrew/bin/claude',
       appearanceMode: 'dark',
+      claudePermissionMode: 'autoMode',
       defaultNewThreadFullAccess: true,
       taskCompletionAlerts: false,
       terminalScrollbackLines: 250_000

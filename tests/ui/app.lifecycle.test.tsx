@@ -1097,16 +1097,16 @@ describe('Thread lifecycle integration', () => {
 
     const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
     await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Enable git pull on master for new threads' }));
+    await user.click(await screen.findByRole('button', { name: 'Enable git pull on default branch for new threads' }));
 
     await waitFor(() => {
       expect(mocks.api.setWorkspaceGitPullOnMasterForNewThreads).toHaveBeenCalledWith('ws-1', true);
     });
 
-    const indicator = screen.getByText('master pull enabled');
+    const indicator = screen.getByText('default branch pull enabled');
     expect(indicator).toHaveAttribute(
       'title',
-      'Upon new threads, master is checked out and pulled automatically.'
+      'Upon new threads, the default branch is checked out and pulled automatically.'
     );
 
     await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
@@ -1126,19 +1126,19 @@ describe('Thread lifecycle integration', () => {
     const user = userEvent.setup();
     mocks.api.gitPullMasterForNewThread.mockResolvedValueOnce({
       outcome: 'pulled',
-      message: 'Checked out master and pulled latest changes to commit 4befdb3.'
+      message: 'Checked out main and pulled latest changes to commit 4befdb3.'
     });
     render(<App />);
 
     const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
     await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Enable git pull on master for new threads' }));
+    await user.click(await screen.findByRole('button', { name: 'Enable git pull on default branch for new threads' }));
     await waitFor(() => {
       expect(mocks.api.setWorkspaceGitPullOnMasterForNewThreads).toHaveBeenCalledWith('ws-1', true);
     });
 
     await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
-    expect(await screen.findByText('Checked out master and pulled latest changes to commit 4befdb3.')).toBeInTheDocument();
+    expect(await screen.findByText('Checked out main and pulled latest changes to commit 4befdb3.')).toBeInTheDocument();
   });
 
   it('uses the toggled pull setting immediately when creating a thread before setting persistence resolves', async () => {
@@ -1164,7 +1164,7 @@ describe('Thread lifecycle integration', () => {
 
     const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
     await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Enable git pull on master for new threads' }));
+    await user.click(await screen.findByRole('button', { name: 'Enable git pull on default branch for new threads' }));
 
     await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
     await waitFor(() => {
@@ -1188,7 +1188,7 @@ describe('Thread lifecycle integration', () => {
 
     const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
     await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Enable git pull on master for new threads' }));
+    await user.click(await screen.findByRole('button', { name: 'Enable git pull on default branch for new threads' }));
     await waitFor(() => {
       expect(mocks.api.setWorkspaceGitPullOnMasterForNewThreads).toHaveBeenCalledWith('ws-1', true);
     });

@@ -89,8 +89,10 @@ import { isRemoteWorkspaceKind } from './lib/workspaceKind';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
 import {
+  normalizeClaudePermissionMode,
   normalizeTerminalScrollbackLines,
   type AppearanceMode,
+  type ClaudePermissionMode,
   type AppUpdateInfo,
   type ClaudeTurnCompletionSummary,
   type CreateThreadOptions,
@@ -121,6 +123,7 @@ const CLAUDE_FULL_ACCESS_ARGS = [
   '--permission-mode',
   'bypassPermissions'
 ] as const;
+const CLAUDE_AUTO_MODE_ARGS = ['--permission-mode', 'auto'] as const;
 
 const { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } = apiModule;
 const onTerminalSshAuthStatus =
@@ -178,17 +181,28 @@ const MAX_PENDING_TERMINAL_DATA_SESSIONS = 64;
 const MAX_PENDING_TERMINAL_DATA_EVENTS_PER_SESSION = 64;
 const MAX_PENDING_TERMINAL_DATA_CHARS_PER_SESSION = 256_000;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
-const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
-  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Full access thread, or enable full access by default in Settings.';
+function remoteAccessStartupBlockReason(accessLabel: string): string {
+  const lowerLabel = accessLabel.toLowerCase();
+  return `Send a message first to establish the session, then toggle ${accessLabel}. To start with ${accessLabel}, use New thread options and choose ${accessLabel} thread, or enable ${lowerLabel} by default in Settings.`;
+}
 
 function normalizeSettings(settings?: Settings | null): Settings {
   return {
     claudeCliPath: settings?.claudeCliPath ?? null,
     appearanceMode: normalizeAppearanceMode(settings?.appearanceMode),
+    claudePermissionMode: normalizeClaudePermissionMode(settings?.claudePermissionMode),
     defaultNewThreadFullAccess: settings?.defaultNewThreadFullAccess === true,
     taskCompletionAlerts: settings?.taskCompletionAlerts === true,
     terminalScrollbackLines: normalizeTerminalScrollbackLines(settings?.terminalScrollbackLines)
   };
+}
+
+function claudePermissionArgs(mode?: ClaudePermissionMode | null): readonly string[] {
+  return normalizeClaudePermissionMode(mode) === 'autoMode' ? CLAUDE_AUTO_MODE_ARGS : CLAUDE_FULL_ACCESS_ARGS;
+}
+
+function elevatedAccessLabel(mode?: ClaudePermissionMode | null): string {
+  return normalizeClaudePermissionMode(mode) === 'autoMode' ? 'Auto mode' : 'Full access';
 }
 
 interface PendingSessionStart {
@@ -803,7 +817,11 @@ function isUuidLike(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
-function buildClaudeInPlaceRestartCommand(sessionId: string, fullAccess: boolean): string {
+function buildClaudeInPlaceRestartCommand(
+  sessionId: string,
+  fullAccess: boolean,
+  permissionMode?: ClaudePermissionMode | null
+): string {
   const parts = [
     'exec',
     'env',
@@ -818,7 +836,7 @@ function buildClaudeInPlaceRestartCommand(sessionId: string, fullAccess: boolean
     `'${sessionId}'`
   ];
   if (fullAccess) {
-    parts.push(...CLAUDE_FULL_ACCESS_ARGS);
+    parts.push(...claudePermissionArgs(permissionMode));
   }
   return parts.join(' ');
 }
@@ -827,24 +845,29 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function buildClaudeResumeCommand(sessionId: string, fullAccess: boolean): string {
+function buildClaudeResumeCommand(
+  sessionId: string,
+  fullAccess: boolean,
+  permissionMode?: ClaudePermissionMode | null
+): string {
   const parts = ['claude', '--resume', shellQuote(sessionId)];
   if (fullAccess) {
-    parts.push(...CLAUDE_FULL_ACCESS_ARGS);
+    parts.push(...claudePermissionArgs(permissionMode));
   }
   return parts.join(' ');
 }
 
 function buildClaudeResumeTerminalCommand(
   thread: Pick<ThreadMetadata, 'claudeSessionId' | 'fullAccess'>,
-  cwd?: string | null
+  cwd?: string | null,
+  permissionMode?: ClaudePermissionMode | null
 ): string | null {
   const sessionId = thread.claudeSessionId?.trim();
   if (!sessionId) {
     return null;
   }
 
-  const command = buildClaudeResumeCommand(sessionId, thread.fullAccess);
+  const command = buildClaudeResumeCommand(sessionId, thread.fullAccess, permissionMode);
   const workingDirectory = cwd?.trim() ?? '';
   if (!workingDirectory) {
     return command;
@@ -1442,11 +1465,13 @@ export default function App() {
     normalizeSettings({
       claudeCliPath: null,
       appearanceMode: readStoredAppearanceMode(),
+      claudePermissionMode: 'fullAccess',
       defaultNewThreadFullAccess: false,
       taskCompletionAlerts: false,
       terminalScrollbackLines: undefined
     })
   );
+  const claudeAccessModeLabel = elevatedAccessLabel(settings.claudePermissionMode);
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
@@ -1755,7 +1780,7 @@ export default function App() {
     selectedWorkspace &&
     isRemoteWorkspaceKind(selectedWorkspace.kind) &&
     (isSelectedThreadStarting || !hasInteractedForSelectedThread)
-      ? REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON
+      ? remoteAccessStartupBlockReason(claudeAccessModeLabel)
       : null;
 
   const selectedTerminalStream = useMemo(() => {
@@ -3818,7 +3843,16 @@ export default function App() {
                 delete allowFreshStartAfterForkFailureByThreadRef.current[updatedThread.id];
 
                 if (activeSessionId) {
+                  const activeSessionMeta = sessionMetaBySessionIdRef.current[activeSessionId];
+                  if (activeSessionMeta) {
+                    activeSessionMeta.claudeSessionId = childClaudeSessionId;
+                  }
                   void api.terminalRebindClaudeSession(activeSessionId, childClaudeSessionId);
+                }
+                if (activeSessionMode !== 'forked') {
+                  clearThreadWorkingStopTimer(updatedThread.id);
+                  stopThreadWorking(updatedThread.id);
+                  completeTurn(updatedThread.id, 'Succeeded');
                 }
 
                 await refreshThreadsForWorkspace(latestThread.workspaceId);
@@ -3884,9 +3918,12 @@ export default function App() {
     },
     [
       applyThreadUpdate,
+      clearThreadWorkingStopTimer,
+      completeTurn,
       hasUserSentMessageInCurrentSession,
       pushToast,
       refreshThreadsForWorkspace,
+      stopThreadWorking,
       workspaces
     ]
   );
@@ -6632,13 +6669,10 @@ export default function App() {
         }
         rememberThreadRuntimeCwd(threadId, currentCwd);
       }
-      const jsonlAttentionContext = resolveJsonlCompletionAttentionContext(threadId, event.sessionId);
-      if (!jsonlAttentionContext.usesJsonlAttention) {
-        return;
-      }
 
       clearThreadWorkingStopTimer(threadId);
       stopThreadWorking(threadId);
+
       const completionStatus: ThreadAttentionCompletionStatus = event.status === 'Failed' ? 'Failed' : 'Succeeded';
       const completedAtMs = event.completedAtMs ?? Date.now();
       const previousAttentionState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
@@ -6657,6 +6691,23 @@ export default function App() {
           recordThreadVisibleOutput(threadId, false, completedAtMs, lastTerminalLogByThreadRef.current[threadId] ?? '');
         }
       }
+
+      const jsonlAttentionContext = resolveJsonlCompletionAttentionContext(threadId, event.sessionId);
+      if (!jsonlAttentionContext.usesJsonlAttention) {
+        const completedAttentionState = completeTurn(threadId, completionStatus, completedAtMs);
+        if (
+          completedAttentionState.lastCompletedTurnIdWithOutput > previousAttentionState.lastCompletedTurnIdWithOutput ||
+          (
+            completedAttentionState.lastCompletedTurnIdWithOutput === previousAttentionState.lastCompletedTurnIdWithOutput &&
+            completedAttentionState.lastCompletedTurnStatus !== previousAttentionState.lastCompletedTurnStatus &&
+            shouldNotifyAttentionTurn(completedAttentionState)
+          )
+        ) {
+          notifyCompletedTurnIfNeeded(threadId, completedAttentionState);
+        }
+        return;
+      }
+
       completeTurn(threadId, completionStatus, completedAtMs);
       const claudeSessionId = jsonlAttentionContext.claudeSessionId;
       const isQualifyingJsonlCompletion =
@@ -6683,6 +6734,7 @@ export default function App() {
       commitThreadAttentionState,
       completeTurn,
       isThreadVisibleToUser,
+      notifyCompletedTurnIfNeeded,
       observeThreadJsonlCompletion,
       recordThreadVisibleOutput,
       resolveJsonlCompletionAttentionContext,
@@ -7048,6 +7100,7 @@ export default function App() {
     async (nextSettings: {
       cliPath: string;
       appearanceMode: AppearanceMode;
+      claudePermissionMode: ClaudePermissionMode;
       defaultNewThreadFullAccess: boolean;
       taskCompletionAlerts: boolean;
       terminalScrollbackLines: number;
@@ -7063,6 +7116,7 @@ export default function App() {
         await api.saveSettings({
           claudeCliPath: nextSettings.cliPath || null,
           appearanceMode: nextSettings.appearanceMode,
+          claudePermissionMode: nextSettings.claudePermissionMode,
           defaultNewThreadFullAccess: nextSettings.defaultNewThreadFullAccess,
           taskCompletionAlerts,
           terminalScrollbackLines
@@ -7169,7 +7223,11 @@ export default function App() {
         return false;
       }
 
-      const command = buildClaudeInPlaceRestartCommand(resumeSessionId, thread.fullAccess);
+      const command = buildClaudeInPlaceRestartCommand(
+        resumeSessionId,
+        thread.fullAccess,
+        settings.claudePermissionMode
+      );
 
       await api.terminalSendSignal(sessionId, 'SIGINT').catch(() => undefined);
       let ready = await waitForRdevShellPrompt(sessionId);
@@ -7187,7 +7245,7 @@ export default function App() {
       const wrote = await api.terminalWrite(sessionId, `${command}\r`).catch(() => false);
       return wrote;
     },
-    [runStore, waitForRdevShellPrompt]
+    [runStore, settings.claudePermissionMode, waitForRdevShellPrompt]
   );
 
   const selectThread = useCallback(
@@ -7220,7 +7278,7 @@ export default function App() {
         !hasInteractedThisSession
       )
     ) {
-      pushToast(REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON, 'info');
+      pushToast(remoteAccessStartupBlockReason(claudeAccessModeLabel), 'info');
       return;
     }
     const nextValue = !selectedThread.fullAccess;
@@ -7248,7 +7306,7 @@ export default function App() {
             setSelectedWorkspace(updatedThread.workspaceId);
           }
           setSelectedThread(updatedThread.id);
-          pushToast(`Full access ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
+          pushToast(`${claudeAccessModeLabel} ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
           return;
         }
         pushToast('Could not switch in-place for remote workspace; reconnecting session.', 'info');
@@ -7263,13 +7321,14 @@ export default function App() {
       await waitForThreadReplayWindow(updatedThread.id, nextSessionId);
       await replayThreadDraftInput(nextSessionId, draftInput);
     } catch (error) {
-      pushToast(`Failed to update Full access: ${String(error)}`, 'error');
+      pushToast(`Failed to update ${claudeAccessModeLabel}: ${String(error)}`, 'error');
     } finally {
       setFullAccessUpdating(false);
     }
   }, [
     activeRunsByThreadRef,
     applyThreadUpdate,
+    claudeAccessModeLabel,
     ensureSessionForThread,
     fullAccessUpdating,
     getThreadDraftInput,
@@ -7354,7 +7413,7 @@ export default function App() {
         pushToast('No Claude session ID available — start a session first.', 'error');
         return;
       }
-      const command = buildClaudeResumeCommand(sessionId, thread.fullAccess);
+      const command = buildClaudeResumeCommand(sessionId, thread.fullAccess, settings.claudePermissionMode);
       void writeTextToClipboard(command)
         .then(() => {
           pushToast('Resume command copied to clipboard.', 'info');
@@ -7363,7 +7422,7 @@ export default function App() {
           pushToast(`Failed to copy resume command: ${String(error)}`, 'error');
         });
     },
-    [pushToast, writeTextToClipboard]
+    [pushToast, settings.claudePermissionMode, writeTextToClipboard]
   );
 
   const openResumeCommandInTerminal = useCallback(
@@ -7380,7 +7439,7 @@ export default function App() {
           cwd = (await resolveInitialThreadCwd(thread, workspace).catch(() => null))?.trim() || cwd;
         }
 
-        const command = buildClaudeResumeTerminalCommand(thread, cwd);
+        const command = buildClaudeResumeTerminalCommand(thread, cwd, settings.claudePermissionMode);
         if (!command) {
           pushToast('No Claude session ID available — start a session first.', 'error');
           return;
@@ -7391,7 +7450,7 @@ export default function App() {
         pushToast(`Failed to open resume command in Terminal: ${String(error)}`, 'error');
       });
     },
-    [pushToast, resolveInitialThreadCwd, workspaceById]
+    [pushToast, resolveInitialThreadCwd, settings.claudePermissionMode, workspaceById]
   );
 
   const copyWorkspaceCommand = useCallback(
@@ -8086,6 +8145,7 @@ export default function App() {
         selectedThreadId={selectedThreadId}
         threadSearch={threadSearch}
         defaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
+        elevatedAccessLabel={claudeAccessModeLabel}
         creatingThreadByWorkspace={creatingThreadByWorkspace}
         onOpenWorkspacePicker={openWorkspacePicker}
         onOpenSettings={openSettings}
@@ -8207,6 +8267,7 @@ export default function App() {
           attachmentDraftPaths={selectedThreadDraftAttachments}
           attachmentsEnabled={Boolean(selectedThread)}
           fullAccessUpdating={fullAccessUpdating}
+          elevatedAccessLabel={claudeAccessModeLabel}
           gitInfo={gitInfo}
           onPickAttachments={pickAttachmentFiles}
           onAddAttachmentPaths={addAttachmentPathsFromDrop}
@@ -8245,6 +8306,7 @@ export default function App() {
         open={settingsOpen}
         initialCliPath={settings.claudeCliPath ?? ''}
         initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
+        initialClaudePermissionMode={normalizeClaudePermissionMode(settings.claudePermissionMode)}
         initialDefaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
         initialTaskCompletionAlerts={settings.taskCompletionAlerts === true}
         initialTerminalScrollbackLines={normalizeTerminalScrollbackLines(settings.terminalScrollbackLines)}

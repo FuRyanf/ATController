@@ -22,12 +22,12 @@ use uuid::Uuid;
 
 use crate::git_tools;
 use crate::models::{
-    ClaudeTurnCompletionSummary, ContextFilePreview, ContextPreview, ImportableClaudeProject,
-    ImportableClaudeSession, PreparedNativeFork, RunClaudeRequest, RunClaudeResponse, RunExitEvent,
-    RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
-    TerminalOutputSnapshot, TerminalReadyEvent, TerminalSshAuthStatusEvent, TerminalStartResponse,
-    TerminalTurnCompletedEvent, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
-    WorkspaceShellStartResponse,
+    ClaudePermissionMode, ClaudeTurnCompletionSummary, ContextFilePreview, ContextPreview,
+    ImportableClaudeProject, ImportableClaudeSession, PreparedNativeFork, RunClaudeRequest,
+    RunClaudeResponse, RunExitEvent, RunMetadata, Settings, StreamEvent, TerminalDataEvent,
+    TerminalExitEvent, TerminalOutputSnapshot, TerminalReadyEvent, TerminalSshAuthStatusEvent,
+    TerminalStartResponse, TerminalTurnCompletedEvent, ThreadRunStatus, TranscriptEntry,
+    WorkspaceKind, WorkspaceShellStartResponse,
 };
 use crate::skills;
 use crate::storage;
@@ -60,6 +60,14 @@ const CLAUDE_FULL_ACCESS_ARGS: [&str; 3] = [
     "--permission-mode",
     "bypassPermissions",
 ];
+const CLAUDE_AUTO_MODE_ARGS: [&str; 2] = ["--permission-mode", "auto"];
+
+fn claude_permission_mode_args(mode: ClaudePermissionMode) -> &'static [&'static str] {
+    match mode {
+        ClaudePermissionMode::FullAccess => &CLAUDE_FULL_ACCESS_ARGS,
+        ClaudePermissionMode::AutoMode => &CLAUDE_AUTO_MODE_ARGS,
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct JsonlMetadataFingerprint {
@@ -473,6 +481,69 @@ fn build_importable_project(
     })
 }
 
+fn merge_importable_session(
+    existing: &mut ImportableClaudeSession,
+    incoming: ImportableClaudeSession,
+) {
+    if existing.summary.is_none() {
+        existing.summary = incoming.summary;
+    }
+    if existing.first_prompt.is_none() {
+        existing.first_prompt = incoming.first_prompt;
+    }
+    existing.message_count = existing.message_count.max(incoming.message_count);
+    existing.created_at = match (existing.created_at, incoming.created_at) {
+        (Some(current), Some(next)) => Some(current.min(next)),
+        (current, None) => current,
+        (None, next) => next,
+    };
+    existing.modified_at = match (existing.modified_at, incoming.modified_at) {
+        (Some(current), Some(next)) => Some(current.max(next)),
+        (current, None) => current,
+        (None, next) => next,
+    };
+    if existing.git_branch.is_none() {
+        existing.git_branch = incoming.git_branch;
+    }
+}
+
+fn merge_importable_projects(
+    index_project: Option<ImportableClaudeProject>,
+    jsonl_project: Option<ImportableClaudeProject>,
+) -> Option<ImportableClaudeProject> {
+    match (index_project, jsonl_project) {
+        (None, None) => None,
+        (Some(project), None) | (None, Some(project)) => Some(project),
+        (Some(mut project), Some(mut jsonl_project)) => {
+            if !project.path_exists && jsonl_project.path_exists {
+                project.path = jsonl_project.path.clone();
+                project.name = jsonl_project.name.clone();
+                project.path_exists = jsonl_project.path_exists;
+                project.workspace_id = jsonl_project.workspace_id.clone();
+                project.workspace_name = jsonl_project.workspace_name.clone();
+            }
+
+            let mut sessions_by_id = project
+                .sessions
+                .drain(..)
+                .map(|session| (session.session_id.clone(), session))
+                .collect::<HashMap<_, _>>();
+            for session in jsonl_project.sessions.drain(..) {
+                match sessions_by_id.get_mut(&session.session_id) {
+                    Some(existing) => merge_importable_session(existing, session),
+                    None => {
+                        sessions_by_id.insert(session.session_id.clone(), session);
+                    }
+                }
+            }
+
+            project.sessions = sessions_by_id.into_values().collect();
+            sort_importable_sessions(&mut project.sessions);
+            Some(project)
+        }
+    }
+}
+
 fn discover_sessions_from_index(
     project_dir: &Path,
     workspace_lookup: &HashMap<String, (String, String)>,
@@ -699,10 +770,10 @@ pub fn discover_importable_claude_sessions() -> Result<Vec<ImportableClaudeProje
         }
 
         let project_dir = entry.path();
-        let discovered = match discover_sessions_from_index(&project_dir, &workspace_lookup)? {
-            Some(project) => Some(project),
-            None => discover_sessions_from_jsonl(&project_dir, &workspace_lookup)?,
-        };
+        let discovered = merge_importable_projects(
+            discover_sessions_from_index(&project_dir, &workspace_lookup)?,
+            discover_sessions_from_jsonl(&project_dir, &workspace_lookup)?,
+        );
         if let Some(project) = discovered {
             projects.push(project);
         }
@@ -1225,13 +1296,13 @@ fn collect_fork_clone_candidates(
         requested_after_ms,
         &mut candidates_by_session_id,
     )?;
-    if !candidates_by_session_id.is_empty() {
-        return Ok(candidates_by_session_id.into_values().collect());
-    }
 
     for entry in fs::read_dir(projects_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if entry.path() == source_project_dir {
             continue;
         }
         collect_fork_clone_candidates_from_dir(
@@ -1256,7 +1327,11 @@ pub fn known_fork_child_session_ids(source_claude_session_id: &str) -> Result<Ve
     let mut session_ids = collect_fork_child_candidates(normalized, &HashSet::new())?
         .into_iter()
         .map(|candidate| candidate.session_id)
-        .collect::<Vec<_>>();
+        .collect::<HashSet<_>>();
+    for candidate in collect_fork_clone_candidates(normalized, &session_ids, 0)? {
+        session_ids.insert(candidate.session_id);
+    }
+    let mut session_ids = session_ids.into_iter().collect::<Vec<_>>();
     session_ids.sort();
     Ok(session_ids)
 }
@@ -1326,6 +1401,7 @@ fn build_claude_shell_command(
     session_id: &str,
     session_mode: TerminalSessionMode,
     full_access_flag: bool,
+    claude_permission_mode: ClaudePermissionMode,
     use_session_id_for_resume: bool,
 ) -> String {
     let mut parts = vec![
@@ -1360,7 +1436,11 @@ fn build_claude_shell_command(
         }
     }
     if full_access_flag {
-        parts.extend(CLAUDE_FULL_ACCESS_ARGS.iter().map(|arg| (*arg).to_string()));
+        parts.extend(
+            claude_permission_mode_args(claude_permission_mode)
+                .iter()
+                .map(|arg| (*arg).to_string()),
+        );
     }
     parts.join(" ")
 }
@@ -3289,6 +3369,7 @@ pub async fn terminal_start_session(
         &launch_session_id,
         session_mode,
         full_access_flag,
+        settings.claude_permission_mode,
         use_session_id_for_resume,
     );
     let (shell_command, post_connect_command) = build_terminal_shell_command(
@@ -4427,7 +4508,11 @@ pub async fn run_claude(
 
     let mut args = vec!["-p".to_string(), prompt.clone()];
     if request.full_access {
-        args.extend(CLAUDE_FULL_ACCESS_ARGS.iter().map(|arg| (*arg).to_string()));
+        args.extend(
+            claude_permission_mode_args(settings.claude_permission_mode)
+                .iter()
+                .map(|arg| (*arg).to_string()),
+        );
     }
 
     let mut command = Command::new(&cli_path);
@@ -4665,7 +4750,7 @@ pub async fn generate_commit_message(workspace_path: String, full_access: bool) 
 
     let mut args = vec!["-p", &prompt];
     if full_access {
-        args.extend(CLAUDE_FULL_ACCESS_ARGS);
+        args.extend(claude_permission_mode_args(settings.claude_permission_mode));
     }
 
     let output = tokio::time::timeout(
@@ -5443,6 +5528,98 @@ mod tests {
                 .map(|session| session.session_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["session-newer", "session-older"]
+        );
+
+        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn discover_importable_claude_sessions_merges_jsonl_missing_from_sessions_index() {
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-import-discovery-merge-index-jsonl-{}",
+            Uuid::new_v4()
+        ));
+        let app_support_root = temp_root.join("app-support");
+        let projects_root = temp_root.join("projects");
+        let workspace_path = temp_root.join("workspace-merge");
+        fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
+        fs::create_dir_all(&projects_root).expect("should create projects root");
+
+        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &app_support_root);
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let workspace = storage::add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be stored");
+        let project_dir = projects_root.join(claude_project_dir_for_workspace(
+            workspace_path.to_string_lossy().as_ref(),
+        ));
+        fs::create_dir_all(&project_dir).expect("should create claude project dir");
+        fs::write(
+            project_dir.join("sessions-index.json"),
+            format!(
+                r#"{{
+  "version": 1,
+  "originalPath": "{}",
+  "entries": [
+    {{
+      "sessionId": "11111111-1111-1111-1111-111111111111",
+      "summary": "Indexed summary",
+      "firstPrompt": "indexed prompt",
+      "messageCount": 4,
+      "created": "2026-03-10T10:00:00Z",
+      "modified": "2026-03-10T11:00:00Z",
+      "gitBranch": "feature/indexed",
+      "projectPath": "{}"
+    }}
+  ]
+}}"#,
+                workspace_path.to_string_lossy(),
+                workspace_path.to_string_lossy()
+            ),
+        )
+        .expect("should write sessions index");
+        fs::write(
+            project_dir.join("22222222-2222-2222-2222-222222222222.jsonl"),
+            format!(
+                concat!(
+                    "{{\"cwd\":\"{}\",\"sessionId\":\"22222222-2222-2222-2222-222222222222\",\"gitBranch\":\"feature/jsonl-only\",\"type\":\"progress\",\"timestamp\":\"2026-03-12T12:00:00Z\"}}\n",
+                    "{{\"cwd\":\"{}\",\"sessionId\":\"22222222-2222-2222-2222-222222222222\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"recover deleted thread\"}},\"timestamp\":\"2026-03-12T12:05:00Z\"}}\n"
+                ),
+                workspace_path.to_string_lossy(),
+                workspace_path.to_string_lossy()
+            ),
+        )
+        .expect("should write jsonl-only session");
+
+        let discovered = discover_importable_claude_sessions().expect("discovery should succeed");
+        assert_eq!(discovered.len(), 1);
+        let project = &discovered[0];
+        assert_eq!(project.path, workspace.path);
+        assert_eq!(project.workspace_id.as_deref(), Some(workspace.id.as_str()));
+        assert_eq!(
+            project
+                .sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "22222222-2222-2222-2222-222222222222",
+                "11111111-1111-1111-1111-111111111111"
+            ]
+        );
+        assert_eq!(
+            project.sessions[0].first_prompt.as_deref(),
+            Some("recover deleted thread")
+        );
+        assert_eq!(
+            project.sessions[0].git_branch.as_deref(),
+            Some("feature/jsonl-only")
         );
 
         std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
@@ -6435,6 +6612,159 @@ mod tests {
     }
 
     #[test]
+    fn known_fork_child_session_ids_includes_fork_session_clone_descendants() {
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
+
+        let temp_root =
+            std::env::temp_dir().join(format!("atcontroller-fork-chain-known-{}", Uuid::new_v4()));
+        let projects_root = temp_root.join("projects");
+        let project_dir = projects_root.join("fork-chain-project");
+        fs::create_dir_all(&project_dir).expect("should create project dir");
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let ancestor_session_id = "11111111-1111-1111-1111-111111111111";
+        let source_session_id = "22222222-2222-2222-2222-222222222222";
+        let old_child_session_id = "33333333-3333-3333-3333-333333333333";
+        fs::write(
+            project_dir.join(format!("{source_session_id}.jsonl")),
+            format!(
+                concat!(
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"type\":\"progress\",\"forkedFrom\":{{\"sessionId\":\"{}\"}},\"timestamp\":\"2026-03-24T08:28:00Z\"}}\n",
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"type\":\"user\",\"timestamp\":\"2026-03-24T08:28:05Z\"}}\n",
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"type\":\"assistant\",\"timestamp\":\"2026-03-24T08:28:10Z\"}}\n"
+                ),
+                source_session_id,
+                ancestor_session_id,
+                source_session_id,
+                source_session_id
+            ),
+        )
+        .expect("should write source fork jsonl");
+        fs::write(
+            project_dir.join(format!("{old_child_session_id}.jsonl")),
+            format!(
+                concat!(
+                    "{{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{{\"timestamp\":\"2026-03-24T08:29:00Z\"}},\"isSnapshotUpdate\":false}}\n",
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"type\":\"progress\",\"forkedFrom\":{{\"sessionId\":\"{}\"}},\"timestamp\":\"2026-03-24T08:28:00Z\"}}\n",
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"type\":\"user\",\"timestamp\":\"2026-03-24T08:28:05Z\"}}\n",
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"type\":\"assistant\",\"timestamp\":\"2026-03-24T08:28:10Z\"}}\n"
+                ),
+                old_child_session_id,
+                ancestor_session_id,
+                old_child_session_id,
+                old_child_session_id
+            ),
+        )
+        .expect("should write old fork clone jsonl");
+
+        let known_children =
+            known_fork_child_session_ids(source_session_id).expect("lookup should succeed");
+        assert_eq!(known_children, vec![old_child_session_id.to_string()]);
+
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn resolve_thread_fork_candidate_excludes_known_clone_children_when_forking_a_fork() {
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "atcontroller-fork-chain-resolve-{}",
+            Uuid::new_v4()
+        ));
+        let projects_root = temp_root.join("projects");
+        let source_project_dir = projects_root.join("fork-chain-source");
+        let worktree_project_dir = projects_root.join("fork-chain-source--claude-worktrees-next");
+        fs::create_dir_all(&source_project_dir).expect("should create source project dir");
+        fs::create_dir_all(&worktree_project_dir).expect("should create worktree project dir");
+        std::env::set_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let ancestor_session_id = "11111111-1111-1111-1111-111111111111";
+        let source_session_id = "22222222-2222-2222-2222-222222222222";
+        let old_child_session_id = "33333333-3333-3333-3333-333333333333";
+        let new_child_session_id = "44444444-4444-4444-4444-444444444444";
+        let source_body = format!(
+            concat!(
+                "{{\"sessionId\":\"{}\",\"uuid\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"type\":\"progress\",\"forkedFrom\":{{\"sessionId\":\"{}\"}},\"timestamp\":\"2026-03-24T08:28:00Z\"}}\n",
+                "{{\"sessionId\":\"{}\",\"uuid\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"type\":\"user\",\"timestamp\":\"2026-03-24T08:28:05Z\"}}\n",
+                "{{\"sessionId\":\"{}\",\"uuid\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"type\":\"assistant\",\"timestamp\":\"2026-03-24T08:28:10Z\"}}\n"
+            ),
+            source_session_id,
+            ancestor_session_id,
+            source_session_id,
+            source_session_id
+        );
+        let old_child_body = format!(
+            concat!(
+                "{{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{{\"timestamp\":\"2026-03-24T08:29:00Z\"}},\"isSnapshotUpdate\":false}}\n",
+                "{{\"sessionId\":\"{}\",\"uuid\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"type\":\"progress\",\"forkedFrom\":{{\"sessionId\":\"{}\"}},\"timestamp\":\"2026-03-24T08:28:00Z\"}}\n",
+                "{{\"sessionId\":\"{}\",\"uuid\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"type\":\"user\",\"timestamp\":\"2026-03-24T08:28:05Z\"}}\n",
+                "{{\"sessionId\":\"{}\",\"uuid\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"type\":\"assistant\",\"timestamp\":\"2026-03-24T08:28:10Z\"}}\n"
+            ),
+            old_child_session_id,
+            ancestor_session_id,
+            old_child_session_id,
+            old_child_session_id
+        );
+        fs::write(
+            source_project_dir.join(format!("{source_session_id}.jsonl")),
+            source_body,
+        )
+        .expect("should write source fork jsonl");
+        let old_child_path = source_project_dir.join(format!("{old_child_session_id}.jsonl"));
+        fs::write(&old_child_path, &old_child_body).expect("should write old child jsonl");
+
+        let known_children =
+            known_fork_child_session_ids(source_session_id).expect("lookup should succeed");
+        assert_eq!(known_children, vec![old_child_session_id.to_string()]);
+
+        let requested_after = Utc::now().to_rfc3339();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(
+            &old_child_path,
+            format!(
+                "{}{{\"sessionId\":\"{}\",\"uuid\":\"dddddddd-dddd-dddd-dddd-dddddddddddd\",\"type\":\"assistant\",\"timestamp\":\"2026-03-24T08:30:00Z\"}}\n",
+                old_child_body,
+                old_child_session_id
+            ),
+        )
+        .expect("should touch old child jsonl after request");
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(
+            worktree_project_dir.join(format!("{new_child_session_id}.jsonl")),
+            format!(
+                concat!(
+                    "{{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{{\"timestamp\":\"2026-03-24T08:31:00Z\"}},\"isSnapshotUpdate\":false}}\n",
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"type\":\"progress\",\"forkedFrom\":{{\"sessionId\":\"{}\"}},\"timestamp\":\"2026-03-24T08:28:00Z\"}}\n",
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"type\":\"user\",\"timestamp\":\"2026-03-24T08:28:05Z\"}}\n",
+                    "{{\"sessionId\":\"{}\",\"uuid\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"type\":\"assistant\",\"timestamp\":\"2026-03-24T08:28:10Z\"}}\n"
+                ),
+                new_child_session_id,
+                ancestor_session_id,
+                new_child_session_id,
+                new_child_session_id
+            ),
+        )
+        .expect("should write new worktree fork clone jsonl");
+
+        let resolved = resolve_thread_fork_candidate(
+            source_session_id.to_string(),
+            known_children,
+            Some(requested_after),
+        )
+        .expect("resolver should succeed");
+        assert_eq!(resolved.as_deref(), Some(new_child_session_id));
+
+        std::env::remove_var("ATCONTROLLER_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
     fn known_fork_child_session_ids_falls_back_to_jsonl_without_index() {
         let _guard = crate::storage::test_env_lock()
             .lock()
@@ -6742,6 +7072,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000",
             TerminalSessionMode::Forked,
             false,
+            ClaudePermissionMode::FullAccess,
             false,
         );
 
@@ -6758,6 +7089,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000",
             TerminalSessionMode::Resumed,
             true,
+            ClaudePermissionMode::FullAccess,
             true,
         );
 
@@ -6768,12 +7100,30 @@ mod tests {
     }
 
     #[test]
+    fn build_claude_shell_command_supports_auto_mode_for_elevated_threads() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            TerminalSessionMode::Resumed,
+            true,
+            ClaudePermissionMode::AutoMode,
+            false,
+        );
+
+        assert_eq!(
+            claude_command,
+            "env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/claude' --resume '123e4567-e89b-12d3-a456-426614174000' --permission-mode auto"
+        );
+    }
+
+    #[test]
     fn build_terminal_shell_command_defaults_rdev_to_non_tmux_post_connect_handoff() {
         let claude_command = build_claude_shell_command(
             "/usr/local/bin/claude",
             "123e4567-e89b-12d3-a456-426614174000",
             TerminalSessionMode::New,
             false,
+            ClaudePermissionMode::FullAccess,
             false,
         );
         let (shell_command, post_connect_command) = build_terminal_shell_command(
@@ -6802,6 +7152,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000",
             TerminalSessionMode::Resumed,
             true,
+            ClaudePermissionMode::FullAccess,
             false,
         );
         let (shell_command, post_connect_command) = build_terminal_shell_command(
@@ -6829,6 +7180,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000",
             TerminalSessionMode::New,
             false,
+            ClaudePermissionMode::FullAccess,
             false,
         );
         let (shell_command, post_connect_command) = build_terminal_shell_command(
@@ -6857,6 +7209,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000",
             TerminalSessionMode::New,
             false,
+            ClaudePermissionMode::FullAccess,
             false,
         );
 
@@ -6894,6 +7247,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000",
             TerminalSessionMode::New,
             false,
+            ClaudePermissionMode::FullAccess,
             false,
         );
         let (shell_command, post_connect_command) = build_terminal_shell_command(
@@ -6919,6 +7273,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000",
             TerminalSessionMode::New,
             false,
+            ClaudePermissionMode::FullAccess,
             false,
         );
         let (shell_command, post_connect_command) = build_terminal_shell_command(

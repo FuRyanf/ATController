@@ -4,7 +4,8 @@ import {
   TERMINAL_SCROLLBACK_LINES_MAX,
   TERMINAL_SCROLLBACK_LINES_MIN,
   normalizeTerminalScrollbackLines,
-  type AppearanceMode
+  type AppearanceMode,
+  type ClaudePermissionMode
 } from '../types';
 import { SettingsActionFooter, SettingsRow, SettingsSection } from './SettingsLayout';
 
@@ -12,6 +13,7 @@ interface SettingsModalProps {
   open: boolean;
   initialCliPath: string;
   initialAppearanceMode: AppearanceMode;
+  initialClaudePermissionMode: ClaudePermissionMode;
   initialDefaultNewThreadFullAccess: boolean;
   initialTaskCompletionAlerts: boolean;
   initialTerminalScrollbackLines: number;
@@ -21,6 +23,7 @@ interface SettingsModalProps {
   onSave: (settings: {
     cliPath: string;
     appearanceMode: AppearanceMode;
+    claudePermissionMode: ClaudePermissionMode;
     defaultNewThreadFullAccess: boolean;
     taskCompletionAlerts: boolean;
     terminalScrollbackLines: number;
@@ -49,6 +52,18 @@ const APPEARANCE_OPTIONS: Array<{ value: AppearanceMode; label: string; descript
 ];
 
 const SCROLLBACK_FIELD_STEP = 1_000;
+const CLAUDE_PERMISSION_MODE_OPTIONS: Array<{ value: ClaudePermissionMode; label: string; description: string }> = [
+  {
+    value: 'autoMode',
+    label: 'Auto mode',
+    description: 'Use Claude auto mode for elevated threads.'
+  },
+  {
+    value: 'fullAccess',
+    label: 'Full access',
+    description: 'Bypass permission checks for elevated threads.'
+  }
+];
 
 function formatScrollbackLines(value: number): string {
   return value.toLocaleString('en-US');
@@ -58,6 +73,7 @@ export function SettingsModal({
   open,
   initialCliPath,
   initialAppearanceMode,
+  initialClaudePermissionMode,
   initialDefaultNewThreadFullAccess,
   initialTaskCompletionAlerts,
   initialTerminalScrollbackLines,
@@ -71,6 +87,7 @@ export function SettingsModal({
 }: SettingsModalProps) {
   const [cliPath, setCliPath] = useState(initialCliPath);
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(initialAppearanceMode);
+  const [claudePermissionMode, setClaudePermissionMode] = useState<ClaudePermissionMode>(initialClaudePermissionMode);
   const [defaultNewThreadFullAccess, setDefaultNewThreadFullAccess] = useState(initialDefaultNewThreadFullAccess);
   const [taskCompletionAlerts, setTaskCompletionAlerts] = useState(initialTaskCompletionAlerts);
   const [terminalScrollbackLinesInput, setTerminalScrollbackLinesInput] = useState(
@@ -83,11 +100,13 @@ export function SettingsModal({
     }
     setCliPath(initialCliPath);
     setAppearanceMode(initialAppearanceMode);
+    setClaudePermissionMode(initialClaudePermissionMode);
     setDefaultNewThreadFullAccess(initialDefaultNewThreadFullAccess);
     setTaskCompletionAlerts(initialTaskCompletionAlerts);
     setTerminalScrollbackLinesInput(String(normalizeTerminalScrollbackLines(initialTerminalScrollbackLines)));
   }, [
     initialAppearanceMode,
+    initialClaudePermissionMode,
     initialCliPath,
     initialDefaultNewThreadFullAccess,
     initialTaskCompletionAlerts,
@@ -121,6 +140,9 @@ export function SettingsModal({
   const terminalScrollbackLines = normalizeTerminalScrollbackLines(
     Number.parseInt(terminalScrollbackLinesInput, 10)
   );
+  const accessLabel = claudePermissionMode === 'autoMode' ? 'Auto mode' : 'Full access';
+  const accessLabelLower = accessLabel.toLowerCase();
+  const accessArticle = claudePermissionMode === 'autoMode' ? 'an' : 'a';
 
   return (
     <div className="modal-backdrop">
@@ -259,10 +281,37 @@ export function SettingsModal({
               />
 
               <SettingsRow
-                label={<span id="settings-default-full-access-title">Start new threads with Full access</span>}
+                align="start"
+                label="Elevated mode"
+                description="Choose how elevated threads ask Claude to handle tool permissions."
+                controlClassName="settings-row-control-wrap"
+                control={
+                  <div className="appearance-toggle-group" role="radiogroup" aria-label="Claude elevated mode">
+                    {CLAUDE_PERMISSION_MODE_OPTIONS.map((option) => {
+                      const active = claudePermissionMode === option.value;
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          aria-description={option.description}
+                          className={active ? 'appearance-toggle-option active' : 'appearance-toggle-option'}
+                          onClick={() => setClaudePermissionMode(option.value)}
+                        >
+                          <span className="appearance-toggle-label">{option.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                }
+              />
+
+              <SettingsRow
+                label={<span id="settings-default-full-access-title">Start new threads with {accessLabel}</span>}
                 description={
                   <span id="settings-default-full-access-description">
-                    When enabled, the main new-thread action creates a full-access thread by default.
+                    When enabled, the main new-thread action creates {accessArticle} {accessLabelLower} thread by default.
                   </span>
                 }
                 control={
@@ -319,6 +368,7 @@ export function SettingsModal({
                   onSave({
                     cliPath: cliPath.trim(),
                     appearanceMode,
+                    claudePermissionMode,
                     defaultNewThreadFullAccess,
                     taskCompletionAlerts,
                     terminalScrollbackLines

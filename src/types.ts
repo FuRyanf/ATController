@@ -4,6 +4,7 @@ export type TerminalSessionMode = 'resumed' | 'new' | 'forked';
 export type TerminalTurnCompletionMode = 'idle' | 'jsonl';
 export type WorkspaceKind = 'local' | 'rdev' | 'ssh';
 export type AppearanceMode = 'dark' | 'light' | 'system';
+export type ClaudePermissionMode = 'fullAccess' | 'autoMode';
 
 export const TERMINAL_SCROLLBACK_LINES_MIN = 10_000;
 export const TERMINAL_SCROLLBACK_LINES_DEFAULT = 100_000;
@@ -17,6 +18,10 @@ export function normalizeTerminalScrollbackLines(value?: number | null): number 
     TERMINAL_SCROLLBACK_LINES_MAX,
     Math.max(TERMINAL_SCROLLBACK_LINES_MIN, Math.round(value))
   );
+}
+
+export function normalizeClaudePermissionMode(value?: string | null): ClaudePermissionMode {
+  return value === 'autoMode' ? 'autoMode' : 'fullAccess';
 }
 
 export interface Workspace {
@@ -99,6 +104,7 @@ export interface GitPullForNewThreadResult {
 export interface Settings {
   claudeCliPath?: string | null;
   appearanceMode?: AppearanceMode | null;
+  claudePermissionMode?: ClaudePermissionMode | null;
   defaultNewThreadFullAccess?: boolean;
   taskCompletionAlerts?: boolean;
   terminalScrollbackLines?: number;
