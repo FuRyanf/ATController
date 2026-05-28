@@ -62,6 +62,46 @@ fn default_agent_id() -> String {
     "claude-code".to_string()
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentProvider {
+    #[default]
+    Claude,
+    Copilot,
+}
+
+impl AgentProvider {
+    pub fn from_agent_id(agent_id: &str) -> Self {
+        if agent_id == "github-copilot" {
+            Self::Copilot
+        } else {
+            Self::Claude
+        }
+    }
+
+    pub fn from_config_value(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("copilot") {
+            Self::Copilot
+        } else {
+            Self::Claude
+        }
+    }
+
+    pub fn agent_id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude-code",
+            Self::Copilot => "github-copilot",
+        }
+    }
+
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Copilot => "copilot",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadMetadata {
@@ -86,6 +126,8 @@ pub struct ThreadMetadata {
     pub last_run_ended_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    #[serde(default)]
+    pub copilot_session_id: Option<String>,
     #[serde(default)]
     pub forked_from_claude_session_id: Option<String>,
     #[serde(default)]
@@ -135,6 +177,8 @@ pub struct Settings {
     #[serde(default)]
     pub claude_cli_path: Option<String>,
     #[serde(default)]
+    pub copilot_cli_path: Option<String>,
+    #[serde(default)]
     pub appearance_mode: AppearanceMode,
     #[serde(default)]
     pub claude_permission_mode: ClaudePermissionMode,
@@ -150,6 +194,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             claude_cli_path: None,
+            copilot_cli_path: None,
             appearance_mode: AppearanceMode::System,
             claude_permission_mode: ClaudePermissionMode::FullAccess,
             default_new_thread_full_access: false,
@@ -161,6 +206,14 @@ impl Default for Settings {
 
 impl Settings {
     pub fn normalized(mut self) -> Self {
+        self.claude_cli_path = self
+            .claude_cli_path
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty());
+        self.copilot_cli_path = self
+            .copilot_cli_path
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty());
         self.terminal_scrollback_lines =
             normalize_terminal_scrollback_lines(self.terminal_scrollback_lines);
         self
@@ -305,6 +358,7 @@ pub struct TerminalStartResponse {
     pub session_id: String,
     pub session_mode: String,
     pub resume_session_id: Option<String>,
+    pub agent_session_id: Option<String>,
     pub turn_completion_mode: String,
     pub current_cwd: Option<String>,
     pub thread: ThreadMetadata,

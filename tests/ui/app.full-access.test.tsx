@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
-  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Full access thread, or enable full access by default in Settings.';
+  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Claude full access thread, or enable full access by default in Settings.';
 
 let resizeObserverCallback: ResizeObserverCallback | null = null;
 
@@ -393,6 +393,15 @@ const mocks = vi.hoisted(() => {
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
       return updated;
     }),
+    clearThreadAgentSession: vi.fn(async (_workspaceId: string, threadId: string) => {
+      const updated = {
+        ...threadState.find((thread) => thread.id === threadId)!,
+        claudeSessionId: null,
+        updatedAt: new Date().toISOString()
+      };
+      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+      return updated;
+    }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
@@ -738,10 +747,10 @@ describe('Terminal launch flags', () => {
 
     const row = await screen.findByRole('button', { name: /Full Access Thread/i });
     expect(screen.getByTestId('full-access-toggle')).toHaveTextContent('Auto mode');
-    expect(screen.getByTestId('workspace-new-thread-ws-1')).toHaveTextContent('New auto mode thread');
+    expect(screen.getByTestId('workspace-new-thread-ws-1')).toHaveTextContent('New Claude auto mode thread');
 
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    expect(await screen.findByRole('button', { name: 'Auto mode thread' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Claude auto mode thread' })).toBeInTheDocument();
     await user.keyboard('{Escape}');
 
     await user.pointer([{ target: row, keys: '[MouseRight]' }]);
@@ -780,7 +789,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Normal thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -836,7 +845,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Full access thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Claude full access thread' }));
 
     await waitFor(() => {
       expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code', true);
@@ -872,6 +881,7 @@ describe('Terminal launch flags', () => {
     await waitFor(() => {
       expect(mocks.api.saveSettings).toHaveBeenCalledWith({
         claudeCliPath: '/usr/local/bin/claude',
+        copilotCliPath: null,
         appearanceMode: 'system',
         claudePermissionMode: 'fullAccess',
         defaultNewThreadFullAccess: true,
@@ -881,7 +891,7 @@ describe('Terminal launch flags', () => {
     });
 
     const newThreadButton = screen.getByTestId('workspace-new-thread-ws-1');
-    expect(newThreadButton).toHaveTextContent('New full access thread');
+    expect(newThreadButton).toHaveTextContent('New Claude full access thread');
 
     await user.click(newThreadButton);
 
@@ -909,6 +919,7 @@ describe('Terminal launch flags', () => {
     await waitFor(() => {
       expect(mocks.api.saveSettings).toHaveBeenCalledWith({
         claudeCliPath: '/usr/local/bin/claude',
+        copilotCliPath: null,
         appearanceMode: 'system',
         claudePermissionMode: 'fullAccess',
         defaultNewThreadFullAccess: false,
@@ -970,7 +981,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Normal thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1008,7 +1019,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Normal thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1042,7 +1053,7 @@ describe('Terminal launch flags', () => {
     await user.click(screen.getByTestId('full-access-toggle'));
 
     await waitFor(() => {
-      expect(mocks.api.clearThreadClaudeSession).toHaveBeenCalledWith('ws-1', 'thread-2');
+      expect(mocks.api.clearThreadAgentSession).toHaveBeenCalledWith('ws-1', 'thread-2', 'claude');
     });
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1093,7 +1104,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Normal thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1154,7 +1165,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Normal thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1474,7 +1485,7 @@ describe('Terminal launch flags', () => {
     });
 
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Normal thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(

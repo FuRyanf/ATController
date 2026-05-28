@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppUpdateInfo,
+  AgentProvider,
   ClaudeTurnCompletionSummary,
   ContextPack,
   ContextPreview,
@@ -86,6 +87,8 @@ export const api = {
     invoke<boolean>('delete_thread', { workspaceId, threadId }),
   setThreadFullAccess: (workspaceId: string, threadId: string, fullAccess: boolean) =>
     invoke<ThreadMetadata>('set_thread_full_access', { workspaceId, threadId, fullAccess }),
+  clearThreadAgentSession: (workspaceId: string, threadId: string, agentProvider: AgentProvider) =>
+    invoke<ThreadMetadata>('clear_thread_agent_session', { workspaceId, threadId, agentProvider }),
   clearThreadClaudeSession: (workspaceId: string, threadId: string) =>
     invoke<ThreadMetadata>('clear_thread_claude_session', { workspaceId, threadId }),
   clearThreadPendingFork: (workspaceId: string, threadId: string) =>
@@ -104,12 +107,14 @@ export const api = {
     invoke<TranscriptEntry>('append_user_message', { workspaceId, threadId, content }),
   loadTranscript: (workspaceId: string, threadId: string) =>
     invoke<TranscriptEntry[]>('load_transcript', { workspaceId, threadId }),
-  listSkills: (workspacePath: string) => invoke<SkillInfo[]>('list_skills', { workspacePath }),
+  listSkills: (workspacePath: string, agentProvider?: AgentProvider) =>
+    invoke<SkillInfo[]>('list_skills', { workspacePath, agentProvider }),
   buildContextPreview: (workspacePath: string, contextPack: ContextPack) =>
     invoke<ContextPreview>('build_context_preview', { workspacePath, contextPack }),
   getSettings: () => invoke<Settings>('get_settings'),
   saveSettings: (settings: Settings) => invoke<Settings>('save_settings', { settings }),
   detectClaudeCliPath: () => invoke<string | null>('detect_claude_cli_path'),
+  detectCopilotCliPath: () => invoke<string | null>('detect_copilot_cli_path'),
   checkForUpdate: () => invoke<AppUpdateInfo>('check_for_update'),
   installLatestUpdate: () => invoke<boolean>('install_latest_update'),
   runClaude: (request: RunClaudeRequest) =>

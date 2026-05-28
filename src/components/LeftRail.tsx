@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
+import { agentLabel, agentProviderFromAgentId } from '../types';
 import type { CreateThreadOptions, ThreadMetadata, Workspace } from '../types';
 
 interface LeftRailProps {
@@ -10,7 +11,9 @@ interface LeftRailProps {
   selectedThreadId?: string;
   threadSearch: string;
   defaultNewThreadFullAccess?: boolean;
+  agentLabel?: string;
   elevatedAccessLabel?: string;
+  showImportSession?: boolean;
   creatingThreadByWorkspace?: Record<string, boolean>;
   isThreadWorking?: (threadId: string) => boolean;
   unreadCompletedTurnByThread?: Record<string, true>;
@@ -84,6 +87,19 @@ interface WorkspaceDragTarget {
 
 function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
   return kind === 'rdev' || kind === 'ssh';
+}
+
+function getThreadAgentSessionId(thread?: ThreadMetadata | null): string {
+  if (!thread) {
+    return '';
+  }
+  return agentProviderFromAgentId(thread.agentId) === 'copilot'
+    ? thread.copilotSessionId?.trim() ?? ''
+    : thread.claudeSessionId?.trim() ?? '';
+}
+
+function getThreadAgentLabel(thread?: ThreadMetadata | null): string {
+  return agentLabel(agentProviderFromAgentId(thread?.agentId));
 }
 
 function clampMenuCoordinate(x: number, y: number, width: number, height: number) {
@@ -455,7 +471,9 @@ function LeftRailComponent({
   selectedThreadId,
   threadSearch,
   defaultNewThreadFullAccess = false,
+  agentLabel = 'Claude',
   elevatedAccessLabel = 'Full access',
+  showImportSession = true,
   creatingThreadByWorkspace = {},
   isThreadWorking,
   unreadCompletedTurnByThread = {},
@@ -486,6 +504,8 @@ function LeftRailComponent({
   const [newThreadMenu, setNewThreadMenu] = React.useState<NewThreadMenuState | null>(null);
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
   const elevatedAccessLabelLower = elevatedAccessLabel.toLowerCase();
+  const normalThreadLabel = `${agentLabel} thread`;
+  const elevatedThreadLabel = `${agentLabel} ${elevatedAccessLabelLower} thread`;
   const [workspaceDragState, setWorkspaceDragState] = React.useState<WorkspaceDragState | null>(null);
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
@@ -906,10 +926,11 @@ function LeftRailComponent({
   const contextThreadWorkspace = contextMenu
     ? workspaces.find((workspace) => workspace.id === contextMenu.thread.workspaceId) ?? null
     : null;
-  const contextThreadHasSession = Boolean(contextMenu?.thread.claudeSessionId?.trim());
+  const contextThreadHasSession = Boolean(getThreadAgentSessionId(contextMenu?.thread));
+  const contextThreadAgentLabel = getThreadAgentLabel(contextMenu?.thread);
   const contextThreadRemote = contextThreadWorkspace?.kind === 'rdev' || contextThreadWorkspace?.kind === 'ssh';
   const openResumeInTerminalDisabledReason = !contextThreadHasSession
-    ? 'No Claude session ID available'
+    ? `No ${contextThreadAgentLabel} session ID available`
     : contextThreadRemote
       ? 'Open resume in Terminal is only available for local projects. Copy the resume command for remote projects.'
       : null;
@@ -932,7 +953,7 @@ function LeftRailComponent({
                 </button>
                 <button
                   type="button"
-                  disabled={!contextMenu.thread.claudeSessionId?.trim()}
+                  disabled={!contextThreadHasSession}
                   onClick={() => {
                     onCopyResumeCommand(contextMenu.thread);
                     setContextMenu(null);
@@ -1015,16 +1036,18 @@ function LeftRailComponent({
                       : 'Enable git pull on default branch for new threads'}
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  onClick={() => {
-                    const workspace = workspaceContextMenu.workspace;
-                    setWorkspaceContextMenu(null);
-                    onImportSession(workspace);
-                  }}
-                >
-                  Import session…
-                </button>
+                {showImportSession ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const workspace = workspaceContextMenu.workspace;
+                      setWorkspaceContextMenu(null);
+                      onImportSession(workspace);
+                    }}
+                  >
+                    Import session…
+                  </button>
+                ) : null}
                 <div className="thread-context-divider" />
                 <button
                   type="button"
@@ -1054,7 +1077,7 @@ function LeftRailComponent({
                     await onNewThreadInWorkspace(workspaceId, { fullAccess: false });
                   }}
                 >
-                  Normal thread
+                  {normalThreadLabel}
                 </button>
                 <button
                   type="button"
@@ -1064,7 +1087,7 @@ function LeftRailComponent({
                     await onNewThreadInWorkspace(workspaceId, { fullAccess: true });
                   }}
                 >
-                  {elevatedAccessLabel} thread
+                  {elevatedThreadLabel}
                 </button>
               </div>
             ) : null}
@@ -1299,7 +1322,7 @@ function LeftRailComponent({
                           <span className="workspace-new-thread-icon" aria-hidden="true">
                             <PlusIcon />
                           </span>
-                          <span>{defaultNewThreadFullAccess ? `New ${elevatedAccessLabelLower} thread` : 'New thread'}</span>
+                          <span>{defaultNewThreadFullAccess ? `New ${elevatedThreadLabel}` : `New ${normalThreadLabel}`}</span>
                         </button>
                         <button
                           type="button"

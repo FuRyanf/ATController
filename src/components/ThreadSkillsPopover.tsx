@@ -16,6 +16,7 @@ interface SkillsPopoverPosition {
 interface ThreadSkillsPopoverProps {
   workspace?: Workspace;
   thread?: ThreadMetadata;
+  agentLabel?: string;
   skills: SkillInfo[];
   loading: boolean;
   error?: string | null;
@@ -71,6 +72,7 @@ function isGlobalSkill(skill: SkillInfo): boolean {
 export function ThreadSkillsPopover({
   workspace,
   thread,
+  agentLabel = 'Claude',
   skills,
   loading,
   error,
@@ -345,7 +347,7 @@ export function ThreadSkillsPopover({
                 {remoteWorkspace
                   ? 'Local repo skills are only available for local workspaces right now.'
                   : selectedSkills.length > 0 || missingSkillIds.length > 0
-                    ? 'Selected skills are prepended off-screen before Claude receives your next submitted prompt.'
+                    ? `Selected skills are prepended off-screen before ${agentLabel} receives your next submitted prompt.`
                     : 'Choose one or more skills below to use them in this thread.'}
               </div>
 

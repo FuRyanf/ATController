@@ -317,7 +317,7 @@ describe('Skills management', () => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalled();
     });
     await waitFor(() => {
-      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace');
+      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace', 'claude');
     });
 
     await user.click(await screen.findByRole('button', { name: /^skills$/i }));
@@ -405,7 +405,7 @@ describe('Skills management', () => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalled();
     });
     await waitFor(() => {
-      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace');
+      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace', 'claude');
     });
 
     await user.click(await screen.findByRole('button', { name: /^skills$/i }));

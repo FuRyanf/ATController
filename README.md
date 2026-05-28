@@ -84,19 +84,26 @@ A run is a concrete terminal/process instance under a thread. Runs write logs un
 This path is for end users. You only need:
 
 - macOS
-- Claude CLI installed (`claude` on PATH, or set the path in-app)
+- Claude CLI installed for the Claude build (`claude` on PATH, or set the path in-app)
+- GitHub Copilot CLI installed for the Copilot build (`copilot` on PATH, or set the path in-app)
 
 You do **not** need Node.js, Yarn, or Rust for this install flow.
 
-Download, install, trust, and launch the latest build in one command:
+Download, install, trust, and launch the latest Claude build in one command:
 
 ```bash
 bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/ATController.dmg"; curl -fL -o "$DMG" "https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/ATController.app" "/Applications/ATController.app"; xattr -dr com.apple.quarantine "/Applications/ATController.app" || true; open "/Applications/ATController.app"'
 ```
 
+Download, install, trust, and launch the latest Copilot build in one command:
+
+```bash
+bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/ATController-Copilot.dmg"; curl -fL -o "$DMG" "https://github.com/FuRyanf/ATController/releases/latest/download/ATController-Copilot.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/ATController Copilot.app" "/Applications/ATController Copilot.app"; xattr -dr com.apple.quarantine "/Applications/ATController Copilot.app" || true; open "/Applications/ATController Copilot.app"'
+```
+
 Prebuilt release note:
 
-- Releases publish a macOS DMG and app ZIP via GitHub Actions.
+- Releases publish Claude and Copilot macOS DMGs and app ZIPs via GitHub Actions.
 - If you hit machine-specific compatibility issues, build from source locally (`yarn tauri build`) for your environment.
 
 ## Product Features
@@ -169,11 +176,12 @@ Built app output:
 
 - Latest public build:
   - [Latest release](https://github.com/FuRyanf/ATController/releases/latest)
-  - [Direct DMG download](https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg)
+  - [Direct Claude DMG download](https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg)
+  - [Direct Copilot DMG download](https://github.com/FuRyanf/ATController/releases/latest/download/ATController-Copilot.dmg)
 - CI build runs (every push to `master`/`main`, every PR targeting `master`/`main`, and every `v*` tag push):
   - [Build workflow runs](https://github.com/FuRyanf/ATController/actions/workflows/build-macos.yml)
-  - Each run publishes `ATController.dmg` and `ATController.app.zip` as artifacts (artifact retention is time-limited by GitHub Actions).
-- For `v*` tags, the same DMG and ZIP are attached to the GitHub Release automatically.
+  - Each run publishes `ATController.dmg`, `ATController.app.zip`, `ATController-Copilot.dmg`, and `ATController-Copilot.app.zip` as artifacts (artifact retention is time-limited by GitHub Actions).
+- For `v*` tags, the same DMGs and ZIPs are attached to the GitHub Release automatically.
 - If signing secrets are not configured, builds are unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
 
 ## Release Versioning
@@ -218,6 +226,7 @@ When they are absent, CI still builds unsigned artifacts.
 ATController stores data under:
 
 - `~/Library/Application Support/ATController/`
+- `~/Library/Application Support/ATController Copilot/`
 
 Important files/directories:
 

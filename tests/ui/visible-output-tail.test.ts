@@ -25,6 +25,10 @@ describe('visible output tail', () => {
     expect(appendMeaningfulOutputTail('previous result', 'project$ ')).toBe('previous result');
   });
 
+  it('ignores Claude prompt glyph chunks when extending a visible tail', () => {
+    expect(appendMeaningfulOutputTail('previous result', '›')).toBe('previous result');
+  });
+
   it('matches replay chunks against the remembered visible tail', () => {
     expect(matchesVisibleOutputTail('fresh result', 'old output fresh result')).toBe(true);
     expect(matchesVisibleOutputTail('different result', 'old output fresh result')).toBe(false);

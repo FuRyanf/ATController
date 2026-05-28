@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
-import type { CreateThreadOptions, RunStatus, ThreadMetadata } from '../types';
+import { CLAUDE_AGENT_ID, type CreateThreadOptions, type RunStatus, type ThreadMetadata } from '../types';
 
 const LAST_USER_INPUT_AT_STORAGE_KEY = 'atcontroller:last-user-input-at';
 
@@ -185,10 +185,11 @@ export function useThreadStore(): ThreadStore {
   }, []);
 
   const createThread = useCallback(async (workspaceId: string, options?: CreateThreadOptions) => {
+    const agentId = options?.agentId ?? CLAUDE_AGENT_ID;
     const thread =
       options?.fullAccess === true
-        ? await api.createThread(workspaceId, 'claude-code', true)
-        : await api.createThread(workspaceId, 'claude-code');
+        ? await api.createThread(workspaceId, agentId, true)
+        : await api.createThread(workspaceId, agentId);
     delete removedThreadIdsRef.current[thread.id];
     delete removedThreadWorkspaceIdByThreadRef.current[thread.id];
     setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));

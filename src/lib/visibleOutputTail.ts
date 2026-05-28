@@ -1,6 +1,7 @@
 import { stripAnsi } from './terminalUiHeuristics';
 
 export const MAX_VISIBLE_OUTPUT_TAIL_CHARS = 512;
+const TERMINAL_PROMPT_SUFFIX_REGEX = /[#$%>›❯❱]$/u;
 
 export function normalizeMeaningfulOutputText(chunk: string): string {
   if (!chunk) {
@@ -12,28 +13,25 @@ export function normalizeMeaningfulOutputText(chunk: string): string {
     .trim();
 }
 
-export function looksLikeShellPromptText(chunk: string): boolean {
-  if (!chunk) {
+export function looksLikeTerminalPromptLine(line: string): boolean {
+  const normalized = stripAnsi(line)
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .trim();
+
+  if (!normalized) {
     return false;
   }
 
-  const lines = stripAnsi(chunk)
-    .replace(/\r/g, '\n')
-    .split('\n')
-    .map((line) => line.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim())
-    .filter((line) => line.length > 0);
-
-  if (lines.length === 0 || lines.length > 2) {
+  if (!TERMINAL_PROMPT_SUFFIX_REGEX.test(normalized)) {
     return false;
   }
 
-  const line = lines[lines.length - 1];
-  if (!/[#$%>]$/.test(line)) {
-    return false;
-  }
-
-  const withoutPrompt = line.slice(0, -1).trim();
+  const withoutPrompt = normalized.slice(0, -1).trim();
   if (!withoutPrompt) {
+    return true;
+  }
+
+  if (/^\[[^\]]+\]$/.test(withoutPrompt) || /^\([^)]+\)$/.test(withoutPrompt)) {
     return true;
   }
 
@@ -57,6 +55,24 @@ export function looksLikeShellPromptText(chunk: string): boolean {
     }
     return /^[A-Za-z0-9._/+:-]+$/.test(token);
   });
+}
+
+export function looksLikeShellPromptText(chunk: string): boolean {
+  if (!chunk) {
+    return false;
+  }
+
+  const lines = stripAnsi(chunk)
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0 || lines.length > 2) {
+    return false;
+  }
+
+  return looksLikeTerminalPromptLine(lines[lines.length - 1] ?? '');
 }
 
 export function trimMeaningfulOutputTail(

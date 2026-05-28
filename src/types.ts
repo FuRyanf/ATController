@@ -5,6 +5,10 @@ export type TerminalTurnCompletionMode = 'idle' | 'jsonl';
 export type WorkspaceKind = 'local' | 'rdev' | 'ssh';
 export type AppearanceMode = 'dark' | 'light' | 'system';
 export type ClaudePermissionMode = 'fullAccess' | 'autoMode';
+export type AgentProvider = 'claude' | 'copilot';
+
+export const CLAUDE_AGENT_ID = 'claude-code';
+export const COPILOT_AGENT_ID = 'github-copilot';
 
 export const TERMINAL_SCROLLBACK_LINES_MIN = 10_000;
 export const TERMINAL_SCROLLBACK_LINES_DEFAULT = 100_000;
@@ -22,6 +26,22 @@ export function normalizeTerminalScrollbackLines(value?: number | null): number 
 
 export function normalizeClaudePermissionMode(value?: string | null): ClaudePermissionMode {
   return value === 'autoMode' ? 'autoMode' : 'fullAccess';
+}
+
+export function normalizeAgentProvider(value?: string | null): AgentProvider {
+  return value === 'copilot' ? 'copilot' : 'claude';
+}
+
+export function agentIdForProvider(provider?: AgentProvider | null): string {
+  return normalizeAgentProvider(provider) === 'copilot' ? COPILOT_AGENT_ID : CLAUDE_AGENT_ID;
+}
+
+export function agentProviderFromAgentId(agentId?: string | null): AgentProvider {
+  return agentId === COPILOT_AGENT_ID ? 'copilot' : 'claude';
+}
+
+export function agentLabel(provider?: AgentProvider | null): string {
+  return normalizeAgentProvider(provider) === 'copilot' ? 'Copilot' : 'Claude';
 }
 
 export interface Workspace {
@@ -51,6 +71,7 @@ export interface ThreadMetadata {
   fullAccess: boolean;
   enabledSkills: string[];
   claudeSessionId?: string | null;
+  copilotSessionId?: string | null;
   forkedFromClaudeSessionId?: string | null;
   pendingForkSourceClaudeSessionId?: string | null;
   pendingForkKnownChildSessionIds?: string[];
@@ -62,6 +83,7 @@ export interface ThreadMetadata {
 
 export interface CreateThreadOptions {
   fullAccess?: boolean;
+  agentId?: string;
 }
 
 export interface TranscriptEntry {
@@ -103,6 +125,7 @@ export interface GitPullForNewThreadResult {
 
 export interface Settings {
   claudeCliPath?: string | null;
+  copilotCliPath?: string | null;
   appearanceMode?: AppearanceMode | null;
   claudePermissionMode?: ClaudePermissionMode | null;
   defaultNewThreadFullAccess?: boolean;
@@ -175,6 +198,7 @@ export interface TerminalStartResponse {
   sessionId: string;
   sessionMode: TerminalSessionMode;
   resumeSessionId?: string | null;
+  agentSessionId?: string | null;
   turnCompletionMode?: TerminalTurnCompletionMode;
   currentCwd?: string | null;
   thread: ThreadMetadata;

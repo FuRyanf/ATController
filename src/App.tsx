@@ -25,6 +25,7 @@ import { ThreadSkillsPopover } from './components/ThreadSkillsPopover';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { WorkspaceShellDrawer } from './components/WorkspaceShellDrawer';
 import * as apiModule from './lib/api';
+import { getConfiguredAgentProvider } from './lib/agentProvider';
 import { resolveAppendedTerminalLogChunk } from './lib/terminalLogChunkUpdate';
 import {
   presentTerminalEventData,
@@ -69,6 +70,7 @@ import {
   appendMeaningfulOutputTail,
   extractMeaningfulOutputTail,
   looksLikeShellPromptText,
+  looksLikeTerminalPromptLine,
   matchesVisibleOutputTail,
   MAX_VISIBLE_OUTPUT_TAIL_CHARS,
   normalizeMeaningfulOutputText,
@@ -89,8 +91,12 @@ import { isRemoteWorkspaceKind } from './lib/workspaceKind';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
 import {
+  agentIdForProvider,
+  agentLabel,
+  agentProviderFromAgentId,
   normalizeClaudePermissionMode,
   normalizeTerminalScrollbackLines,
+  type AgentProvider,
   type AppearanceMode,
   type ClaudePermissionMode,
   type AppUpdateInfo,
@@ -124,6 +130,7 @@ const CLAUDE_FULL_ACCESS_ARGS = [
   'bypassPermissions'
 ] as const;
 const CLAUDE_AUTO_MODE_ARGS = ['--permission-mode', 'auto'] as const;
+const COPILOT_AUTOPILOT_ARGS = ['--mode', 'autopilot'] as const;
 
 const { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } = apiModule;
 const onTerminalSshAuthStatus =
@@ -133,13 +140,17 @@ const onTerminalTurnCompleted =
   apiModule.onTerminalTurnCompleted ??
   (async (_handler: (event: TerminalTurnCompletedEvent) => void) => () => undefined);
 
-const SELECTED_WORKSPACE_KEY = 'atcontroller:selected-workspace';
-const SIDEBAR_WIDTH_KEY = 'atcontroller:sidebar-width';
-const SHELL_DRAWER_HEIGHT_KEY = 'atcontroller:shell-drawer-height';
-const THREAD_VISIBLE_OUTPUT_GUARD_KEY = 'atcontroller:visible-output-guard';
-const THREAD_ATTENTION_STATE_V2_KEY = 'atcontroller:thread-attention-v2';
-const THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY = 'atcontroller:jsonl-completion-attention-v1';
-const TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY = 'atcontroller:task-completion-alerts-bootstrap-v1';
+const ACTIVE_AGENT_PROVIDER = getConfiguredAgentProvider();
+const ACTIVE_AGENT_LABEL = agentLabel(ACTIVE_AGENT_PROVIDER);
+const ACTIVE_AGENT_ID = agentIdForProvider(ACTIVE_AGENT_PROVIDER);
+const STORAGE_PREFIX = ACTIVE_AGENT_PROVIDER === 'copilot' ? 'atcontroller:copilot' : 'atcontroller';
+const SELECTED_WORKSPACE_KEY = `${STORAGE_PREFIX}:selected-workspace`;
+const SIDEBAR_WIDTH_KEY = `${STORAGE_PREFIX}:sidebar-width`;
+const SHELL_DRAWER_HEIGHT_KEY = `${STORAGE_PREFIX}:shell-drawer-height`;
+const THREAD_VISIBLE_OUTPUT_GUARD_KEY = `${STORAGE_PREFIX}:visible-output-guard`;
+const THREAD_ATTENTION_STATE_V2_KEY = `${STORAGE_PREFIX}:thread-attention-v2`;
+const THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY = `${STORAGE_PREFIX}:jsonl-completion-attention-v1`;
+const TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY = `${STORAGE_PREFIX}:task-completion-alerts-bootstrap-v1`;
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
@@ -181,14 +192,16 @@ const MAX_PENDING_TERMINAL_DATA_SESSIONS = 64;
 const MAX_PENDING_TERMINAL_DATA_EVENTS_PER_SESSION = 64;
 const MAX_PENDING_TERMINAL_DATA_CHARS_PER_SESSION = 256_000;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
-function remoteAccessStartupBlockReason(accessLabel: string): string {
+function remoteAccessStartupBlockReason(accessLabel: string, providerLabel: string = ACTIVE_AGENT_LABEL): string {
   const lowerLabel = accessLabel.toLowerCase();
-  return `Send a message first to establish the session, then toggle ${accessLabel}. To start with ${accessLabel}, use New thread options and choose ${accessLabel} thread, or enable ${lowerLabel} by default in Settings.`;
+  const threadLabel = `${providerLabel} ${lowerLabel} thread`;
+  return `Send a message first to establish the session, then toggle ${accessLabel}. To start with ${accessLabel}, use New thread options and choose ${threadLabel}, or enable ${lowerLabel} by default in Settings.`;
 }
 
 function normalizeSettings(settings?: Settings | null): Settings {
   return {
     claudeCliPath: settings?.claudeCliPath ?? null,
+    copilotCliPath: settings?.copilotCliPath ?? null,
     appearanceMode: normalizeAppearanceMode(settings?.appearanceMode),
     claudePermissionMode: normalizeClaudePermissionMode(settings?.claudePermissionMode),
     defaultNewThreadFullAccess: settings?.defaultNewThreadFullAccess === true,
@@ -201,8 +214,39 @@ function claudePermissionArgs(mode?: ClaudePermissionMode | null): readonly stri
   return normalizeClaudePermissionMode(mode) === 'autoMode' ? CLAUDE_AUTO_MODE_ARGS : CLAUDE_FULL_ACCESS_ARGS;
 }
 
-function elevatedAccessLabel(mode?: ClaudePermissionMode | null): string {
+function elevatedAccessLabel(
+  mode?: ClaudePermissionMode | null,
+  agentProvider: AgentProvider = ACTIVE_AGENT_PROVIDER
+): string {
+  if (agentProvider === 'copilot') {
+    return 'Autopilot';
+  }
   return normalizeClaudePermissionMode(mode) === 'autoMode' ? 'Auto mode' : 'Full access';
+}
+
+function selectedProviderLabel(thread?: Pick<ThreadMetadata, 'agentId'> | null): string {
+  return agentLabel(threadAgentProvider(thread));
+}
+
+function detectActiveCliPath(): Promise<string | null> {
+  return ACTIVE_AGENT_PROVIDER === 'copilot' ? api.detectCopilotCliPath() : api.detectClaudeCliPath();
+}
+
+function threadAgentProvider(thread?: Pick<ThreadMetadata, 'agentId'> | null): AgentProvider {
+  return agentProviderFromAgentId(thread?.agentId ?? ACTIVE_AGENT_ID);
+}
+
+function threadAgentSessionId(thread?: Pick<ThreadMetadata, 'agentId' | 'claudeSessionId' | 'copilotSessionId'> | null): string {
+  if (!thread) {
+    return '';
+  }
+  return threadAgentProvider(thread) === 'copilot'
+    ? thread.copilotSessionId?.trim() ?? ''
+    : thread.claudeSessionId?.trim() ?? '';
+}
+
+function isClaudeThread(thread?: Pick<ThreadMetadata, 'agentId'> | null): boolean {
+  return threadAgentProvider(thread) === 'claude';
 }
 
 interface PendingSessionStart {
@@ -728,10 +772,15 @@ function isUnreadJsonlCompletionAttention(
 }
 
 function shouldTrackThreadJsonlCompletionAttention(
-  thread: Pick<ThreadMetadata, 'isArchived' | 'claudeSessionId'>,
+  thread: Pick<ThreadMetadata, 'agentId' | 'isArchived' | 'claudeSessionId'>,
   workspaceKind: Workspace['kind'] | undefined | null
 ): boolean {
-  return !thread.isArchived && workspaceKind === 'local' && (thread.claudeSessionId?.trim() ?? '').length > 0;
+  return (
+    isClaudeThread(thread) &&
+    !thread.isArchived &&
+    workspaceKind === 'local' &&
+    (thread.claudeSessionId?.trim() ?? '').length > 0
+  );
 }
 
 function areThreadAttentionStatesEqual(left: ThreadAttentionState, right: ThreadAttentionState): boolean {
@@ -833,10 +882,30 @@ function buildClaudeInPlaceRestartCommand(
     'NO_COLOR=',
     'claude',
     '--resume',
-    `'${sessionId}'`
+    shellQuote(sessionId)
   ];
   if (fullAccess) {
     parts.push(...claudePermissionArgs(permissionMode));
+  }
+  return parts.join(' ');
+}
+
+function buildCopilotInPlaceRestartCommand(sessionId: string, autopilot: boolean): string {
+  const parts = [
+    'exec',
+    'env',
+    'TERM=xterm-256color',
+    'COLORTERM=truecolor',
+    'CLICOLOR=1',
+    'CLICOLOR_FORCE=1',
+    'FORCE_COLOR=1',
+    'NO_COLOR=',
+    'copilot',
+    '--resume',
+    shellQuote(sessionId)
+  ];
+  if (autopilot) {
+    parts.push(...COPILOT_AUTOPILOT_ARGS);
   }
   return parts.join(' ');
 }
@@ -857,17 +926,49 @@ function buildClaudeResumeCommand(
   return parts.join(' ');
 }
 
-function buildClaudeResumeTerminalCommand(
-  thread: Pick<ThreadMetadata, 'claudeSessionId' | 'fullAccess'>,
-  cwd?: string | null,
+function buildCopilotResumeCommand(sessionId: string, autopilot: boolean): string {
+  const parts = ['copilot', '--resume', shellQuote(sessionId)];
+  if (autopilot) {
+    parts.push(...COPILOT_AUTOPILOT_ARGS);
+  }
+  return parts.join(' ');
+}
+
+function buildAgentResumeCommand(
+  thread: Pick<ThreadMetadata, 'agentId' | 'claudeSessionId' | 'copilotSessionId' | 'fullAccess'>,
   permissionMode?: ClaudePermissionMode | null
 ): string | null {
-  const sessionId = thread.claudeSessionId?.trim();
+  const sessionId = threadAgentSessionId(thread);
   if (!sessionId) {
     return null;
   }
+  return threadAgentProvider(thread) === 'copilot'
+    ? buildCopilotResumeCommand(sessionId, thread.fullAccess)
+    : buildClaudeResumeCommand(sessionId, thread.fullAccess, permissionMode);
+}
 
-  const command = buildClaudeResumeCommand(sessionId, thread.fullAccess, permissionMode);
+function buildAgentInPlaceRestartCommand(
+  thread: Pick<ThreadMetadata, 'agentId' | 'claudeSessionId' | 'copilotSessionId' | 'fullAccess'>,
+  permissionMode?: ClaudePermissionMode | null
+): string | null {
+  const sessionId = threadAgentSessionId(thread);
+  if (!sessionId) {
+    return null;
+  }
+  return threadAgentProvider(thread) === 'copilot'
+    ? buildCopilotInPlaceRestartCommand(sessionId, thread.fullAccess)
+    : buildClaudeInPlaceRestartCommand(sessionId, thread.fullAccess, permissionMode);
+}
+
+function buildAgentResumeTerminalCommand(
+  thread: Pick<ThreadMetadata, 'agentId' | 'claudeSessionId' | 'copilotSessionId' | 'fullAccess'>,
+  cwd?: string | null,
+  permissionMode?: ClaudePermissionMode | null
+): string | null {
+  const command = buildAgentResumeCommand(thread, permissionMode);
+  if (!command) {
+    return null;
+  }
   const workingDirectory = cwd?.trim() ?? '';
   if (!workingDirectory) {
     return command;
@@ -903,7 +1004,7 @@ function hasShellPromptInSnapshot(snapshot: string): boolean {
     ) {
       continue;
     }
-    if (/[#$%>]$/.test(line)) {
+    if (looksLikeTerminalPromptLine(line)) {
       return true;
     }
   }
@@ -1429,6 +1530,7 @@ export default function App() {
   const [focusedTerminalKind, setFocusedTerminalKind] = useState<'claude' | 'shell' | null>(null);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [selectedTerminalFollowPaused, setSelectedTerminalFollowPaused] = useState(false);
+  const appUnmountedRef = useRef(false);
   const [selectedStatefulHydrationSessionId, setSelectedStatefulHydrationSessionId] = useState<string | null>(null);
   const [selectedStatefulHydrationFailedSessionId, setSelectedStatefulHydrationFailedSessionId] = useState<string | null>(null);
   const [shellTerminalSize, setShellTerminalSize] = useState({ cols: 120, rows: 16 });
@@ -1461,9 +1563,17 @@ export default function App() {
   const [terminalSearchToggleRequestId, setTerminalSearchToggleRequestId] = useState(0);
   const [shellTerminalSearchToggleRequestId, setShellTerminalSearchToggleRequestId] = useState(0);
 
+  useEffect(() => {
+    appUnmountedRef.current = false;
+    return () => {
+      appUnmountedRef.current = true;
+    };
+  }, []);
+
   const [settings, setSettings] = useState<Settings>(() =>
     normalizeSettings({
       claudeCliPath: null,
+      copilotCliPath: null,
       appearanceMode: readStoredAppearanceMode(),
       claudePermissionMode: 'fullAccess',
       defaultNewThreadFullAccess: false,
@@ -1471,7 +1581,8 @@ export default function App() {
       terminalScrollbackLines: undefined
     })
   );
-  const claudeAccessModeLabel = elevatedAccessLabel(settings.claudePermissionMode);
+  const activeCliPath = ACTIVE_AGENT_PROVIDER === 'copilot' ? settings.copilotCliPath ?? '' : settings.claudeCliPath ?? '';
+  const activeAccessModeLabel = elevatedAccessLabel(settings.claudePermissionMode, ACTIVE_AGENT_PROVIDER);
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
@@ -1635,7 +1746,10 @@ export default function App() {
         threadId: string;
         workspaceId: string;
         workspaceKind: Workspace['kind'];
+        agentProvider: AgentProvider;
+        agentSessionId?: string | null;
         claudeSessionId?: string | null;
+        copilotSessionId?: string | null;
         currentCwd?: string | null;
         mode: TerminalSessionMode;
         turnCompletionMode: TerminalTurnCompletionMode;
@@ -1673,7 +1787,7 @@ export default function App() {
       Array.from(
         new Set(
           allThreads
-            .filter((thread) => !thread.isArchived)
+            .filter((thread) => isClaudeThread(thread) && !thread.isArchived)
             .map((thread) => thread.claudeSessionId?.trim() ?? '')
             .filter((sessionId) => sessionId.length > 0)
         )
@@ -1696,6 +1810,9 @@ export default function App() {
     }
     return allThreads.find((thread) => thread.id === selectedThreadId);
   }, [allThreads, selectedThreadId]);
+  const selectedThreadProvider = threadAgentProvider(selectedThread);
+  const selectedThreadAgentLabel = selectedProviderLabel(selectedThread);
+  const selectedThreadAccessModeLabel = elevatedAccessLabel(settings.claudePermissionMode, selectedThreadProvider);
   const selectedThreadRuntimeCwd = selectedThread ? threadRuntimeCwdByThread[selectedThread.id] ?? null : null;
   const selectedGitContextPath = useMemo(() => {
     if (!selectedWorkspace || selectedWorkspace.kind !== 'local') {
@@ -1715,6 +1832,9 @@ export default function App() {
   useEffect(() => {
     let changed = false;
     for (const thread of allThreads) {
+      if (!isClaudeThread(thread)) {
+        continue;
+      }
       if (!allowFreshStartAfterForkFailureByThreadRef.current[thread.id]) {
         continue;
       }
@@ -1733,6 +1853,9 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedThread) {
+      return;
+    }
+    if (!isClaudeThread(selectedThread)) {
       return;
     }
     if (allowFreshStartAfterForkFailureByThreadRef.current[selectedThread.id]) {
@@ -1780,7 +1903,7 @@ export default function App() {
     selectedWorkspace &&
     isRemoteWorkspaceKind(selectedWorkspace.kind) &&
     (isSelectedThreadStarting || !hasInteractedForSelectedThread)
-      ? remoteAccessStartupBlockReason(claudeAccessModeLabel)
+      ? remoteAccessStartupBlockReason(selectedThreadAccessModeLabel, selectedThreadAgentLabel)
       : null;
 
   const selectedTerminalStream = useMemo(() => {
@@ -1849,11 +1972,11 @@ export default function App() {
       : selectedThreadResumeFailureBlocked
       ? 'Session resume failed. Start fresh to continue.'
       : selectedStatefulHydrationFailedSessionId === selectedSessionId && Boolean(selectedSessionId)
-      ? 'Could not refresh Claude screen yet. Waiting for new output...'
+      ? `Could not refresh ${selectedThreadAgentLabel} screen yet. Waiting for new output...`
       : selectedStatefulHydrationSessionId === selectedSessionId && Boolean(selectedSessionId)
-      ? 'Refreshing Claude screen...'
+      ? `Refreshing ${selectedThreadAgentLabel} screen...`
       : !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
-      ? 'Starting Claude session...'
+      ? `Starting ${selectedThreadAgentLabel} session...`
       : undefined;
   const selectedThreadWorking = selectedThread ? runStore.isThreadWorking(selectedThread.id) : false;
 
@@ -2225,6 +2348,7 @@ export default function App() {
         workspace?.kind ??
         null;
       const usesJsonlAttention =
+        isClaudeThread(thread) &&
         workspaceKind === 'local' &&
         claudeSessionId.length > 0;
 
@@ -2242,11 +2366,18 @@ export default function App() {
 
   const resolveTrackedThreadJsonlCompletionAttention = useCallback(
     (thread: ThreadMetadata) => {
+      if (!isClaudeThread(thread)) {
+        return {
+          claudeSessionId: '',
+          workspaceKind: workspaceById[thread.workspaceId]?.kind ?? null
+        };
+      }
       const activeSessionId =
         activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
       const activeSessionMeta = activeSessionId ? sessionMetaBySessionIdRef.current[activeSessionId] ?? null : null;
       const activeJsonlClaudeSessionId =
         activeSessionMeta &&
+        activeSessionMeta.agentProvider === 'claude' &&
         activeSessionMeta.workspaceKind === 'local' &&
         activeSessionMeta.turnCompletionMode === 'jsonl'
           ? activeSessionMeta.claudeSessionId?.trim() ?? ''
@@ -2564,8 +2695,7 @@ export default function App() {
         return false;
       }
 
-      const lifecycle = runLifecycleByThreadRef.current[threadId];
-      if (!workingByThreadRef.current[threadId] && lifecycle?.phase !== 'streaming' && looksLikeShellPromptText(normalized)) {
+      if (looksLikeShellPromptText(normalized)) {
         return false;
       }
 
@@ -3046,6 +3176,7 @@ export default function App() {
       if (
         !shouldTrackThreadJsonlCompletionAttention(
           {
+            agentId: thread.agentId,
             isArchived: thread.isArchived,
             claudeSessionId: trackedJsonlAttention.claudeSessionId
           },
@@ -3415,11 +3546,14 @@ export default function App() {
       }
 
       const sessionMeta = sessionMetaBySessionIdRef.current[sessionId];
-      if (!sessionMeta || sessionMeta.workspaceKind !== 'local') {
+      if (!sessionMeta || sessionMeta.agentProvider !== 'claude' || sessionMeta.workspaceKind !== 'local') {
         return;
       }
 
       const thread = findThreadById(threadByIdRef.current, threadId);
+      if (!isClaudeThread(thread)) {
+        return;
+      }
       const claudeSessionId = sessionMeta.claudeSessionId?.trim() || thread?.claudeSessionId?.trim() || '';
       if (!claudeSessionId) {
         return;
@@ -3456,6 +3590,9 @@ export default function App() {
     async (thread: ThreadMetadata, workspace: Workspace): Promise<string | null> => {
       if (workspace.kind !== 'local') {
         return null;
+      }
+      if (!isClaudeThread(thread)) {
+        return workspace.path;
       }
 
       const remembered = threadRuntimeCwdByThreadRef.current[thread.id]?.trim() ?? '';
@@ -3544,6 +3681,7 @@ export default function App() {
       if (
         !shouldTrackThreadJsonlCompletionAttention(
           {
+            agentId: thread.agentId,
             isArchived: thread.isArchived,
             claudeSessionId: trackedJsonlAttention.claudeSessionId
           },
@@ -3998,7 +4136,7 @@ export default function App() {
     }));
 
     try {
-      const skills = await api.listSkills(workspace.path);
+      const skills = await api.listSkills(workspace.path, ACTIVE_AGENT_PROVIDER);
       if (skillListRequestIdByWorkspaceRef.current[workspace.id] !== requestId) {
         return skills;
       }
@@ -4087,7 +4225,7 @@ export default function App() {
     if (shouldTrackNativeFork) {
       const thread = findThreadById(threadByIdRef.current, threadId);
       const workspace = thread ? workspaces.find((candidate) => candidate.id === thread.workspaceId) : null;
-      if (thread && workspace && !isRemoteWorkspaceKind(workspace.kind)) {
+      if (thread && isClaudeThread(thread) && workspace && !isRemoteWorkspaceKind(workspace.kind)) {
         try {
           preparedNativeFork = await api.prepareThreadNativeFork(thread.workspaceId, thread.id, sessionId);
         } catch (error) {
@@ -4346,6 +4484,9 @@ export default function App() {
         retryDelaysMs?: readonly number[];
       } = {}
     ) => {
+      if (appUnmountedRef.current) {
+        return;
+      }
       const requestId =
         options.requestId ?? (terminalHydrationRequestIdByThreadRef.current[threadId] ?? 0) + 1;
       if (options.requestId === undefined) {
@@ -4362,6 +4503,9 @@ export default function App() {
           return false;
         }
         window.setTimeout(() => {
+          if (appUnmountedRef.current) {
+            return;
+          }
           if (terminalHydrationRequestIdByThreadRef.current[threadId] !== requestId) {
             return;
           }
@@ -4377,7 +4521,13 @@ export default function App() {
         return true;
       };
       void bootstrapThreadRuntimeCwdFromClaudeSession(threadId, sessionId);
+      if (appUnmountedRef.current) {
+        return;
+      }
       const snapshot = await api.terminalReadOutput(sessionId).catch(() => null);
+      if (appUnmountedRef.current) {
+        return;
+      }
       if (terminalHydrationRequestIdByThreadRef.current[threadId] !== requestId) {
         return;
       }
@@ -4757,16 +4907,33 @@ export default function App() {
 
         const startedAt = new Date().toISOString();
         const sessionCurrentCwd = response.currentCwd?.trim() || initialThreadCwd;
-        const claudeSessionId =
-          response.thread.claudeSessionId?.trim() ||
+        const responseAgentProvider = threadAgentProvider(response.thread);
+        const agentSessionId =
+          response.agentSessionId?.trim() ||
           response.resumeSessionId?.trim() ||
-          thread.claudeSessionId?.trim() ||
+          threadAgentSessionId(response.thread) ||
+          threadAgentSessionId(thread) ||
           null;
+        const claudeSessionId =
+          responseAgentProvider === 'claude'
+            ? response.thread.claudeSessionId?.trim() ||
+              response.resumeSessionId?.trim() ||
+              thread.claudeSessionId?.trim() ||
+              agentSessionId ||
+              null
+            : null;
+        const copilotSessionId =
+          responseAgentProvider === 'copilot'
+            ? response.thread.copilotSessionId?.trim() || agentSessionId || null
+            : null;
         sessionMetaBySessionIdRef.current[sessionId] = {
           threadId: thread.id,
           workspaceId: thread.workspaceId,
           workspaceKind: workspace.kind,
+          agentProvider: responseAgentProvider,
+          agentSessionId,
           claudeSessionId,
+          copilotSessionId,
           currentCwd: sessionCurrentCwd,
           mode: response.sessionMode,
           turnCompletionMode: response.turnCompletionMode ?? 'idle',
@@ -4774,7 +4941,7 @@ export default function App() {
         };
         rememberThreadRuntimeCwd(thread.id, sessionCurrentCwd);
         bindSession(thread.id, sessionId, startedAt);
-        if ((response.turnCompletionMode ?? 'idle') === 'jsonl' && workspace.kind === 'local') {
+        if (responseAgentProvider === 'claude' && (response.turnCompletionMode ?? 'idle') === 'jsonl' && workspace.kind === 'local') {
           resetThreadJsonlCompletionAttentionForSession(thread.id, claudeSessionId);
           if (claudeSessionId) {
             void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, claudeSessionId);
@@ -5482,12 +5649,11 @@ export default function App() {
         return;
       }
 
-      const resolvedOptions =
-        typeof options?.fullAccess === 'boolean'
-          ? options
-          : settings.defaultNewThreadFullAccess
-            ? { fullAccess: true }
-            : undefined;
+      const resolvedOptions: CreateThreadOptions = {
+        ...(settings.defaultNewThreadFullAccess ? { fullAccess: true } : {}),
+        ...options,
+        agentId: ACTIVE_AGENT_ID
+      };
 
       setWorkspaceCreatingThread(workspaceId, true);
 
@@ -5888,7 +6054,7 @@ export default function App() {
         clearForkResolutionFailureBlock(thread.id);
         allowFreshStartAfterForkFailureByThreadRef.current[thread.id] = true;
         sessionFailCountByThreadRef.current[thread.id] = 0;
-        const cleared = await api.clearThreadClaudeSession(thread.workspaceId, thread.id);
+        const cleared = await api.clearThreadAgentSession(thread.workspaceId, thread.id, threadAgentProvider(thread));
         applyThreadUpdate(cleared);
         await restartThreadSession(cleared);
       } catch (error) {
@@ -5969,10 +6135,12 @@ export default function App() {
         const savedSettings = normalizeSettings(await api.getSettings());
         setSettings(savedSettings);
         persistAppearanceMode(savedSettings.appearanceMode ?? 'system');
-        const detected = await api.detectClaudeCliPath();
+        const detected = await detectActiveCliPath();
         setDetectedCliPath(detected);
-        if (!detected && !savedSettings.claudeCliPath) {
-          setBlockingError('Claude CLI is missing. Open Settings to configure the CLI path.');
+        const savedActiveCliPath =
+          ACTIVE_AGENT_PROVIDER === 'copilot' ? savedSettings.copilotCliPath : savedSettings.claudeCliPath;
+        if (!detected && !savedActiveCliPath) {
+          setBlockingError(`${ACTIVE_AGENT_LABEL} CLI is missing. Open Settings to configure the CLI path.`);
         }
       } catch (error) {
         setBlockingError(String(error));
@@ -6202,6 +6370,7 @@ export default function App() {
     const currentSelectedBindingSessionId =
       selectedSessionId ?? activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? null;
     if (
+      isClaudeThread(selectedThread) &&
       !allowFreshStartAfterForkFailureByThreadRef.current[selectedThread.id] &&
       isThreadMissingClaimedForkSession(selectedThread)
     ) {
@@ -6311,7 +6480,7 @@ export default function App() {
 
     void ensureSessionForThread(selectedThread).catch((error) => {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      pushToast(`Failed to start Claude session: ${String(error)}`, 'error');
+      pushToast(`Failed to start ${selectedThreadAgentLabel} session: ${String(error)}`, 'error');
     });
     rememberSelectedTerminalBinding(null);
   }, [
@@ -6328,11 +6497,12 @@ export default function App() {
     selectedThreadResumeFailureBlocked,
     selectedThreadSshStartupBlockReason,
     selectedWorkspace?.kind,
-    selectedThread
+    selectedThread,
+    selectedThreadAgentLabel
   ]);
 
   useEffect(() => {
-    if (!selectedThread || !selectedWorkspace || isRemoteWorkspaceKind(selectedWorkspace.kind)) {
+    if (!selectedThread || !isClaudeThread(selectedThread) || !selectedWorkspace || isRemoteWorkspaceKind(selectedWorkspace.kind)) {
       return;
     }
     if (!isUuidLike(selectedThread.pendingForkSourceClaudeSessionId?.trim() ?? '')) {
@@ -6471,6 +6641,7 @@ export default function App() {
       }
 
       const visibleEventData = stripThreadHiddenInjectedPrompts(threadId, event.data);
+      const terminalShowsIdlePrompt = hasShellPromptInSnapshot(visibleEventData);
       const hasMeaningfulOutput = noteTurnOutput(threadId, visibleEventData);
       const isSelectedThread = selectedThreadIdRef.current === threadId;
       const nowMs = Date.now();
@@ -6502,9 +6673,14 @@ export default function App() {
       }
       const hasCompletedTurn = hasCompletedAttentionTurn(threadAttentionByThreadRef.current[threadId]);
       if (workingByThreadRef.current[threadId]) {
-        scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
-        if (!hasMeaningfulOutput) {
-          maybeResolveStuckStreaming();
+        if (terminalShowsIdlePrompt) {
+          clearThreadWorkingStopTimer(threadId);
+          stopThreadWorking(threadId);
+        } else {
+          scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
+          if (!hasMeaningfulOutput) {
+            maybeResolveStuckStreaming();
+          }
         }
       } else if (
         hasMeaningfulOutput &&
@@ -6869,9 +7045,20 @@ export default function App() {
       if (!sessionMeta) {
         return;
       }
+      const agentProvider = threadAgentProvider(thread);
+      sessionMeta.agentProvider = agentProvider;
+      if (agentProvider === 'copilot') {
+        const copilotSessionId = thread.copilotSessionId?.trim() ?? '';
+        if (copilotSessionId) {
+          sessionMeta.copilotSessionId = copilotSessionId;
+          sessionMeta.agentSessionId = copilotSessionId;
+        }
+        return;
+      }
       const claudeSessionId = thread.claudeSessionId?.trim() ?? '';
       if (sessionMeta.turnCompletionMode === 'jsonl' && sessionMeta.workspaceKind === 'local' && !claudeSessionId) {
         sessionMeta.claudeSessionId = null;
+        sessionMeta.agentSessionId = null;
         resetThreadJsonlCompletionAttentionForSession(thread.id, null);
         return;
       }
@@ -6879,6 +7066,7 @@ export default function App() {
         return;
       }
       sessionMeta.claudeSessionId = claudeSessionId;
+      sessionMeta.agentSessionId = claudeSessionId;
       if (sessionMeta.turnCompletionMode === 'jsonl' && sessionMeta.workspaceKind === 'local') {
         resetThreadJsonlCompletionAttentionForSession(thread.id, claudeSessionId);
         const workspace = workspaces.find((candidate) => candidate.id === thread.workspaceId);
@@ -7112,9 +7300,11 @@ export default function App() {
         taskCompletionAlertBootstrapAttemptedRef.current = true;
       }
 
+      const normalizedCliPath = nextSettings.cliPath.trim() || null;
       const saved = normalizeSettings(
         await api.saveSettings({
-          claudeCliPath: nextSettings.cliPath || null,
+          claudeCliPath: ACTIVE_AGENT_PROVIDER === 'claude' ? normalizedCliPath : settings.claudeCliPath ?? null,
+          copilotCliPath: ACTIVE_AGENT_PROVIDER === 'copilot' ? normalizedCliPath : settings.copilotCliPath ?? null,
           appearanceMode: nextSettings.appearanceMode,
           claudePermissionMode: nextSettings.claudePermissionMode,
           defaultNewThreadFullAccess: nextSettings.defaultNewThreadFullAccess,
@@ -7123,10 +7313,10 @@ export default function App() {
         })
       );
       setSettings(saved);
-      const detected = await api.detectClaudeCliPath();
+      const detected = await detectActiveCliPath();
       setDetectedCliPath(detected);
       setSettingsOpen(false);
-      if (detected || nextSettings.cliPath) {
+      if (detected || normalizedCliPath) {
         setBlockingError(null);
       }
       if (alertsJustEnabled && taskCompletionAlerts) {
@@ -7141,7 +7331,7 @@ export default function App() {
         }
       }
     },
-    [pushToast, settings.taskCompletionAlerts]
+    [pushToast, settings.claudeCliPath, settings.copilotCliPath, settings.taskCompletionAlerts]
   );
 
   const sendTestAlert = useCallback(async () => {
@@ -7214,20 +7404,19 @@ export default function App() {
     return false;
   }, []);
 
-  const restartRdevClaudeInPlace = useCallback(
+  const restartRdevAgentInPlace = useCallback(
     async (thread: ThreadMetadata) => {
       const sessionId =
         activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
-      const resumeSessionId = thread.claudeSessionId?.trim() ?? '';
+      const resumeSessionId = threadAgentSessionId(thread);
       if (!sessionId || !isUuidLike(resumeSessionId)) {
         return false;
       }
 
-      const command = buildClaudeInPlaceRestartCommand(
-        resumeSessionId,
-        thread.fullAccess,
-        settings.claudePermissionMode
-      );
+      const command = buildAgentInPlaceRestartCommand(thread, settings.claudePermissionMode);
+      if (!command) {
+        return false;
+      }
 
       await api.terminalSendSignal(sessionId, 'SIGINT').catch(() => undefined);
       let ready = await waitForRdevShellPrompt(sessionId);
@@ -7278,7 +7467,7 @@ export default function App() {
         !hasInteractedThisSession
       )
     ) {
-      pushToast(remoteAccessStartupBlockReason(claudeAccessModeLabel), 'info');
+      pushToast(remoteAccessStartupBlockReason(selectedThreadAccessModeLabel, selectedThreadAgentLabel), 'info');
       return;
     }
     const nextValue = !selectedThread.fullAccess;
@@ -7289,15 +7478,19 @@ export default function App() {
       if (
         activeSessionMode === 'new' &&
         !hasInteractedThisSession &&
-        isUuidLike(updatedThread.claudeSessionId?.trim() ?? '')
+        isUuidLike(threadAgentSessionId(updatedThread))
       ) {
-        updatedThread = await api.clearThreadClaudeSession(updatedThread.workspaceId, updatedThread.id);
+        updatedThread = await api.clearThreadAgentSession(
+          updatedThread.workspaceId,
+          updatedThread.id,
+          threadAgentProvider(updatedThread)
+        );
         applyThreadUpdate(updatedThread);
       }
       const canRestartRdevInPlace =
-        workspace?.kind === 'rdev' && isUuidLike(updatedThread.claudeSessionId?.trim() ?? '');
+        workspace?.kind === 'rdev' && isUuidLike(threadAgentSessionId(updatedThread));
       if (canRestartRdevInPlace) {
-        const switchedInPlace = await restartRdevClaudeInPlace(updatedThread);
+        const switchedInPlace = await restartRdevAgentInPlace(updatedThread);
         if (switchedInPlace) {
           const sessionId =
             activeRunsByThreadRef.current[updatedThread.id]?.sessionId ?? runStore.sessionForThread(updatedThread.id) ?? null;
@@ -7306,7 +7499,7 @@ export default function App() {
             setSelectedWorkspace(updatedThread.workspaceId);
           }
           setSelectedThread(updatedThread.id);
-          pushToast(`${claudeAccessModeLabel} ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
+          pushToast(`${selectedThreadAccessModeLabel} ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
           return;
         }
         pushToast('Could not switch in-place for remote workspace; reconnecting session.', 'info');
@@ -7321,14 +7514,14 @@ export default function App() {
       await waitForThreadReplayWindow(updatedThread.id, nextSessionId);
       await replayThreadDraftInput(nextSessionId, draftInput);
     } catch (error) {
-      pushToast(`Failed to update ${claudeAccessModeLabel}: ${String(error)}`, 'error');
+      pushToast(`Failed to update ${selectedThreadAccessModeLabel}: ${String(error)}`, 'error');
     } finally {
       setFullAccessUpdating(false);
     }
   }, [
     activeRunsByThreadRef,
     applyThreadUpdate,
-    claudeAccessModeLabel,
+    selectedThreadAccessModeLabel,
     ensureSessionForThread,
     fullAccessUpdating,
     getThreadDraftInput,
@@ -7338,7 +7531,7 @@ export default function App() {
     primeRemoteThreadStartupOnSelection,
     pushToast,
     replayThreadDraftInput,
-    restartRdevClaudeInPlace,
+    restartRdevAgentInPlace,
     runStore,
     sessionMetaBySessionIdRef,
     selectedThread,
@@ -7408,12 +7601,11 @@ export default function App() {
 
   const copyResumeCommand = useCallback(
     (thread: ThreadMetadata) => {
-      const sessionId = thread.claudeSessionId?.trim();
-      if (!sessionId) {
-        pushToast('No Claude session ID available — start a session first.', 'error');
+      const command = buildAgentResumeCommand(thread, settings.claudePermissionMode);
+      if (!command) {
+        pushToast(`No ${selectedProviderLabel(thread)} session ID available — start a session first.`, 'error');
         return;
       }
-      const command = buildClaudeResumeCommand(sessionId, thread.fullAccess, settings.claudePermissionMode);
       void writeTextToClipboard(command)
         .then(() => {
           pushToast('Resume command copied to clipboard.', 'info');
@@ -7439,9 +7631,9 @@ export default function App() {
           cwd = (await resolveInitialThreadCwd(thread, workspace).catch(() => null))?.trim() || cwd;
         }
 
-        const command = buildClaudeResumeTerminalCommand(thread, cwd, settings.claudePermissionMode);
+        const command = buildAgentResumeTerminalCommand(thread, cwd, settings.claudePermissionMode);
         if (!command) {
-          pushToast('No Claude session ID available — start a session first.', 'error');
+          pushToast(`No ${selectedProviderLabel(thread)} session ID available — start a session first.`, 'error');
           return;
         }
         await api.openTerminalCommand(command);
@@ -7474,6 +7666,9 @@ export default function App() {
   );
 
   const onImportSession = useCallback((workspace: Workspace) => {
+    if (ACTIVE_AGENT_PROVIDER !== 'claude') {
+      return;
+    }
     setImportSessionWorkspace(workspace);
     setImportSessionError(null);
   }, []);
@@ -7544,6 +7739,9 @@ export default function App() {
   );
 
   const refreshImportableClaudeSessionsDiscovery = useCallback(async () => {
+    if (ACTIVE_AGENT_PROVIDER !== 'claude') {
+      return;
+    }
     setBulkImportLoading(true);
     setBulkImportError(null);
     try {
@@ -7561,6 +7759,9 @@ export default function App() {
   }, []);
 
   const openBulkImportModal = useCallback(() => {
+    if (ACTIVE_AGENT_PROVIDER !== 'claude') {
+      return;
+    }
     setSettingsOpen(false);
     setAddWorkspaceOpen(false);
     setAddWorkspaceError(null);
@@ -7967,7 +8168,7 @@ export default function App() {
     inputControlCarryByThreadRef.current[selectedThread.id] = parsed.nextControlCarry;
     const submittedLines = parsed.submittedLines;
     const nativeForkCommand =
-      selectedWorkspace && !isRemoteWorkspaceKind(selectedWorkspace.kind)
+      selectedWorkspace && isClaudeThread(selectedThread) && !isRemoteWorkspaceKind(selectedWorkspace.kind)
         ? detectNativeForkCommand(submittedLines)
         : null;
 
@@ -8145,7 +8346,9 @@ export default function App() {
         selectedThreadId={selectedThreadId}
         threadSearch={threadSearch}
         defaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
-        elevatedAccessLabel={claudeAccessModeLabel}
+        agentLabel={ACTIVE_AGENT_LABEL}
+        elevatedAccessLabel={activeAccessModeLabel}
+        showImportSession={ACTIVE_AGENT_PROVIDER === 'claude'}
         creatingThreadByWorkspace={creatingThreadByWorkspace}
         onOpenWorkspacePicker={openWorkspacePicker}
         onOpenSettings={openSettings}
@@ -8232,11 +8435,10 @@ export default function App() {
               onData={stableTerminalOnData}
               onResize={stableTerminalOnResize}
               onFocusChange={handleClaudeTerminalFocusChange}
-              onStatefulRedrawRequest={requestSelectedStatefulTerminalRepair}
               onFollowOutputPausedChange={handleSelectedTerminalFollowPausedChange}
             />
           ) : (
-            <div className="terminal-empty">Select a thread to start Claude.</div>
+            <div className="terminal-empty">Select a thread to start {ACTIVE_AGENT_LABEL}.</div>
           )}
         </section>
         <BottomBar
@@ -8247,6 +8449,7 @@ export default function App() {
               <ThreadSkillsPopover
                 workspace={selectedWorkspace}
                 thread={selectedThread}
+                agentLabel={selectedThreadAgentLabel}
                 skills={selectedWorkspaceSkills}
                 loading={selectedWorkspaceSkillsLoading}
                 error={selectedWorkspaceSkillError}
@@ -8267,7 +8470,7 @@ export default function App() {
           attachmentDraftPaths={selectedThreadDraftAttachments}
           attachmentsEnabled={Boolean(selectedThread)}
           fullAccessUpdating={fullAccessUpdating}
-          elevatedAccessLabel={claudeAccessModeLabel}
+          elevatedAccessLabel={selectedThreadAccessModeLabel}
           gitInfo={gitInfo}
           onPickAttachments={pickAttachmentFiles}
           onAddAttachmentPaths={addAttachmentPathsFromDrop}
@@ -8304,13 +8507,15 @@ export default function App() {
 
       <SettingsModal
         open={settingsOpen}
-        initialCliPath={settings.claudeCliPath ?? ''}
+        initialCliPath={activeCliPath}
         initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
         initialClaudePermissionMode={normalizeClaudePermissionMode(settings.claudePermissionMode)}
         initialDefaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
         initialTaskCompletionAlerts={settings.taskCompletionAlerts === true}
         initialTerminalScrollbackLines={normalizeTerminalScrollbackLines(settings.terminalScrollbackLines)}
         detectedCliPath={detectedCliPath}
+        agentProvider={ACTIVE_AGENT_PROVIDER}
+        elevatedAccessLabel={activeAccessModeLabel}
         copyEnvDiagnosticsDisabled={!selectedWorkspace || selectedWorkspace.kind !== 'local'}
         onClose={() => setSettingsOpen(false)}
         onSave={(nextSettings) => void saveSettings(nextSettings)}
@@ -8341,40 +8546,44 @@ export default function App() {
         onConfirmSsh={(command, displayName, remotePath) =>
           void confirmSshWorkspace(command, displayName, remotePath)
         }
-        onOpenBulkImport={openBulkImportModal}
+        onOpenBulkImport={ACTIVE_AGENT_PROVIDER === 'claude' ? openBulkImportModal : undefined}
       />
 
-      <ImportSessionModal
-        open={Boolean(importSessionWorkspace)}
-        workspaceName={importSessionWorkspace?.name ?? ''}
-        error={importSessionError}
-        saving={importingSession}
-        onClose={() => {
-          setImportSessionWorkspace(null);
-          setImportSessionError(null);
-        }}
-        onConfirm={(claudeSessionId) => void confirmImportSession(claudeSessionId)}
-      />
+      {ACTIVE_AGENT_PROVIDER === 'claude' ? (
+        <>
+          <ImportSessionModal
+            open={Boolean(importSessionWorkspace)}
+            workspaceName={importSessionWorkspace?.name ?? ''}
+            error={importSessionError}
+            saving={importingSession}
+            onClose={() => {
+              setImportSessionWorkspace(null);
+              setImportSessionError(null);
+            }}
+            onConfirm={(claudeSessionId) => void confirmImportSession(claudeSessionId)}
+          />
 
-      <BulkImportClaudeSessionsModal
-        open={bulkImportOpen}
-        loading={bulkImportLoading}
-        importing={bulkImporting}
-        projects={discoveredImportableClaudeProjects}
-        selectedSessionIds={selectedBulkImportSessionIds}
-        alreadyImportedSessionIds={importedClaudeSessionIds}
-        error={bulkImportError}
-        onClose={closeBulkImportModal}
-        onToggleSession={toggleBulkImportSessionSelection}
-        onToggleProject={toggleBulkImportProjectSelection}
-        onImport={() => void confirmBulkImportClaudeSessions()}
-      />
+          <BulkImportClaudeSessionsModal
+            open={bulkImportOpen}
+            loading={bulkImportLoading}
+            importing={bulkImporting}
+            projects={discoveredImportableClaudeProjects}
+            selectedSessionIds={selectedBulkImportSessionIds}
+            alreadyImportedSessionIds={importedClaudeSessionIds}
+            error={bulkImportError}
+            onClose={closeBulkImportModal}
+            onToggleSession={toggleBulkImportSessionSelection}
+            onToggleProject={toggleBulkImportProjectSelection}
+            onImport={() => void confirmBulkImportClaudeSessions()}
+          />
+        </>
+      ) : null}
 
       {resumeFailureModal ? (
         <div className="modal-backdrop">
           <section className="modal">
             <h3>Failed to resume session. Start fresh?</h3>
-            <p>Claude could not resume this thread&apos;s saved session id.</p>
+            <p>{selectedThreadAgentLabel} could not resume this thread&apos;s saved session id.</p>
             {resumeFailureModal.showLog ? <pre>{resumeFailureModal.log || '(No logs captured)'}</pre> : null}
             <footer className="modal-actions">
               <button

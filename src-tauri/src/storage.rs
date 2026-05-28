@@ -8,11 +8,12 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::models::{
-    FinalizedNativeFork, ForkThreadResult, PreparedNativeFork, Settings, ThreadMetadata,
+    AgentProvider, FinalizedNativeFork, ForkThreadResult, PreparedNativeFork, Settings, ThreadMetadata,
     ThreadRunStatus, TranscriptEntry, Workspace, WorkspaceKind,
 };
 
 const APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ATController";
+const COPILOT_APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ATController Copilot";
 
 fn thread_metadata_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -94,7 +95,23 @@ pub fn app_support_root() -> Result<PathBuf> {
         }
     }
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
-    Ok(home.join(APP_SUPPORT_SUBDIR))
+    Ok(home.join(app_support_subdir()))
+}
+
+pub fn configured_agent_provider() -> AgentProvider {
+    std::env::var("ATCONTROLLER_AGENT_PROVIDER")
+        .ok()
+        .as_deref()
+        .map(AgentProvider::from_config_value)
+        .or_else(|| option_env!("ATCONTROLLER_AGENT_PROVIDER").map(AgentProvider::from_config_value))
+        .unwrap_or_default()
+}
+
+fn app_support_subdir() -> &'static str {
+    match configured_agent_provider() {
+        AgentProvider::Claude => APP_SUPPORT_SUBDIR,
+        AgentProvider::Copilot => COPILOT_APP_SUPPORT_SUBDIR,
+    }
 }
 
 pub fn ensure_base_dirs() -> Result<PathBuf> {
@@ -460,10 +477,11 @@ pub fn create_thread(
     full_access: bool,
 ) -> Result<ThreadMetadata> {
     let now = Utc::now();
+    let agent_id = agent_id.unwrap_or_else(|| configured_agent_provider().agent_id().to_string());
     let thread = ThreadMetadata {
         id: Uuid::new_v4().to_string(),
         workspace_id: workspace_id.to_string(),
-        agent_id: agent_id.unwrap_or_else(|| "claude-code".to_string()),
+        agent_id,
         full_access,
         enabled_skills: Vec::new(),
         created_at: now,
@@ -474,6 +492,7 @@ pub fn create_thread(
         last_run_started_at: None,
         last_run_ended_at: None,
         claude_session_id: None,
+        copilot_session_id: None,
         forked_from_claude_session_id: None,
         pending_fork_source_claude_session_id: None,
         pending_fork_known_child_session_ids: Vec::new(),
@@ -578,6 +597,57 @@ fn claude_session_id_claimed_by_other_thread_unlocked(
         }
         if metadata
             .claude_session_id
+            .as_deref()
+            .is_some_and(|existing| existing == normalized)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn copilot_session_id_claimed_by_other_thread_unlocked(
+    workspace_id: &str,
+    thread_id: &str,
+    copilot_session_id: &str,
+) -> Result<bool> {
+    let normalized = copilot_session_id.trim();
+    if normalized.is_empty() {
+        return Ok(false);
+    }
+
+    let base = thread_workspace_dir(workspace_id)?;
+    if !base.exists() {
+        return Ok(false);
+    }
+
+    for entry in fs::read_dir(base)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(candidate_thread_id) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if candidate_thread_id == thread_id {
+            continue;
+        }
+
+        let metadata_path = path.join("thread.json");
+        if !metadata_path.is_file() {
+            continue;
+        }
+
+        let raw = fs::read_to_string(metadata_path)?;
+        let metadata: ThreadMetadata = serde_json::from_str(&raw)?;
+        if metadata.is_archived {
+            continue;
+        }
+        if metadata
+            .copilot_session_id
             .as_deref()
             .is_some_and(|existing| existing == normalized)
         {
@@ -722,6 +792,32 @@ pub fn clear_thread_claude_session(workspace_id: &str, thread_id: &str) -> Resul
     })
 }
 
+pub fn clear_thread_agent_session(
+    workspace_id: &str,
+    thread_id: &str,
+    agent_provider: AgentProvider,
+) -> Result<ThreadMetadata> {
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        if AgentProvider::from_agent_id(&thread.agent_id) != agent_provider {
+            return Err(anyhow!("Thread provider does not match requested session clear"));
+        }
+        match agent_provider {
+            AgentProvider::Claude => {
+                thread.claude_session_id = None;
+                thread.pending_fork_source_claude_session_id = None;
+                thread.pending_fork_known_child_session_ids.clear();
+                thread.pending_fork_requested_at = None;
+                thread.pending_fork_launch_consumed = false;
+            }
+            AgentProvider::Copilot => {
+                thread.copilot_session_id = None;
+            }
+        }
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
+}
+
 pub fn set_thread_claude_session_id(
     workspace_id: &str,
     thread_id: &str,
@@ -729,6 +825,9 @@ pub fn set_thread_claude_session_id(
 ) -> Result<ThreadMetadata> {
     let normalized = normalize_optional_session_id(claude_session_id);
     mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        if AgentProvider::from_agent_id(&thread.agent_id) != AgentProvider::Claude {
+            return Err(anyhow!("Claude session ids can only be assigned to Claude threads"));
+        }
         if let Some(session_id) = normalized.as_deref() {
             if claude_session_id_claimed_by_other_thread_unlocked(
                 workspace_id,
@@ -768,6 +867,9 @@ pub fn set_thread_claude_session_id_if_missing(
         .lock()
         .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
     let mut thread = read_thread_metadata_unlocked(workspace_id, thread_id)?;
+    if AgentProvider::from_agent_id(&thread.agent_id) != AgentProvider::Claude {
+        return Err(anyhow!("Claude session ids can only be assigned to Claude threads"));
+    }
     if thread.claude_session_id.is_some() {
         return Ok(None);
     }
@@ -783,12 +885,48 @@ pub fn set_thread_claude_session_id_if_missing(
     Ok(Some(thread))
 }
 
+pub fn set_thread_copilot_session_id_if_missing(
+    workspace_id: &str,
+    thread_id: &str,
+    copilot_session_id: &str,
+) -> Result<Option<ThreadMetadata>> {
+    let Some(normalized) = normalize_optional_session_id(copilot_session_id) else {
+        return Ok(None);
+    };
+
+    let _guard = thread_metadata_lock()
+        .lock()
+        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
+    let mut thread = read_thread_metadata_unlocked(workspace_id, thread_id)?;
+    if AgentProvider::from_agent_id(&thread.agent_id) != AgentProvider::Copilot {
+        return Err(anyhow!(
+            "Copilot session ids can only be assigned to Copilot threads"
+        ));
+    }
+    if thread.copilot_session_id.is_some() {
+        return Ok(None);
+    }
+    if copilot_session_id_claimed_by_other_thread_unlocked(workspace_id, thread_id, &normalized)? {
+        return Err(anyhow!(
+            "Copilot session id is already claimed by another thread"
+        ));
+    }
+
+    thread.copilot_session_id = Some(normalized.to_string());
+    thread.updated_at = Utc::now();
+    write_thread_metadata_unlocked(&thread)?;
+    Ok(Some(thread))
+}
+
 pub fn create_forked_thread(
     workspace_id: &str,
     source_thread_id: &str,
     known_child_session_ids: Vec<String>,
 ) -> Result<ThreadMetadata> {
     let source_thread = read_thread_metadata(workspace_id, source_thread_id)?;
+    if AgentProvider::from_agent_id(&source_thread.agent_id) != AgentProvider::Claude {
+        return Err(anyhow!("Thread forking is only supported for Claude threads"));
+    }
     let source_claude_session_id = source_thread
         .claude_session_id
         .as_deref()
@@ -809,6 +947,7 @@ pub fn create_forked_thread(
         last_run_started_at: None,
         last_run_ended_at: None,
         claude_session_id: None,
+        copilot_session_id: None,
         forked_from_claude_session_id: Some(source_claude_session_id.clone()),
         pending_fork_source_claude_session_id: Some(source_claude_session_id),
         pending_fork_known_child_session_ids: known_child_session_ids,
@@ -839,6 +978,9 @@ pub fn fork_thread_from_ui(
         .lock()
         .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
     let mut source_thread = read_thread_metadata_unlocked(workspace_id, source_thread_id)?;
+    if AgentProvider::from_agent_id(&source_thread.agent_id) != AgentProvider::Claude {
+        return Err(anyhow!("Thread forking is only supported for Claude threads"));
+    }
     let source_claude_session_id = source_thread
         .claude_session_id
         .as_deref()
@@ -863,6 +1005,7 @@ pub fn fork_thread_from_ui(
         last_run_started_at: None,
         last_run_ended_at: None,
         claude_session_id: None,
+        copilot_session_id: None,
         forked_from_claude_session_id: Some(source_claude_session_id.clone()),
         pending_fork_source_claude_session_id: Some(source_claude_session_id),
         pending_fork_known_child_session_ids: known_child_session_ids,
@@ -989,6 +1132,7 @@ pub fn finalize_thread_native_fork(
         last_run_started_at: current_thread.last_run_started_at,
         last_run_ended_at: current_thread.last_run_ended_at,
         claude_session_id: Some(source_claude_session_id.clone()),
+        copilot_session_id: None,
         forked_from_claude_session_id: current_thread.forked_from_claude_session_id.clone(),
         pending_fork_source_claude_session_id: None,
         pending_fork_known_child_session_ids: Vec::new(),
@@ -1049,6 +1193,13 @@ pub fn set_thread_agent(
     agent_id: String,
 ) -> Result<ThreadMetadata> {
     mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        let current_provider = AgentProvider::from_agent_id(&thread.agent_id);
+        let next_provider = AgentProvider::from_agent_id(&agent_id);
+        if current_provider != next_provider {
+            return Err(anyhow!(
+                "Thread provider is fixed at creation and cannot be changed"
+            ));
+        }
         thread.agent_id = agent_id;
         thread.updated_at = Utc::now();
         Ok(())

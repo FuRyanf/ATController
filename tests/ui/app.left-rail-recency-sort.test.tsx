@@ -829,6 +829,48 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
+  it('clears a structured working dot when the terminal redraws an idle Claude prompt without a completion event', async () => {
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: 'new',
+        resumeSessionId: null,
+        turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
+        thread:
+          params.threadId === 'thread-newer'
+            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            : mocks.getThread(params.threadId)
+      }));
+
+      const user = userEvent.setup();
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+      });
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: '\u001b[2K\r›' });
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+      });
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+    }
+  });
+
   it('keeps the working dot through structured control-only terminal refreshes', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();

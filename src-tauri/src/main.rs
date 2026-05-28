@@ -13,7 +13,7 @@ use serde::Deserialize;
 use tauri::{Manager, State};
 
 use crate::models::{
-    AppUpdateInfo, ContextPreview, FinalizedNativeFork, ForkThreadResult, GitBranchEntry,
+    AgentProvider, AppUpdateInfo, ContextPreview, FinalizedNativeFork, ForkThreadResult, GitBranchEntry,
     GitDiffSummary, GitInfo, GitPullForNewThreadResult, GitWorkspaceStatus,
     ImportableClaudeProject, ImportableClaudeSession, PreparedNativeFork, RunClaudeRequest,
     RunClaudeResponse, Settings, SkillInfo, TerminalStartResponse, ThreadMetadata, TranscriptEntry,
@@ -310,6 +310,16 @@ fn clear_thread_claude_session(
 }
 
 #[tauri::command]
+fn clear_thread_agent_session(
+    workspace_id: String,
+    thread_id: String,
+    agent_provider: AgentProvider,
+) -> Result<ThreadMetadata, String> {
+    storage::clear_thread_agent_session(&workspace_id, &thread_id, agent_provider)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn clear_thread_pending_fork(
     workspace_id: String,
     thread_id: String,
@@ -416,8 +426,15 @@ fn load_transcript(
 }
 
 #[tauri::command]
-fn list_skills(workspace_path: String) -> Result<Vec<SkillInfo>, String> {
-    skills::list_skills(&workspace_path).map_err(|error| error.to_string())
+fn list_skills(
+    workspace_path: String,
+    agent_provider: Option<AgentProvider>,
+) -> Result<Vec<SkillInfo>, String> {
+    skills::list_skills(
+        &workspace_path,
+        agent_provider.unwrap_or_else(storage::configured_agent_provider),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -445,6 +462,12 @@ fn save_settings(settings: Settings) -> Result<Settings, String> {
 fn detect_claude_cli_path() -> Result<Option<String>, String> {
     let settings = storage::load_settings().map_err(|error| error.to_string())?;
     Ok(runner::detect_claude_cli_path(&settings))
+}
+
+#[tauri::command]
+fn detect_copilot_cli_path() -> Result<Option<String>, String> {
+    let settings = storage::load_settings().map_err(|error| error.to_string())?;
+    Ok(runner::detect_copilot_cli_path(&settings))
 }
 
 #[tauri::command]
@@ -481,19 +504,25 @@ fn check_for_update() -> Result<AppUpdateInfo, String> {
 
 #[tauri::command]
 async fn install_latest_update(app: tauri::AppHandle) -> Result<bool, String> {
-    tokio::task::spawn_blocking(runner::install_latest_update)
+    let agent_provider = storage::configured_agent_provider();
+    tokio::task::spawn_blocking(move || runner::install_latest_update(agent_provider))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
 
     // Always relaunch the installed /Applications bundle so updates work even
     // when the current process was launched from an older app copy/location.
+    let installed_app_path = runner::installed_app_path(agent_provider);
     let launch_status = std::process::Command::new("open")
-        .args(["-n", "/Applications/ATController.app"])
+        .arg("-n")
+        .arg(&installed_app_path)
         .status()
         .map_err(|error| format!("Installed update, but failed to relaunch app: {error}"))?;
     if !launch_status.success() {
-        return Err("Installed update, but failed to relaunch app from /Applications.".to_string());
+        return Err(format!(
+            "Installed update, but failed to relaunch app from {}.",
+            installed_app_path.display()
+        ));
     }
 
     app.exit(0);
@@ -882,6 +911,7 @@ fn main() {
             create_forked_thread,
             fork_thread_from_ui,
             set_thread_full_access,
+            clear_thread_agent_session,
             clear_thread_claude_session,
             clear_thread_pending_fork,
             mark_thread_pending_fork_consumed,
@@ -900,6 +930,7 @@ fn main() {
             get_settings,
             save_settings,
             detect_claude_cli_path,
+            detect_copilot_cli_path,
             check_for_update,
             install_latest_update,
             run_claude,

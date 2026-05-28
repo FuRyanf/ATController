@@ -4,6 +4,8 @@ import {
   TERMINAL_SCROLLBACK_LINES_MAX,
   TERMINAL_SCROLLBACK_LINES_MIN,
   normalizeTerminalScrollbackLines,
+  agentLabel,
+  type AgentProvider,
   type AppearanceMode,
   type ClaudePermissionMode
 } from '../types';
@@ -18,6 +20,8 @@ interface SettingsModalProps {
   initialTaskCompletionAlerts: boolean;
   initialTerminalScrollbackLines: number;
   detectedCliPath?: string | null;
+  agentProvider?: AgentProvider;
+  elevatedAccessLabel?: string;
   copyEnvDiagnosticsDisabled?: boolean;
   onClose: () => void;
   onSave: (settings: {
@@ -78,6 +82,8 @@ export function SettingsModal({
   initialTaskCompletionAlerts,
   initialTerminalScrollbackLines,
   detectedCliPath,
+  agentProvider = 'claude',
+  elevatedAccessLabel,
   copyEnvDiagnosticsDisabled = false,
   onClose,
   onSave,
@@ -140,9 +146,11 @@ export function SettingsModal({
   const terminalScrollbackLines = normalizeTerminalScrollbackLines(
     Number.parseInt(terminalScrollbackLinesInput, 10)
   );
-  const accessLabel = claudePermissionMode === 'autoMode' ? 'Auto mode' : 'Full access';
+  const providerLabel = agentLabel(agentProvider);
+  const isCopilot = agentProvider === 'copilot';
+  const accessLabel = elevatedAccessLabel ?? (claudePermissionMode === 'autoMode' ? 'Auto mode' : 'Full access');
   const accessLabelLower = accessLabel.toLowerCase();
-  const accessArticle = claudePermissionMode === 'autoMode' ? 'an' : 'a';
+  const accessArticle = /^[aeiou]/i.test(accessLabel) ? 'an' : 'a';
 
   return (
     <div className="modal-backdrop">
@@ -245,19 +253,19 @@ export function SettingsModal({
 
           <div className="settings-panel-column">
             <SettingsSection
-              title="Claude"
-              description="Set the Claude CLI path and the default access level used for new threads."
+              title={providerLabel}
+              description={`Set the ${providerLabel} CLI path and the default access level used for new threads.`}
             >
               <SettingsRow
                 align="start"
-                label={<label htmlFor="cli-path">Claude path</label>}
+                label={<label htmlFor="cli-path">{providerLabel} path</label>}
                 controlClassName="settings-row-control-stack"
                 control={
                   <>
                     <input
                       id="cli-path"
                       type="text"
-                      placeholder="/opt/homebrew/bin/claude"
+                      placeholder={isCopilot ? '/opt/homebrew/bin/copilot' : '/opt/homebrew/bin/claude'}
                       value={cliPath}
                       onChange={(event) => setCliPath(event.target.value)}
                     />
@@ -280,32 +288,34 @@ export function SettingsModal({
                 }
               />
 
-              <SettingsRow
-                align="start"
-                label="Elevated mode"
-                description="Choose how elevated threads ask Claude to handle tool permissions."
-                controlClassName="settings-row-control-wrap"
-                control={
-                  <div className="appearance-toggle-group" role="radiogroup" aria-label="Claude elevated mode">
-                    {CLAUDE_PERMISSION_MODE_OPTIONS.map((option) => {
-                      const active = claudePermissionMode === option.value;
-                      return (
-                        <button
-                          key={option.value}
-                          type="button"
-                          role="radio"
-                          aria-checked={active}
-                          aria-description={option.description}
-                          className={active ? 'appearance-toggle-option active' : 'appearance-toggle-option'}
-                          onClick={() => setClaudePermissionMode(option.value)}
-                        >
-                          <span className="appearance-toggle-label">{option.label}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                }
-              />
+              {isCopilot ? null : (
+                <SettingsRow
+                  align="start"
+                  label="Elevated mode"
+                  description="Choose how elevated threads ask Claude to handle tool permissions."
+                  controlClassName="settings-row-control-wrap"
+                  control={
+                    <div className="appearance-toggle-group" role="radiogroup" aria-label="Claude elevated mode">
+                      {CLAUDE_PERMISSION_MODE_OPTIONS.map((option) => {
+                        const active = claudePermissionMode === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            aria-description={option.description}
+                            className={active ? 'appearance-toggle-option active' : 'appearance-toggle-option'}
+                            onClick={() => setClaudePermissionMode(option.value)}
+                          >
+                            <span className="appearance-toggle-label">{option.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  }
+                />
+              )}
 
               <SettingsRow
                 label={<span id="settings-default-full-access-title">Start new threads with {accessLabel}</span>}

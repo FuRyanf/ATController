@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::git_tools;
 use crate::models::{
-    ClaudePermissionMode, ClaudeTurnCompletionSummary, ContextFilePreview, ContextPreview,
+    AgentProvider, ClaudePermissionMode, ClaudeTurnCompletionSummary, ContextFilePreview, ContextPreview,
     ImportableClaudeProject, ImportableClaudeSession, PreparedNativeFork, RunClaudeRequest,
     RunClaudeResponse, RunExitEvent, RunMetadata, Settings, StreamEvent, TerminalDataEvent,
     TerminalExitEvent, TerminalOutputSnapshot, TerminalReadyEvent, TerminalSshAuthStatusEvent,
@@ -61,6 +61,7 @@ const CLAUDE_FULL_ACCESS_ARGS: [&str; 3] = [
     "bypassPermissions",
 ];
 const CLAUDE_AUTO_MODE_ARGS: [&str; 2] = ["--permission-mode", "auto"];
+const COPILOT_AUTOPILOT_ARGS: [&str; 2] = ["--mode", "autopilot"];
 
 fn claude_permission_mode_args(mode: ClaudePermissionMode) -> &'static [&'static str] {
     match mode {
@@ -1445,6 +1446,41 @@ fn build_claude_shell_command(
     parts.join(" ")
 }
 
+fn build_copilot_shell_command(
+    cli_path: &str,
+    session_id: &str,
+    session_mode: TerminalSessionMode,
+    autopilot_flag: bool,
+) -> String {
+    let mut parts = vec![
+        "env".to_string(),
+        "TERM=xterm-256color".to_string(),
+        "COLORTERM=truecolor".to_string(),
+        "CLICOLOR=1".to_string(),
+        "CLICOLOR_FORCE=1".to_string(),
+        "FORCE_COLOR=1".to_string(),
+        shell_escape_arg(cli_path),
+    ];
+    match session_mode {
+        TerminalSessionMode::Resumed => {
+            parts.push("--resume".to_string());
+            parts.push(shell_escape_arg(session_id));
+        }
+        TerminalSessionMode::New => {
+            parts.push("--session-id".to_string());
+            parts.push(shell_escape_arg(session_id));
+        }
+        TerminalSessionMode::Forked => {
+            parts.push("--resume".to_string());
+            parts.push(shell_escape_arg(session_id));
+        }
+    }
+    if autopilot_flag {
+        parts.extend(COPILOT_AUTOPILOT_ARGS.iter().map(|arg| (*arg).to_string()));
+    }
+    parts.join(" ")
+}
+
 fn build_terminal_shell_command(
     workspace_kind: WorkspaceKind,
     rdev_ssh_command: Option<&str>,
@@ -1534,16 +1570,21 @@ fn build_workspace_shell_command(
     }
 }
 
-fn resolve_claude_command_for_workspace(
+fn resolve_agent_command_for_workspace(
+    agent_provider: AgentProvider,
     workspace_kind: WorkspaceKind,
     settings: &Settings,
 ) -> Result<String> {
     if workspace_kind == WorkspaceKind::Rdev || workspace_kind == WorkspaceKind::Ssh {
-        return Ok("claude".to_string());
+        return Ok(agent_provider.cli_name().to_string());
     }
 
-    detect_claude_cli_path(settings)
-        .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))
+    match agent_provider {
+        AgentProvider::Claude => detect_claude_cli_path(settings)
+            .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings.")),
+        AgentProvider::Copilot => detect_copilot_cli_path(settings)
+            .ok_or_else(|| anyhow!("Copilot CLI not found. Configure the CLI path in Settings.")),
+    }
 }
 
 fn ensure_rdev_non_tmux(remote_command: &str) -> String {
@@ -2408,7 +2449,7 @@ pub type TerminalSessionId = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalSessionKind {
-    ClaudeThread,
+    AgentThread,
     WorkspaceShell,
 }
 
@@ -2417,6 +2458,7 @@ struct TerminalSession {
     workspace_id: String,
     workspace_path: String,
     current_cwd: Mutex<String>,
+    agent_provider: AgentProvider,
     observed_claude_session_id: Mutex<String>,
     kind: TerminalSessionKind,
     thread_id: Option<String>,
@@ -2643,6 +2685,41 @@ pub fn detect_claude_cli_path(settings: &Settings) -> Option<String> {
     }
 
     if let Ok(output) = std::process::Command::new("which").arg("claude").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() && Path::new(&path).exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+pub fn detect_copilot_cli_path(settings: &Settings) -> Option<String> {
+    if let Some(path) = &settings.copilot_cli_path {
+        if Path::new(path).exists() {
+            return Some(path.clone());
+        }
+    }
+
+    let mut candidates = vec![
+        "/usr/local/bin/copilot".to_string(),
+        "/opt/homebrew/bin/copilot".to_string(),
+    ];
+    if let Some(home) = dirs::home_dir().map(|dir| dir.to_string_lossy().to_string()) {
+        candidates.push(format!("{home}/.volta/bin/copilot"));
+        candidates.push(format!("{home}/.npm-global/bin/copilot"));
+        candidates.push(format!("{home}/.local/bin/copilot"));
+    }
+
+    for path in candidates {
+        if Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("which").arg("copilot").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() && Path::new(&path).exists() {
@@ -3184,6 +3261,9 @@ pub fn prepare_thread_native_fork(
     }
 
     let thread = storage::read_thread_metadata(&workspace_id, &thread_id)?;
+    if AgentProvider::from_agent_id(&thread.agent_id) != AgentProvider::Claude {
+        return Err(anyhow!("Thread forking is only supported for Claude threads"));
+    }
     let session = state
         .terminal_sessions
         .get(&terminal_session_id)?
@@ -3247,50 +3327,60 @@ pub async fn terminal_start_session(
     }
 
     let mut thread = storage::read_thread_metadata(&workspace_id, &thread_id)?;
+    let agent_provider = AgentProvider::from_agent_id(&thread.agent_id);
     let started_at = Utc::now();
     if thread.full_access != full_access_flag {
         thread.full_access = full_access_flag;
     }
-    if thread
-        .claude_session_id
-        .as_deref()
-        .is_some_and(|session_id| !is_uuid_like(session_id))
-    {
-        thread.claude_session_id = None;
-    }
-    if thread
-        .pending_fork_source_claude_session_id
-        .as_deref()
-        .is_some_and(|session_id| !is_uuid_like(session_id))
-    {
+    let pending_fork_source_session_id = if agent_provider == AgentProvider::Claude {
+        if thread
+            .claude_session_id
+            .as_deref()
+            .is_some_and(|session_id| !is_uuid_like(session_id))
+        {
+            thread.claude_session_id = None;
+        }
+        if thread
+            .pending_fork_source_claude_session_id
+            .as_deref()
+            .is_some_and(|session_id| !is_uuid_like(session_id))
+        {
+            thread.pending_fork_source_claude_session_id = None;
+            thread.pending_fork_known_child_session_ids.clear();
+            thread.pending_fork_requested_at = None;
+            thread.pending_fork_launch_consumed = false;
+        }
+        if thread.pending_fork_launch_consumed
+            && thread
+                .pending_fork_source_claude_session_id
+                .as_deref()
+                .is_some_and(is_uuid_like)
+            && thread
+                .claude_session_id
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(|session_id| {
+                    thread.pending_fork_source_claude_session_id.as_deref() == Some(session_id)
+                })
+        {
+            return Err(anyhow!(
+                "Thread is waiting for fork resolution before it can be resumed"
+            ));
+        }
+
+        thread
+            .pending_fork_source_claude_session_id
+            .clone()
+            .filter(|session_id| is_uuid_like(session_id))
+            .filter(|_| !thread.pending_fork_launch_consumed)
+    } else {
         thread.pending_fork_source_claude_session_id = None;
         thread.pending_fork_known_child_session_ids.clear();
         thread.pending_fork_requested_at = None;
         thread.pending_fork_launch_consumed = false;
-    }
-    if thread.pending_fork_launch_consumed
-        && thread
-            .pending_fork_source_claude_session_id
-            .as_deref()
-            .is_some_and(is_uuid_like)
-        && thread
-            .claude_session_id
-            .as_deref()
-            .map(str::trim)
-            .is_none_or(|session_id| {
-                thread.pending_fork_source_claude_session_id.as_deref() == Some(session_id)
-            })
-    {
-        return Err(anyhow!(
-            "Thread is waiting for fork resolution before it can be resumed"
-        ));
-    }
-
-    let pending_fork_source_session_id = thread
-        .pending_fork_source_claude_session_id
-        .clone()
-        .filter(|session_id| is_uuid_like(session_id))
-        .filter(|_| !thread.pending_fork_launch_consumed);
+        thread.forked_from_claude_session_id = None;
+        None
+    };
     let pending_fork_restore_snapshot = pending_fork_source_session_id.as_ref().map(|session_id| {
         (
             session_id.clone(),
@@ -3309,11 +3399,18 @@ pub async fn terminal_start_session(
                 false,
             )
         } else {
-            let mut launch_session_id = thread
-                .claude_session_id
-                .clone()
-                .filter(|session_id| is_uuid_like(session_id));
-            if launch_session_id.is_none() {
+            let mut launch_session_id = match agent_provider {
+                AgentProvider::Claude => thread
+                    .claude_session_id
+                    .clone()
+                    .filter(|session_id| is_uuid_like(session_id)),
+                AgentProvider::Copilot => thread
+                    .copilot_session_id
+                    .clone()
+                    .map(|session_id| session_id.trim().to_string())
+                    .filter(|session_id| !session_id.is_empty()),
+            };
+            if agent_provider == AgentProvider::Claude && launch_session_id.is_none() {
                 if let Some(recovered) = recover_session_id_from_logs(&workspace_id, &thread_id) {
                     launch_session_id = Some(recovered);
                 }
@@ -3327,17 +3424,23 @@ pub async fn terminal_start_session(
 
             let session_mode = if generated_session_id {
                 thread.last_new_session_at = Some(started_at);
-                thread.claude_session_id = None;
+                match agent_provider {
+                    AgentProvider::Claude => thread.claude_session_id = None,
+                    AgentProvider::Copilot => thread.copilot_session_id = launch_session_id.clone(),
+                }
                 TerminalSessionMode::New
             } else {
                 thread.last_resume_at = Some(started_at);
-                thread.claude_session_id = launch_session_id.clone();
+                match agent_provider {
+                    AgentProvider::Claude => thread.claude_session_id = launch_session_id.clone(),
+                    AgentProvider::Copilot => thread.copilot_session_id = launch_session_id.clone(),
+                }
                 TerminalSessionMode::Resumed
             };
             (launch_session_id, session_mode, generated_session_id)
         };
     let launch_session_id =
-        launch_session_id.ok_or_else(|| anyhow!("Missing Claude session id"))?;
+        launch_session_id.ok_or_else(|| anyhow!("Missing agent session id"))?;
     let resume_session_id = if session_mode == TerminalSessionMode::Resumed {
         Some(launch_session_id.clone())
     } else {
@@ -3347,37 +3450,55 @@ pub async fn terminal_start_session(
     storage::write_thread_metadata(&thread)?;
 
     let settings = storage::load_settings()?;
-    let claude_command = resolve_claude_command_for_workspace(workspace.kind, &settings)?;
+    let agent_command = resolve_agent_command_for_workspace(agent_provider, workspace.kind, &settings)?;
 
-    let cwd = resolve_terminal_launch_cwd(
-        workspace.kind,
-        &workspace_path,
-        initial_cwd,
-        session_mode,
-        &launch_session_id,
-    );
+    let cwd = if agent_provider == AgentProvider::Claude {
+        resolve_terminal_launch_cwd(
+            workspace.kind,
+            &workspace_path,
+            initial_cwd,
+            session_mode,
+            &launch_session_id,
+        )
+    } else if workspace.kind == WorkspaceKind::Local {
+        initial_cwd.unwrap_or_else(|| workspace_path.clone())
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .to_string_lossy()
+            .to_string()
+    };
     let session_id = Uuid::new_v4().to_string();
     let run_dir = storage::runs_dir(&workspace_id, &thread_id)?.join(&session_id);
     fs::create_dir_all(&run_dir)?;
 
     let shell_path = resolve_login_shell();
-    let use_session_id_for_resume = session_mode == TerminalSessionMode::Resumed
+    let use_session_id_for_resume = agent_provider == AgentProvider::Claude
+        && session_mode == TerminalSessionMode::Resumed
         && workspace.kind == WorkspaceKind::Local
         && resumed_session_requires_session_id_launch(&workspace_path, &cwd, &launch_session_id)?;
-    let claude_shell_command = build_claude_shell_command(
-        &claude_command,
-        &launch_session_id,
-        session_mode,
-        full_access_flag,
-        settings.claude_permission_mode,
-        use_session_id_for_resume,
-    );
+    let agent_shell_command = match agent_provider {
+        AgentProvider::Claude => build_claude_shell_command(
+            &agent_command,
+            &launch_session_id,
+            session_mode,
+            full_access_flag,
+            settings.claude_permission_mode,
+            use_session_id_for_resume,
+        ),
+        AgentProvider::Copilot => build_copilot_shell_command(
+            &agent_command,
+            &launch_session_id,
+            session_mode,
+            full_access_flag,
+        ),
+    };
     let (shell_command, post_connect_command) = build_terminal_shell_command(
         workspace.kind,
         workspace.rdev_ssh_command.as_deref(),
         workspace.ssh_command.as_deref(),
         workspace.remote_path.as_deref(),
-        &claude_shell_command,
+        &agent_shell_command,
     )?;
     let launch_command_for_readiness = post_connect_command
         .clone()
@@ -3395,9 +3516,15 @@ pub async fn terminal_start_session(
             "workspacePath": workspace_path,
             "workspaceId": workspace_id,
             "fullAccess": full_access_flag,
+            "agentProvider": match agent_provider {
+                AgentProvider::Claude => "claude",
+                AgentProvider::Copilot => "copilot",
+            },
             "sessionMode": session_mode.as_str(),
             "resumeSessionId": resume_session_id.clone(),
             "claudeSessionId": thread.claude_session_id.clone(),
+            "copilotSessionId": thread.copilot_session_id.clone(),
+            "agentSessionId": launch_session_id.clone(),
             "launchSessionId": launch_session_id.clone(),
             "cwd": cwd,
             "envVars": env_vars,
@@ -3469,8 +3596,9 @@ pub async fn terminal_start_session(
         workspace_id: workspace_id.clone(),
         workspace_path: workspace_path.clone(),
         current_cwd: Mutex::new(cwd.clone()),
+        agent_provider,
         observed_claude_session_id: Mutex::new(launch_session_id.clone()),
-        kind: TerminalSessionKind::ClaudeThread,
+        kind: TerminalSessionKind::AgentThread,
         thread_id: Some(thread_id.clone()),
         session_mode: Some(session_mode),
         resume_session_id: resume_session_id.clone(),
@@ -3516,7 +3644,7 @@ pub async fn terminal_start_session(
         terminate_terminal_session_process(&session);
         return Err(error);
     }
-    if workspace.kind == WorkspaceKind::Local {
+    if agent_provider == AgentProvider::Claude && workspace.kind == WorkspaceKind::Local {
         spawn_claude_turn_completion_watcher(
             app.clone(),
             session.clone(),
@@ -3797,7 +3925,8 @@ pub async fn terminal_start_session(
         session_id,
         session_mode: session_mode.as_str().to_string(),
         resume_session_id,
-        turn_completion_mode: if workspace.kind == WorkspaceKind::Local {
+        agent_session_id: Some(launch_session_id),
+        turn_completion_mode: if agent_provider == AgentProvider::Claude && workspace.kind == WorkspaceKind::Local {
             "jsonl".to_string()
         } else {
             "idle".to_string()
@@ -3930,6 +4059,7 @@ pub async fn workspace_shell_start_session(
         workspace_id: workspace_id.clone(),
         workspace_path: workspace_path.clone(),
         current_cwd: Mutex::new(cwd.clone()),
+        agent_provider: AgentProvider::Claude,
         observed_claude_session_id: Mutex::new(String::new()),
         kind: TerminalSessionKind::WorkspaceShell,
         thread_id: None,
@@ -4161,7 +4291,7 @@ pub fn terminal_write(
     writer.flush()?;
     drop(writer);
 
-    let submitted_prompt = if session.kind == TerminalSessionKind::ClaudeThread {
+    let submitted_prompt = if session.kind == TerminalSessionKind::AgentThread {
         let mut input_buffer = session
             .submitted_input_buffer
             .lock()
@@ -4171,7 +4301,7 @@ pub fn terminal_write(
         false
     };
 
-    if session.kind == TerminalSessionKind::ClaudeThread && submitted_prompt {
+    if session.kind == TerminalSessionKind::AgentThread && submitted_prompt {
         session
             .submitted_prompt_count
             .fetch_add(1, Ordering::AcqRel);
@@ -4185,11 +4315,19 @@ pub fn terminal_write(
             if let (Some(thread_id), Some(launch_session_id)) =
                 (session.thread_id.as_deref(), pending_session_id)
             {
-                if let Ok(updated_thread) = storage::set_thread_claude_session_id_if_missing(
-                    &session.workspace_id,
-                    thread_id,
-                    &launch_session_id,
-                ) {
+                let updated_thread = match session.agent_provider {
+                    AgentProvider::Claude => storage::set_thread_claude_session_id_if_missing(
+                        &session.workspace_id,
+                        thread_id,
+                        &launch_session_id,
+                    ),
+                    AgentProvider::Copilot => storage::set_thread_copilot_session_id_if_missing(
+                        &session.workspace_id,
+                        thread_id,
+                        &launch_session_id,
+                    ),
+                };
+                if let Ok(updated_thread) = updated_thread {
                     if let Ok(mut pending_confirmation_session_id) =
                         session.pending_confirmation_session_id.lock()
                     {
@@ -4222,7 +4360,7 @@ pub fn terminal_rebind_claude_session(
     let Some(session) = state.terminal_sessions.get(&session_id)? else {
         return Ok(false);
     };
-    if session.kind != TerminalSessionKind::ClaudeThread {
+    if session.kind != TerminalSessionKind::AgentThread || session.agent_provider != AgentProvider::Claude {
         return Ok(false);
     }
 
@@ -4400,28 +4538,45 @@ fn extract_mounted_volume_path(hdiutil_output: &str) -> Option<String> {
     })
 }
 
-pub fn install_latest_update() -> Result<()> {
+fn release_dmg_asset_name(agent_provider: AgentProvider) -> &'static str {
+    match agent_provider {
+        AgentProvider::Claude => "ATController.dmg",
+        AgentProvider::Copilot => "ATController-Copilot.dmg",
+    }
+}
+
+fn installed_app_bundle_name(agent_provider: AgentProvider) -> &'static str {
+    match agent_provider {
+        AgentProvider::Claude => "ATController.app",
+        AgentProvider::Copilot => "ATController Copilot.app",
+    }
+}
+
+pub fn installed_app_path(agent_provider: AgentProvider) -> PathBuf {
+    Path::new("/Applications").join(installed_app_bundle_name(agent_provider))
+}
+
+pub fn install_latest_update(agent_provider: AgentProvider) -> Result<()> {
     let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
     let downloads_dir = home_dir.join("Downloads");
     fs::create_dir_all(&downloads_dir)?;
-    let dmg_path = downloads_dir.join("ATController.dmg");
+    let dmg_asset_name = release_dmg_asset_name(agent_provider);
+    let app_bundle_name = installed_app_bundle_name(agent_provider);
+    let dmg_path = downloads_dir.join(dmg_asset_name);
     let dmg_path_string = dmg_path.to_string_lossy().to_string();
+    let download_url =
+        format!("https://github.com/FuRyanf/ATController/releases/latest/download/{dmg_asset_name}");
 
     let mut download_command = StdCommand::new("curl");
-    download_command.args([
-        "-L",
-        "-o",
-        &dmg_path_string,
-        "https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg",
-    ]);
+    download_command.args(["-L", "-o", &dmg_path_string, &download_url]);
     let download_output = run_std_command_with_timeout(
         download_command,
         Duration::from_secs(300),
-        "ATController DMG download",
+        &format!("{dmg_asset_name} download"),
     )?;
     if !download_output.status.success() {
         let stderr = String::from_utf8_lossy(&download_output.stderr);
-        return Err(anyhow!("Failed to download latest DMG: {stderr}"));
+        return Err(anyhow!("Failed to download latest {dmg_asset_name}: {stderr}"));
     }
 
     let mut attach_command = StdCommand::new("hdiutil");
@@ -4439,15 +4594,15 @@ pub fn install_latest_update() -> Result<()> {
         .or_else(|| extract_mounted_volume_path(&attach_stderr))
         .ok_or_else(|| anyhow!("Unable to locate mounted DMG volume path"))?;
 
-    let source_app = Path::new(&mount_path).join("ATController.app");
+    let source_app = Path::new(&mount_path).join(app_bundle_name);
     if !source_app.exists() {
         let _ = StdCommand::new("hdiutil")
             .args(["detach", &mount_path, "-quiet"])
             .status();
-        return Err(anyhow!("Mounted DMG does not contain ATController.app"));
+        return Err(anyhow!("Mounted DMG does not contain {app_bundle_name}"));
     }
 
-    let target_app = PathBuf::from("/Applications/ATController.app");
+    let target_app = installed_app_path(agent_provider);
 
     let install_result = (|| -> Result<()> {
         let copy_status = StdCommand::new("ditto")
@@ -4456,7 +4611,7 @@ pub fn install_latest_update() -> Result<()> {
             .status()?;
         if !copy_status.success() {
             return Err(anyhow!(
-                "Failed to copy ATController.app into /Applications"
+                "Failed to copy {app_bundle_name} into /Applications"
             ));
         }
 
@@ -7033,7 +7188,7 @@ mod tests {
     #[test]
     fn resolve_claude_command_for_rdev_uses_remote_binary() {
         let settings = Settings::default();
-        let command = resolve_claude_command_for_workspace(WorkspaceKind::Rdev, &settings)
+        let command = resolve_agent_command_for_workspace(AgentProvider::Claude, WorkspaceKind::Rdev, &settings)
             .expect("rdev command should resolve");
         assert_eq!(command, "claude");
     }
@@ -7041,7 +7196,7 @@ mod tests {
     #[test]
     fn resolve_claude_command_for_ssh_uses_remote_binary() {
         let settings = Settings::default();
-        let command = resolve_claude_command_for_workspace(WorkspaceKind::Ssh, &settings)
+        let command = resolve_agent_command_for_workspace(AgentProvider::Claude, WorkspaceKind::Ssh, &settings)
             .expect("ssh command should resolve");
         assert_eq!(command, "claude");
     }
@@ -7058,8 +7213,53 @@ mod tests {
             claude_cli_path: Some(cli_path.to_string_lossy().to_string()),
             ..Settings::default()
         };
-        let command = resolve_claude_command_for_workspace(WorkspaceKind::Local, &settings)
+        let command = resolve_agent_command_for_workspace(AgentProvider::Claude, WorkspaceKind::Local, &settings)
             .expect("local command should resolve");
+        assert_eq!(command, cli_path.to_string_lossy());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn resolve_agent_command_for_copilot_uses_provider_binary() {
+        let settings = Settings::default();
+        let rdev_command = resolve_agent_command_for_workspace(
+            AgentProvider::Copilot,
+            WorkspaceKind::Rdev,
+            &settings,
+        )
+        .expect("rdev command should resolve");
+        let ssh_command = resolve_agent_command_for_workspace(
+            AgentProvider::Copilot,
+            WorkspaceKind::Ssh,
+            &settings,
+        )
+        .expect("ssh command should resolve");
+
+        assert_eq!(rdev_command, "copilot");
+        assert_eq!(ssh_command, "copilot");
+    }
+
+    #[test]
+    fn resolve_agent_command_for_local_copilot_uses_detected_path() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "atcontroller-copilot-cli-detect-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&tmp_dir).expect("should create temp directory");
+        let cli_path = tmp_dir.join("copilot");
+        fs::write(&cli_path, "#!/bin/sh\nexit 0\n").expect("should create fake cli");
+
+        let settings = Settings {
+            copilot_cli_path: Some(cli_path.to_string_lossy().to_string()),
+            ..Settings::default()
+        };
+        let command = resolve_agent_command_for_workspace(
+            AgentProvider::Copilot,
+            WorkspaceKind::Local,
+            &settings,
+        )
+        .expect("local command should resolve");
         assert_eq!(command, cli_path.to_string_lossy());
 
         let _ = fs::remove_dir_all(&tmp_dir);
@@ -7114,6 +7314,53 @@ mod tests {
             claude_command,
             "env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/claude' --resume '123e4567-e89b-12d3-a456-426614174000' --permission-mode auto"
         );
+    }
+
+    #[test]
+    fn build_copilot_shell_command_starts_new_session_with_session_id() {
+        let copilot_command = build_copilot_shell_command(
+            "/usr/local/bin/copilot",
+            "123e4567-e89b-12d3-a456-426614174000",
+            TerminalSessionMode::New,
+            false,
+        );
+
+        assert_eq!(
+            copilot_command,
+            "env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/copilot' --session-id '123e4567-e89b-12d3-a456-426614174000'"
+        );
+    }
+
+    #[test]
+    fn build_copilot_shell_command_resumes_existing_session() {
+        let copilot_command = build_copilot_shell_command(
+            "/usr/local/bin/copilot",
+            "123e4567-e89b-12d3-a456-426614174000",
+            TerminalSessionMode::Resumed,
+            false,
+        );
+
+        assert_eq!(
+            copilot_command,
+            "env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/copilot' --resume '123e4567-e89b-12d3-a456-426614174000'"
+        );
+    }
+
+    #[test]
+    fn build_copilot_shell_command_uses_autopilot_without_permission_bypass() {
+        let copilot_command = build_copilot_shell_command(
+            "/usr/local/bin/copilot",
+            "123e4567-e89b-12d3-a456-426614174000",
+            TerminalSessionMode::New,
+            true,
+        );
+
+        assert_eq!(
+            copilot_command,
+            "env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 '/usr/local/bin/copilot' --session-id '123e4567-e89b-12d3-a456-426614174000' --mode autopilot"
+        );
+        assert!(!copilot_command.contains("--allow-all"));
+        assert!(!copilot_command.contains("bypassPermissions"));
     }
 
     #[test]

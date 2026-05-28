@@ -18,6 +18,18 @@ permissions:
 jobs:
   build-macos:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: claude
+            product_name: ATController
+            bundle_identifier: com.atcontroller.app
+            asset_prefix: ATController
+          - provider: copilot
+            product_name: ATController Copilot
+            bundle_identifier: com.atcontroller.copilot
+            asset_prefix: ATController-Copilot
 
     steps:
       - name: Checkout repository
@@ -120,6 +132,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ATCONTROLLER_AGENT_PROVIDER: ${{ matrix.provider }}
+          VITE_ATCONTROLLER_AGENT_PROVIDER: ${{ matrix.provider }}
         shell: bash
         run: |
           set -euo pipefail
@@ -144,7 +158,33 @@ jobs:
             echo "Notarization credentials incomplete; skipping notarization."
           fi
 
-          yarn tauri build
+          config_path="$RUNNER_TEMP/tauri-${{ matrix.provider }}.json"
+          bundle_config=""
+          if [ "${{ matrix.provider }}" = "copilot" ]; then
+            bundle_config=', "bundle": { "icon": [ "icons/copilot/32x32.png", "icons/copilot/128x128.png", "icons/copilot/128x128@2x.png", "icons/copilot/icon.icns" ] }'
+          fi
+          cat > "$config_path" <<JSON
+          {
+            "productName": "${{ matrix.product_name }}",
+            "identifier": "${{ matrix.bundle_identifier }}",
+            "app": {
+              "windows": [
+                {
+                  "label": "main",
+                  "title": "${{ matrix.product_name }}",
+                  "width": 1320,
+                  "height": 860,
+                  "minWidth": 1024,
+                  "minHeight": 720,
+                  "resizable": true
+                }
+              ]
+            }
+            ${bundle_config}
+          }
+          JSON
+
+          yarn tauri build --config "$config_path"
         # If Developer ID + notarization secrets are configured, Tauri signs/notarizes the app.
         # Otherwise this remains an unsigned build.
 
@@ -174,32 +214,17 @@ jobs:
           latest_app_bundle="$(ls -dt "${app_bundles[@]}" | head -n 1)"
 
           mkdir -p dist
-          cp "$latest_dmg" "dist/ATController.dmg"
-          ditto -c -k --sequesterRsrc --keepParent "$latest_app_bundle" "dist/ATController.app.zip"
+          cp "$latest_dmg" "dist/${{ matrix.asset_prefix }}.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$latest_app_bundle" "dist/${{ matrix.asset_prefix }}.app.zip"
 
-      - name: Upload DMG artifact
+      - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:
-          name: ATController.dmg
-          path: dist/ATController.dmg
+          name: ${{ matrix.asset_prefix }}-release-assets
+          path: |
+            dist/${{ matrix.asset_prefix }}.dmg
+            dist/${{ matrix.asset_prefix }}.app.zip
           if-no-files-found: error
-
-      - name: Upload app zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ATController.app.zip
-          path: dist/ATController.app.zip
-          if-no-files-found: error
-
-      - name: Create GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/ATController.dmg
-            dist/ATController.app.zip
-          fail_on_unmatched_files: true
-          generate_release_notes: true
 
       - name: Cleanup temporary keychain
         if: always()
@@ -209,3 +234,31 @@ jobs:
           if [ -f "$KEYCHAIN_PATH" ]; then
             security delete-keychain "$KEYCHAIN_PATH" || true
           fi
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-macos
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-release-assets"
+          path: dist
+          merge-multiple: true
+
+      - name: Show release assets
+        shell: bash
+        run: ls -lah dist
+
+      - name: Create GitHub Release (tags only)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ATController.dmg
+            dist/ATController.app.zip
+            dist/ATController-Copilot.dmg
+            dist/ATController-Copilot.app.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true

@@ -4,17 +4,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::models::SkillInfo;
+use crate::models::{AgentProvider, SkillInfo};
 
 const PROJECT_SKILLS_DIR: &str = ".claude/skills";
 const LEGACY_PROJECT_SKILLS_DIR: &str = "skills";
 const GLOBAL_SKILLS_DIR: &str = "~/.claude/skills";
+const COPILOT_PROJECT_SKILLS_DIR: &str = ".github/skills";
+const AGENTS_PROJECT_SKILLS_DIR: &str = ".agents/skills";
+const COPILOT_GLOBAL_SKILLS_DIR: &str = "~/.copilot/skills";
+const AGENTS_GLOBAL_SKILLS_DIR: &str = "~/.agents/skills";
 
-pub fn list_skills(workspace_path: &str) -> Result<Vec<SkillInfo>> {
+pub fn list_skills(workspace_path: &str, agent_provider: AgentProvider) -> Result<Vec<SkillInfo>> {
     let mut discovered = Vec::new();
     let mut seen_ids = HashSet::new();
 
-    for root in skill_roots(workspace_path) {
+    for root in skill_roots(workspace_path, agent_provider) {
         if !root.path.exists() {
             continue;
         }
@@ -76,7 +80,7 @@ pub fn resolve_enabled_skills_context(
 ) -> Result<Vec<(String, String)>> {
     let mut result = Vec::new();
     for skill_id in enabled_ids {
-        let Some(skill_file) = resolve_skill_file(workspace_path, skill_id) else {
+        let Some(skill_file) = resolve_skill_file(workspace_path, AgentProvider::Claude, skill_id) else {
             continue;
         };
         let raw = match fs::read_to_string(&skill_file) {
@@ -104,40 +108,103 @@ struct SkillRoot {
     is_global: bool,
 }
 
-fn skill_roots(workspace_path: &str) -> Vec<SkillRoot> {
+fn skill_roots(workspace_path: &str, agent_provider: AgentProvider) -> Vec<SkillRoot> {
     let workspace = Path::new(workspace_path);
-    let mut roots = vec![
-        SkillRoot {
-            path: workspace.join(PROJECT_SKILLS_DIR),
-            relative_root: PROJECT_SKILLS_DIR.to_string(),
-            is_global: false,
-        },
-        SkillRoot {
-            path: workspace.join(LEGACY_PROJECT_SKILLS_DIR),
-            relative_root: LEGACY_PROJECT_SKILLS_DIR.to_string(),
-            is_global: false,
-        },
-    ];
+    let mut roots = match agent_provider {
+        AgentProvider::Claude => vec![
+            SkillRoot {
+                path: workspace.join(PROJECT_SKILLS_DIR),
+                relative_root: PROJECT_SKILLS_DIR.to_string(),
+                is_global: false,
+            },
+            SkillRoot {
+                path: workspace.join(LEGACY_PROJECT_SKILLS_DIR),
+                relative_root: LEGACY_PROJECT_SKILLS_DIR.to_string(),
+                is_global: false,
+            },
+        ],
+        AgentProvider::Copilot => {
+            let mut roots = vec![
+                SkillRoot {
+                    path: workspace.join(COPILOT_PROJECT_SKILLS_DIR),
+                    relative_root: COPILOT_PROJECT_SKILLS_DIR.to_string(),
+                    is_global: false,
+                },
+                SkillRoot {
+                    path: workspace.join(AGENTS_PROJECT_SKILLS_DIR),
+                    relative_root: AGENTS_PROJECT_SKILLS_DIR.to_string(),
+                    is_global: false,
+                },
+                SkillRoot {
+                    path: workspace.join(PROJECT_SKILLS_DIR),
+                    relative_root: PROJECT_SKILLS_DIR.to_string(),
+                    is_global: false,
+                },
+            ];
+            if let Some(parent) = workspace.parent() {
+                roots.push(SkillRoot {
+                    path: parent.join(COPILOT_PROJECT_SKILLS_DIR),
+                    relative_root: format!("../{COPILOT_PROJECT_SKILLS_DIR}"),
+                    is_global: false,
+                });
+            }
+            roots
+        }
+    };
 
-    if let Some(path) = expand_home_path(GLOBAL_SKILLS_DIR) {
-        roots.push(SkillRoot {
-            path,
-            relative_root: GLOBAL_SKILLS_DIR.to_string(),
-            is_global: true,
-        });
+    let global_roots: &[&str] = match agent_provider {
+        AgentProvider::Claude => &[GLOBAL_SKILLS_DIR],
+        AgentProvider::Copilot => &[COPILOT_GLOBAL_SKILLS_DIR, AGENTS_GLOBAL_SKILLS_DIR],
+    };
+    for global_root in global_roots {
+        if let Some(path) = expand_home_path(global_root) {
+            roots.push(SkillRoot {
+                path,
+                relative_root: (*global_root).to_string(),
+                is_global: true,
+            });
+        }
+    }
+
+    if agent_provider == AgentProvider::Copilot {
+        for custom_root in copilot_custom_skill_roots() {
+            roots.push(custom_root);
+        }
     }
 
     roots
 }
 
-fn resolve_skill_file(workspace_path: &str, skill_id: &str) -> Option<PathBuf> {
-    for root in skill_roots(workspace_path) {
+fn resolve_skill_file(
+    workspace_path: &str,
+    agent_provider: AgentProvider,
+    skill_id: &str,
+) -> Option<PathBuf> {
+    for root in skill_roots(workspace_path, agent_provider) {
         let candidate = root.path.join(skill_id).join("SKILL.md");
         if candidate.exists() {
             return Some(candidate);
         }
     }
     None
+}
+
+fn copilot_custom_skill_roots() -> Vec<SkillRoot> {
+    let Ok(raw) = std::env::var("COPILOT_SKILLS_DIRS") else {
+        return Vec::new();
+    };
+
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| {
+            expand_home_path(value).map(|path| SkillRoot {
+                path,
+                relative_root: value.to_string(),
+                is_global: true,
+            })
+        })
+        .collect()
 }
 
 fn expand_home_path(path: &str) -> Option<PathBuf> {
@@ -279,7 +346,7 @@ mod tests {
         )
         .expect("failed to write fixture SKILL.md");
 
-        let discovered = list_skills(workspace.to_string_lossy().as_ref())
+        let discovered = list_skills(workspace.to_string_lossy().as_ref(), AgentProvider::Claude)
             .expect("skill listing should succeed");
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].id, "refactor");
@@ -321,7 +388,7 @@ mod tests {
         )
         .expect("failed to write fixture SKILL.md");
 
-        let discovered = list_skills(workspace.to_string_lossy().as_ref())
+        let discovered = list_skills(workspace.to_string_lossy().as_ref(), AgentProvider::Claude)
             .expect("skill listing should succeed");
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].id, "review");
@@ -360,7 +427,7 @@ mod tests {
         )
         .expect("failed to write global SKILL.md");
 
-        let discovered = list_skills(workspace.to_string_lossy().as_ref())
+        let discovered = list_skills(workspace.to_string_lossy().as_ref(), AgentProvider::Claude)
             .expect("skill listing should succeed");
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].id, "global-review");
@@ -414,7 +481,7 @@ mod tests {
         )
         .expect("failed to write workspace SKILL.md");
 
-        let discovered = list_skills(workspace.to_string_lossy().as_ref())
+        let discovered = list_skills(workspace.to_string_lossy().as_ref(), AgentProvider::Claude)
             .expect("skill listing should succeed");
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].id, "review");
@@ -433,6 +500,54 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert!(resolved[0].1.contains("Workspace version."));
         assert!(!resolved[0].1.contains("Global version."));
+
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(fake_home);
+    }
+
+    #[test]
+    fn discovers_copilot_skills_from_github_and_global_roots() {
+        let _home_lock = home_env_lock()
+            .lock()
+            .expect("failed to lock HOME environment");
+        let fake_home = std::env::temp_dir().join(format!(
+            "atcontroller-copilot-home-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _home_guard = HomeEnvGuard::set(&fake_home);
+        let workspace = std::env::temp_dir().join(format!(
+            "atcontroller-copilot-skills-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let github_skill_dir = workspace.join(".github").join("skills").join("review");
+        let global_skill_dir = fake_home
+            .join(".copilot")
+            .join("skills")
+            .join("global-review");
+        fs::create_dir_all(&github_skill_dir).expect("failed to create .github skill directory");
+        fs::create_dir_all(&global_skill_dir).expect("failed to create global Copilot skill directory");
+        fs::write(
+            github_skill_dir.join("SKILL.md"),
+            "# GitHub Review\n\nReview using repository guidance.\n",
+        )
+        .expect("failed to write .github SKILL.md");
+        fs::write(
+            global_skill_dir.join("SKILL.md"),
+            "# Global Copilot Review\n\nAvailable to Copilot everywhere.\n",
+        )
+        .expect("failed to write global Copilot SKILL.md");
+
+        let discovered = list_skills(workspace.to_string_lossy().as_ref(), AgentProvider::Copilot)
+            .expect("skill listing should succeed");
+        assert_eq!(discovered.len(), 2);
+        assert!(discovered.iter().any(|skill| {
+            skill.id == "review" && skill.relative_path == ".github/skills/review/SKILL.md"
+        }));
+        assert!(discovered.iter().any(|skill| {
+            skill.id == "global-review"
+                && skill.relative_path == "~/.copilot/skills/global-review/SKILL.md"
+                && skill.is_global
+        }));
 
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(fake_home);

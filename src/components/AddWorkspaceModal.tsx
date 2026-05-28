@@ -112,18 +112,22 @@ export function AddWorkspaceModal({
               <button type="button" className="ghost-button" onClick={onPickDirectory} disabled={saving}>
                 Choose Folder
               </button>
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => onOpenBulkImport?.()}
-                disabled={saving}
-              >
-                Import Claude sessions
-              </button>
+              {onOpenBulkImport ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => onOpenBulkImport()}
+                  disabled={saving}
+                >
+                  Import Claude sessions
+                </button>
+              ) : null}
             </div>
-            <p className="muted">
-              Discover sessions from <code>~/.claude/projects</code> and add missing local projects automatically.
-            </p>
+            {onOpenBulkImport ? (
+              <p className="muted">
+                Discover sessions from <code>~/.claude/projects</code> and add missing local projects automatically.
+              </p>
+            ) : null}
 
             <label htmlFor="workspace-path">Manual path</label>
             <input
