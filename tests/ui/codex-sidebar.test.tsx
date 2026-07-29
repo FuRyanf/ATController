@@ -203,32 +203,91 @@ describe('Codex project shelf sidebar', () => {
 
   it('persists custom drag ordering through the reorder callback', () => {
     const onReorderWorkspaces = vi.fn();
-    render(<CodexSidebar {...sidebarProps({ onReorderWorkspaces })} />);
-    const source = screen.getByText('Project').closest('.project-shelf-header');
-    const target = screen.getByText('Utilities').closest('.project-shelf');
-    target!.getBoundingClientRect = () => ({
-      top: -100,
-      bottom: 0,
+    const onSelectWorkspace = vi.fn();
+    render(
+      <CodexSidebar
+        {...sidebarProps({ onReorderWorkspaces, onSelectWorkspace })}
+      />
+    );
+    const source = screen.getByText('Project').closest<HTMLElement>('.project-shelf-header');
+    const target = screen.getByText('Utilities').closest<HTMLElement>('.project-shelf-header');
+    source!.getBoundingClientRect = () => ({
+      top: 0,
+      bottom: 40,
       left: 0,
       right: 100,
       width: 100,
-      height: 100,
+      height: 40,
       x: 0,
-      y: -100,
+      y: 0,
       toJSON: () => ({})
     });
-    const dataTransfer = {
-      effectAllowed: '',
-      setData: vi.fn(),
-      getData: vi.fn()
-    };
-    fireEvent.dragStart(source!, { dataTransfer });
-    fireEvent.dragOver(target!, { dataTransfer, clientY: 99 });
-    fireEvent.drop(target!, { dataTransfer, clientY: 99 });
+    target!.getBoundingClientRect = () => ({
+      top: 50,
+      bottom: 90,
+      left: 0,
+      right: 100,
+      width: 100,
+      height: 40,
+      x: 0,
+      y: 50,
+      toJSON: () => ({})
+    });
+
+    fireEvent.pointerDown(source!, {
+      button: 0,
+      pointerId: 1,
+      clientX: 12,
+      clientY: 12
+    });
+    fireEvent.pointerMove(source!, {
+      pointerId: 1,
+      clientX: 12,
+      clientY: 99
+    });
+    expect(target!.closest('.project-shelf')).toHaveClass('drop-after');
+    fireEvent.pointerUp(source!, {
+      pointerId: 1,
+      clientX: 12,
+      clientY: 99
+    });
     expect(onReorderWorkspaces).toHaveBeenCalledWith([
       secondWorkspace.id,
       workspace.id
     ]);
+    fireEvent.click(screen.getByRole('treeitem', { name: /Project/ }));
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('keeps normal project clicks intact when the pointer does not cross the drag threshold', () => {
+    const onSelectWorkspace = vi.fn();
+    const onReorderWorkspaces = vi.fn();
+    render(
+      <CodexSidebar
+        {...sidebarProps({ onSelectWorkspace, onReorderWorkspaces })}
+      />
+    );
+    const project = screen.getByRole('treeitem', { name: /Project/ });
+    const header = project.closest<HTMLElement>('.project-shelf-header');
+    fireEvent.pointerDown(header!, {
+      button: 0,
+      pointerId: 2,
+      clientX: 12,
+      clientY: 12
+    });
+    fireEvent.pointerMove(header!, {
+      pointerId: 2,
+      clientX: 14,
+      clientY: 14
+    });
+    fireEvent.pointerUp(header!, {
+      pointerId: 2,
+      clientX: 14,
+      clientY: 14
+    });
+    fireEvent.click(project);
+    expect(onSelectWorkspace).toHaveBeenCalledWith(workspace.id);
+    expect(onReorderWorkspaces).not.toHaveBeenCalled();
   });
 
   it('uses tree keyboard navigation and accessible context menu shortcuts', () => {

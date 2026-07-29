@@ -2280,6 +2280,15 @@ export default function App() {
         run: () => window.dispatchEvent(new Event('atcontroller:focus-composer'))
       },
       {
+        id: 'find-thread',
+        label: 'Find in Thread',
+        description: 'Search the open Codex conversation',
+        shortcut: '⌘F',
+        icon: 'search',
+        disabled: !selectedThread,
+        run: () => window.dispatchEvent(new Event('atcontroller:find-thread'))
+      },
+      {
         id: 'rename-thread',
         label: 'Rename Thread',
         shortcut: '⌘⇧R',
@@ -2488,9 +2497,19 @@ export default function App() {
       } else if (key === 'c' && event.shiftKey && selectedThread) {
         event.preventDefault();
         void runThreadAction(selectedThread, 'copyResume');
+      } else if (key === 'f' && !event.shiftKey && selectedThread) {
+        event.preventDefault();
+        window.dispatchEvent(new Event('atcontroller:find-thread'));
       } else if (key === 'f' && event.shiftKey) {
         event.preventDefault();
         document.querySelector<HTMLInputElement>('.sidebar-search input')?.focus();
+      } else if (key === 'g' && selectedThread) {
+        event.preventDefault();
+        window.dispatchEvent(
+          new CustomEvent('atcontroller:find-thread-step', {
+            detail: { direction: event.shiftKey ? -1 : 1 }
+          })
+        );
       }
     };
     window.addEventListener('keydown', handleShortcut);

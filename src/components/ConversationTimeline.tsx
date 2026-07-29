@@ -44,6 +44,88 @@ interface ConversationTimelineProps {
 
 const INITIAL_VISIBLE_TURNS = 24;
 const EARLIER_TURN_PAGE_SIZE = 24;
+const THREAD_FIND_HIGHLIGHT = 'atcontroller-thread-find';
+const THREAD_FIND_ACTIVE_HIGHLIGHT = 'atcontroller-thread-find-active';
+const MAX_THREAD_FIND_MATCHES = 2_000;
+
+interface WritableHighlightRegistry {
+  set: (name: string, highlight: Highlight) => void;
+  delete: (name: string) => boolean;
+}
+
+function threadFindHighlightRegistry(): WritableHighlightRegistry | null {
+  if (typeof CSS === 'undefined') return null;
+  const registry = (
+    CSS as unknown as { highlights?: Partial<WritableHighlightRegistry> }
+  ).highlights;
+  return typeof registry?.set === 'function' &&
+    typeof registry.delete === 'function'
+    ? (registry as WritableHighlightRegistry)
+    : null;
+}
+
+function clearThreadFindHighlights(root?: HTMLElement | null): void {
+  const registry = threadFindHighlightRegistry();
+  registry?.delete(THREAD_FIND_HIGHLIGHT);
+  registry?.delete(THREAD_FIND_ACTIVE_HIGHLIGHT);
+  const selection = window.getSelection?.();
+  if (
+    root &&
+    selection?.anchorNode &&
+    root.contains(selection.anchorNode)
+  ) {
+    selection.removeAllRanges();
+  }
+}
+
+export function findThreadTextRanges(
+  root: HTMLElement,
+  query: string,
+  limit = MAX_THREAD_FIND_MATCHES
+): Range[] {
+  const needle = query.trim();
+  if (!needle) return [];
+  const pattern = new RegExp(
+    needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    'giu'
+  );
+  const ranges: Range[] = [];
+  const walker = root.ownerDocument.createTreeWalker(
+    root,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode(node) {
+        const parent = node.parentElement;
+        if (
+          !node.nodeValue ||
+          !parent ||
+          parent.closest(
+            'button, input, textarea, select, script, style, [aria-hidden="true"], [data-thread-find-ignore]'
+          )
+        ) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    }
+  );
+  let node = walker.nextNode();
+  while (node && ranges.length < limit) {
+    const value = node.nodeValue ?? '';
+    pattern.lastIndex = 0;
+    let match = pattern.exec(value);
+    while (match && ranges.length < limit) {
+      const range = root.ownerDocument.createRange();
+      range.setStart(node, match.index);
+      range.setEnd(node, match.index + match[0].length);
+      ranges.push(range);
+      if (match[0].length === 0) pattern.lastIndex += 1;
+      match = pattern.exec(value);
+    }
+    node = walker.nextNode();
+  }
+  return ranges;
+}
 
 function formatDuration(durationMs?: number | null): string {
   if (durationMs == null) return '';
@@ -789,9 +871,17 @@ export function ConversationTimeline({
   onOpenTerminal
 }: ConversationTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const visibleTurnLimitBeforeFindRef = useRef(INITIAL_VISIBLE_TURNS);
   const [following, setFollowing] = useState(true);
   const [unseenBelow, setUnseenBelow] = useState(false);
   const [visibleTurnLimit, setVisibleTurnLimit] = useState(INITIAL_VISIBLE_TURNS);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findMatchCount, setFindMatchCount] = useState(0);
+  const [activeFindIndex, setActiveFindIndex] = useState(0);
+  const [findRevision, setFindRevision] = useState(0);
   const latestTurn = thread.turns.length ? thread.turns[thread.turns.length - 1] : undefined;
   const firstVisibleTurnIndex = Math.max(0, thread.turns.length - visibleTurnLimit);
   const visibleTurns = thread.turns.slice(firstVisibleTurnIndex);
@@ -810,6 +900,121 @@ export function ConversationTimeline({
     [latestTurn, thread.turns.length]
   );
 
+  const closeFind = () => {
+    clearThreadFindHighlights(contentRef.current);
+    setFindOpen(false);
+    setFindQuery('');
+    setFindMatchCount(0);
+    setActiveFindIndex(0);
+    setVisibleTurnLimit(
+      Math.min(
+        thread.turns.length,
+        Math.max(INITIAL_VISIBLE_TURNS, visibleTurnLimitBeforeFindRef.current)
+      )
+    );
+  };
+
+  const stepFind = (direction: -1 | 1) => {
+    if (!findMatchCount) return;
+    setActiveFindIndex(
+      (current) => (current + direction + findMatchCount) % findMatchCount
+    );
+  };
+
+  useEffect(() => {
+    const openFind = () => {
+      setFindOpen((current) => {
+        if (!current) {
+          visibleTurnLimitBeforeFindRef.current = visibleTurnLimit;
+        }
+        return true;
+      });
+      setVisibleTurnLimit(thread.turns.length);
+      window.setTimeout(() => {
+        findInputRef.current?.focus();
+        findInputRef.current?.select();
+      }, 0);
+    };
+    const step = (event: Event) => {
+      const direction =
+        event instanceof CustomEvent && event.detail?.direction === -1 ? -1 : 1;
+      if (!findOpen) {
+        openFind();
+        return;
+      }
+      stepFind(direction);
+    };
+    window.addEventListener('atcontroller:find-thread', openFind);
+    window.addEventListener('atcontroller:find-thread-step', step);
+    return () => {
+      window.removeEventListener('atcontroller:find-thread', openFind);
+      window.removeEventListener('atcontroller:find-thread-step', step);
+    };
+  }, [findMatchCount, findOpen, thread.turns.length, visibleTurnLimit]);
+
+  useEffect(() => {
+    const root = contentRef.current;
+    if (!findOpen || !root || typeof MutationObserver === 'undefined') return;
+    let frame = 0;
+    const observer = new MutationObserver(() => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() =>
+        setFindRevision((revision) => revision + 1)
+      );
+    });
+    observer.observe(root, { childList: true, characterData: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [findOpen]);
+
+  useEffect(() => {
+    if (findOpen) setVisibleTurnLimit(thread.turns.length);
+  }, [findOpen, thread.turns.length]);
+
+  useEffect(() => {
+    const root = contentRef.current;
+    clearThreadFindHighlights(root);
+    if (!findOpen || !root || !findQuery.trim()) {
+      setFindMatchCount(0);
+      return;
+    }
+    const ranges = findThreadTextRanges(root, findQuery);
+    setFindMatchCount(ranges.length);
+    const nextIndex = ranges.length
+      ? Math.min(activeFindIndex, ranges.length - 1)
+      : 0;
+    if (nextIndex !== activeFindIndex) setActiveFindIndex(nextIndex);
+    if (!ranges.length) return;
+
+    const registry = threadFindHighlightRegistry();
+    if (registry && typeof Highlight !== 'undefined') {
+      const matches = new Highlight(...ranges);
+      matches.priority = 0;
+      const active = new Highlight(ranges[nextIndex]);
+      active.priority = 1;
+      registry.set(THREAD_FIND_HIGHLIGHT, matches);
+      registry.set(THREAD_FIND_ACTIVE_HIGHLIGHT, active);
+    } else {
+      const selection = window.getSelection?.();
+      selection?.removeAllRanges();
+      selection?.addRange(ranges[nextIndex]);
+    }
+    const matchElement = ranges[nextIndex].startContainer.parentElement;
+    window.requestAnimationFrame(() =>
+      matchElement?.scrollIntoView?.({ block: 'center', inline: 'nearest' })
+    );
+    return () => clearThreadFindHighlights(root);
+  }, [
+    activeFindIndex,
+    contentSignature,
+    findOpen,
+    findQuery,
+    findRevision,
+    visibleTurnLimit
+  ]);
+
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
@@ -824,6 +1029,12 @@ export function ConversationTimeline({
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
+    clearThreadFindHighlights(contentRef.current);
+    setFindOpen(false);
+    setFindQuery('');
+    setFindMatchCount(0);
+    setActiveFindIndex(0);
+    visibleTurnLimitBeforeFindRef.current = INITIAL_VISIBLE_TURNS;
     element.scrollTop = element.scrollHeight;
     setFollowing(true);
     setUnseenBelow(false);
@@ -842,7 +1053,72 @@ export function ConversationTimeline({
   const runningItem = runningItems.length ? runningItems[runningItems.length - 1] : undefined;
 
   return (
-    <div className="conversation-timeline-shell">
+    <div className={`conversation-timeline-shell ${findOpen ? 'find-open' : ''}`}>
+      {findOpen ? (
+        <div
+          className="thread-find-bar"
+          role="search"
+          aria-label="Find in thread"
+          data-thread-find-ignore
+        >
+          <AppIcon name="search" size={14} />
+          <input
+            ref={findInputRef}
+            type="search"
+            aria-label="Find in thread"
+            placeholder="Find in this thread"
+            value={findQuery}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => {
+              setFindQuery(event.target.value);
+              setActiveFindIndex(0);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                closeFind();
+              } else if (event.key === 'Enter') {
+                event.preventDefault();
+                stepFind(event.shiftKey ? -1 : 1);
+              }
+            }}
+          />
+          <span className="thread-find-count" role="status" aria-live="polite">
+            {!findQuery.trim()
+              ? 'Find'
+              : findMatchCount
+                ? `${activeFindIndex + 1} of ${findMatchCount}`
+                : 'No matches'}
+          </span>
+          <button
+            type="button"
+            className="icon-button thread-find-previous"
+            aria-label="Previous match"
+            disabled={!findMatchCount}
+            onClick={() => stepFind(-1)}
+          >
+            <AppIcon name="chevronDown" size={13} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Next match"
+            disabled={!findMatchCount}
+            onClick={() => stepFind(1)}
+          >
+            <AppIcon name="chevronDown" size={13} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Close find"
+            onClick={closeFind}
+          >
+            <AppIcon name="close" size={13} />
+          </button>
+        </div>
+      ) : null}
       <div
         ref={scrollRef}
         className="conversation-timeline"
@@ -853,7 +1129,7 @@ export function ConversationTimeline({
           if (atBottom) setUnseenBelow(false);
         }}
       >
-        <div className="conversation-column">
+        <div ref={contentRef} className="conversation-column">
           {thread.turns.length === 0 && recovering ? (
             <div className="timeline-empty timeline-recovering" role="status">
               <span className="timeline-history-spinner" aria-hidden="true" />

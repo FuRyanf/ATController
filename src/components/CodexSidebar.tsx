@@ -4,7 +4,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent
 } from 'react';
 
 import type {
@@ -297,6 +298,7 @@ interface ProjectShelfProps {
   runtimeFailed: boolean;
   dragPlacement: { workspaceId: string; edge: 'before' | 'after' } | null;
   draggable: boolean;
+  dragging: boolean;
   onSelectWorkspace: (workspaceId: string) => void;
   onToggleWorkspace: (workspaceId: string, expanded: boolean) => void;
   onNewThread: (workspaceId?: string) => void;
@@ -308,8 +310,8 @@ interface ProjectShelfProps {
   onRemoveWorkspace: (workspaceId: string) => void;
   onCopyWorkspacePath: (workspaceId: string) => void;
   onDragStart: (workspaceId: string) => void;
-  onDragOver: (workspaceId: string, edge: 'before' | 'after') => void;
-  onDrop: (workspaceId: string, edge: 'before' | 'after') => void;
+  onDragMove: (workspaceId: string, clientY: number) => void;
+  onDrop: (workspaceId: string) => void;
   onDragEnd: () => void;
 }
 
@@ -331,6 +333,7 @@ function areProjectShelfPropsEqual(
     previous.loading !== next.loading ||
     previous.runtimeFailed !== next.runtimeFailed ||
     previous.draggable !== next.draggable ||
+    previous.dragging !== next.dragging ||
     !equalThreadReferences(previous.threads, next.threads)
   ) {
     return false;
@@ -379,6 +382,7 @@ const ProjectShelf = memo(function ProjectShelf({
   runtimeFailed,
   dragPlacement,
   draggable,
+  dragging,
   onSelectWorkspace,
   onToggleWorkspace,
   onNewThread,
@@ -390,12 +394,19 @@ const ProjectShelf = memo(function ProjectShelf({
   onRemoveWorkspace,
   onCopyWorkspacePath,
   onDragStart,
-  onDragOver,
+  onDragMove,
   onDrop,
   onDragEnd
 }: ProjectShelfProps) {
   const [showAll, setShowAll] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const pointerDragRef = useRef<{
+    pointerId: number;
+    originX: number;
+    originY: number;
+    active: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
   const aggregate = useMemo(
     () => projectAggregate(threads, metadata, waitingThreadIds),
     [metadata, threads, waitingThreadIds]
@@ -431,6 +442,56 @@ const ProjectShelf = memo(function ProjectShelf({
   const openProjectMenu = (target: HTMLElement) => {
     const bounds = target.getBoundingClientRect();
     onOpenProjectMenu(workspace.id, bounds.left + 24, bounds.bottom + 3);
+  };
+  const beginPointerDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      !draggable ||
+      event.button !== 0 ||
+      (event.target instanceof Element &&
+        event.target.closest('[data-project-no-drag]'))
+    ) {
+      return;
+    }
+    pointerDragRef.current = {
+      pointerId: event.pointerId,
+      originX: event.clientX,
+      originY: event.clientY,
+      active: false
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const movePointerDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = pointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (
+      !drag.active &&
+      Math.hypot(event.clientX - drag.originX, event.clientY - drag.originY) >= 5
+    ) {
+      drag.active = true;
+      suppressClickRef.current = true;
+      onDragStart(workspace.id);
+    }
+    if (!drag.active) return;
+    event.preventDefault();
+    onDragMove(workspace.id, event.clientY);
+  };
+  const finishPointerDrag = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    cancelled: boolean
+  ) => {
+    const drag = pointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    pointerDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!drag.active) return;
+    event.preventDefault();
+    if (cancelled) onDragEnd();
+    else onDrop(workspace.id);
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
   };
 
   const handleProjectKey = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -468,31 +529,23 @@ const ProjectShelf = memo(function ProjectShelf({
         workspace.isAvailable ? '' : 'unavailable',
         dragPlacement?.workspaceId === workspace.id
           ? `drop-${dragPlacement.edge}`
-          : ''
+          : '',
+        dragging ? 'dragging' : ''
       ].join(' ')}
       data-project-shelf={workspace.id}
-      onDragOver={(event) => {
-        if (!draggable) return;
-        event.preventDefault();
-        const bounds = event.currentTarget.getBoundingClientRect();
-        onDragOver(workspace.id, event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after');
-      }}
-      onDrop={(event) => {
-        if (!draggable) return;
-        event.preventDefault();
-        const bounds = event.currentTarget.getBoundingClientRect();
-        onDrop(workspace.id, event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after');
-      }}
     >
       <div
-        className="project-shelf-header"
-        draggable={draggable}
-        onDragStart={(event) => {
-          event.dataTransfer.effectAllowed = 'move';
-          event.dataTransfer.setData('text/x-atcontroller-project', workspace.id);
-          onDragStart(workspace.id);
+        className={`project-shelf-header ${draggable ? 'reorderable' : ''}`}
+        data-project-drag-row={workspace.id}
+        onPointerDown={beginPointerDrag}
+        onPointerMove={movePointerDrag}
+        onPointerUp={(event) => finishPointerDrag(event, false)}
+        onPointerCancel={(event) => finishPointerDrag(event, true)}
+        onClickCapture={(event) => {
+          if (!suppressClickRef.current) return;
+          event.preventDefault();
+          event.stopPropagation();
         }}
-        onDragEnd={onDragEnd}
         onContextMenu={(event) => {
           event.preventDefault();
           onOpenProjectMenu(workspace.id, event.clientX, event.clientY);
@@ -501,6 +554,7 @@ const ProjectShelf = memo(function ProjectShelf({
         <button
           type="button"
           className="project-disclosure"
+          data-project-no-drag
           aria-label={`${expanded ? 'Collapse' : 'Expand'} ${workspace.name}`}
           aria-expanded={expanded}
           onClick={() => onToggleWorkspace(workspace.id, !workspace.isExpanded)}
@@ -567,6 +621,7 @@ const ProjectShelf = memo(function ProjectShelf({
         <button
           type="button"
           className="icon-button subtle project-menu-button"
+          data-project-no-drag
           aria-label={`Actions for ${workspace.name}`}
           onClick={(event) => openProjectMenu(event.currentTarget)}
         >
@@ -714,6 +769,11 @@ export function CodexSidebar({
     workspaceId: string;
     edge: 'before' | 'after';
   } | null>(null);
+  const draggedWorkspaceIdRef = useRef<string | null>(null);
+  const dragPlacementRef = useRef<{
+    workspaceId: string;
+    edge: 'before' | 'after';
+  } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const search = normalizedSearchText(filter);
@@ -776,10 +836,67 @@ export function CodexSidebar({
     if (Number.isFinite(stored)) scroll.scrollTop = stored;
   }, []);
 
-  const dropProject = (targetId: string, edge: 'before' | 'after') => {
-    const sourceId = draggedWorkspaceId;
-    setDragPlacement(null);
+  const clearProjectDrag = () => {
+    draggedWorkspaceIdRef.current = null;
+    dragPlacementRef.current = null;
     setDraggedWorkspaceId(null);
+    setDragPlacement(null);
+  };
+
+  const startProjectDrag = (workspaceId: string) => {
+    draggedWorkspaceIdRef.current = workspaceId;
+    dragPlacementRef.current = null;
+    setDraggedWorkspaceId(workspaceId);
+    setDragPlacement(null);
+  };
+
+  const moveProjectDrag = (workspaceId: string, clientY: number) => {
+    if (draggedWorkspaceIdRef.current !== workspaceId || sortMode !== 'custom') {
+      return;
+    }
+    const source = workspaces.find((candidate) => candidate.id === workspaceId);
+    const scroll = scrollRef.current;
+    if (!source || !scroll) return;
+    const rows = [
+      ...scroll.querySelectorAll<HTMLElement>('[data-project-drag-row]')
+    ]
+      .map((row) => ({
+        workspaceId: row.dataset.projectDragRow ?? '',
+        centerY: (() => {
+          const bounds = row.getBoundingClientRect();
+          return bounds.top + bounds.height / 2;
+        })()
+      }))
+      .filter((row) => {
+        const candidate = workspaces.find(
+          (workspace) => workspace.id === row.workspaceId
+        );
+        return candidate && candidate.isPinned === source.isPinned;
+      });
+    if (!rows.length) return;
+    const next =
+      rows.find((row) => clientY < row.centerY) ??
+      ({ workspaceId: rows[rows.length - 1].workspaceId, edge: 'after' } as const);
+    const placement =
+      'edge' in next
+        ? next
+        : ({ workspaceId: next.workspaceId, edge: 'before' } as const);
+    if (
+      dragPlacementRef.current?.workspaceId === placement.workspaceId &&
+      dragPlacementRef.current.edge === placement.edge
+    ) {
+      return;
+    }
+    dragPlacementRef.current = placement;
+    setDragPlacement(placement);
+  };
+
+  const dropProject = (
+    targetId: string,
+    edge: 'before' | 'after',
+    sourceId = draggedWorkspaceIdRef.current
+  ) => {
+    clearProjectDrag();
     if (!sourceId || sourceId === targetId || sortMode !== 'custom') return;
     const source = workspaces.find((workspace) => workspace.id === sourceId);
     const target = workspaces.find((workspace) => workspace.id === targetId);
@@ -789,6 +906,15 @@ export function CodexSidebar({
     const targetIndex = withoutSource.indexOf(targetId);
     withoutSource.splice(targetIndex + (edge === 'after' ? 1 : 0), 0, sourceId);
     onReorderWorkspaces(withoutSource);
+  };
+
+  const finishProjectDrag = (workspaceId: string) => {
+    const placement = dragPlacementRef.current;
+    if (draggedWorkspaceIdRef.current !== workspaceId || !placement) {
+      clearProjectDrag();
+      return;
+    }
+    dropProject(placement.workspaceId, placement.edge, workspaceId);
   };
 
   if (collapsed) {
@@ -919,7 +1045,8 @@ export function CodexSidebar({
                 connectionState === 'failed' || connectionState === 'degraded'
               }
               dragPlacement={dragPlacement}
-              draggable={sortMode === 'custom'}
+              draggable={sortMode === 'custom' && !search}
+              dragging={draggedWorkspaceId === workspace.id}
               onSelectWorkspace={onSelectWorkspace}
               onToggleWorkspace={onToggleWorkspace}
               onNewThread={onNewThread}
@@ -930,13 +1057,10 @@ export function CodexSidebar({
               onLocateWorkspace={onLocateWorkspace}
               onRemoveWorkspace={onRemoveWorkspace}
               onCopyWorkspacePath={onCopyWorkspacePath}
-              onDragStart={setDraggedWorkspaceId}
-              onDragOver={(workspaceId, edge) => setDragPlacement({ workspaceId, edge })}
-              onDrop={dropProject}
-              onDragEnd={() => {
-                setDraggedWorkspaceId(null);
-                setDragPlacement(null);
-              }}
+              onDragStart={startProjectDrag}
+              onDragMove={moveProjectDrag}
+              onDrop={finishProjectDrag}
+              onDragEnd={clearProjectDrag}
             />
           ))
         )}

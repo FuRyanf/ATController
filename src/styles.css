@@ -703,6 +703,26 @@ kbd {
   border-radius: 7px;
 }
 
+.project-shelf-header.reorderable {
+  cursor: grab;
+  touch-action: none;
+}
+
+.project-shelf-header.reorderable .project-shelf-main {
+  cursor: grab;
+}
+
+.project-shelf.dragging {
+  z-index: 2;
+  opacity: 0.72;
+}
+
+.project-shelf.dragging > .project-shelf-header,
+.project-shelf.dragging > .project-shelf-header .project-shelf-main {
+  cursor: grabbing;
+  user-select: none;
+}
+
 .project-shelf-header:hover {
   background: var(--bg-hover);
 }
@@ -1535,6 +1555,72 @@ kbd {
   position: relative;
   min-height: 0;
   flex: 1;
+}
+
+.thread-find-bar {
+  position: absolute;
+  top: 10px;
+  right: 18px;
+  z-index: 7;
+  display: flex;
+  height: 34px;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 4px 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-raised) 96%, transparent);
+  box-shadow: var(--shadow-menu);
+  color: var(--text-secondary);
+  backdrop-filter: blur(14px);
+}
+
+.thread-find-bar input {
+  width: 190px;
+  height: 26px;
+  padding: 0 5px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.thread-find-bar input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.thread-find-count {
+  min-width: 54px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.thread-find-bar .icon-button {
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+}
+
+.thread-find-previous svg {
+  transform: rotate(180deg);
+}
+
+.conversation-timeline-shell.find-open .conversation-column {
+  padding-top: 58px;
+}
+
+::highlight(atcontroller-thread-find) {
+  background: color-mix(in srgb, var(--warning) 34%, transparent);
+  color: inherit;
+}
+
+::highlight(atcontroller-thread-find-active) {
+  background: color-mix(in srgb, var(--warning) 76%, transparent);
+  color: var(--text-primary);
 }
 
 .conversation-timeline {

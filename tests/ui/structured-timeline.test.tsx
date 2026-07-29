@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -163,6 +163,62 @@ describe('structured Codex timeline', () => {
     expect(screen.queryByText('History message 1')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Show 2 earlier turns/ }));
     expect(screen.getByText('History message 1')).toBeInTheDocument();
+  });
+
+  it('finds and navigates matches across the full thread with Command-F events', async () => {
+    const user = userEvent.setup();
+    const thread = structuredThread();
+    thread.turns = Array.from({ length: 30 }, (_, index) => ({
+      id: `turn-${index + 1}`,
+      status: 'completed',
+      itemsView: 'full',
+      items: [
+        {
+          id: `message-${index + 1}`,
+          kind: 'agentMessage',
+          text:
+            index === 0 || index === 29
+              ? `Unique needle in message ${index + 1}`
+              : `History message ${index + 1}`,
+          summary: [],
+          reasoning: [],
+          content: [],
+          changes: []
+        }
+      ]
+    }));
+    render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={vi.fn()}
+        onOpenFile={vi.fn()}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+      />
+    );
+    expect(screen.queryByText('Unique needle in message 1')).not.toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(new Event('atcontroller:find-thread'));
+    });
+    const input = await screen.findByRole('searchbox', { name: 'Find in thread' });
+    await user.type(input, 'needle');
+    expect(await screen.findByText('1 of 2')).toBeInTheDocument();
+    expect(screen.getByText('Unique needle in message 1')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Next match' }));
+    expect(await screen.findByText('2 of 2')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Previous match' }));
+    expect(await screen.findByText('1 of 2')).toBeInTheDocument();
+
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(
+      screen.queryByRole('searchbox', { name: 'Find in thread' })
+    ).not.toBeInTheDocument();
   });
 
   it('renders messages, commands, output, file edits, and completion as distinct items', async () => {
