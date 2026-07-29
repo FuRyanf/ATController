@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
-  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Claude full access thread, or enable full access by default in Settings.';
+  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Codex full access thread, or enable full access by default in Settings.';
 
 let resizeObserverCallback: ResizeObserverCallback | null = null;
 
@@ -24,7 +24,6 @@ const mocks = vi.hoisted(() => {
   const baseThread = {
     id: 'thread-1',
     workspaceId: 'ws-1',
-    agentId: 'claude-code',
     fullAccess: true,
     enabledSkills: [] as string[],
     createdAt: new Date().toISOString(),
@@ -34,7 +33,7 @@ const mocks = vi.hoisted(() => {
     lastRunStatus: 'Idle' as const,
     lastRunStartedAt: null,
     lastRunEndedAt: null,
-    claudeSessionId: '123e4567-e89b-12d3-a456-426614174000'
+    codexSessionId: '123e4567-e89b-12d3-a456-426614174000'
   };
 
   let threadState = [{ ...baseThread }];
@@ -289,13 +288,13 @@ const mocks = vi.hoisted(() => {
     const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0];
     return {
       sessionId: `session-${++sessionCounter}`,
-      sessionMode: thread?.claudeSessionId ? 'resumed' as const : 'new' as const,
-      resumeSessionId: thread?.claudeSessionId ?? null,
+      sessionMode: thread?.codexSessionId ? 'resumed' as const : 'new' as const,
+      resumeSessionId: thread?.codexSessionId ?? null,
       thread: {
         ...thread,
-        claudeSessionId: thread?.claudeSessionId ?? null,
-        lastResumeAt: thread?.claudeSessionId ? new Date().toISOString() : null,
-        lastNewSessionAt: thread?.claudeSessionId ? null : new Date().toISOString()
+        codexSessionId: thread?.codexSessionId ?? null,
+        lastResumeAt: thread?.codexSessionId ? new Date().toISOString() : null,
+        lastNewSessionAt: thread?.codexSessionId ? null : new Date().toISOString()
       }
     };
   };
@@ -321,7 +320,6 @@ const mocks = vi.hoisted(() => {
       ahead: 0,
       behind: 0
     })),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitListBranches: vi.fn(async () => [
       { name: 'main', isCurrent: true, lastCommitUnix: 1700000000 },
       { name: 'feature/test', isCurrent: false, lastCommitUnix: 1690000000 }
@@ -333,19 +331,18 @@ const mocks = vi.hoisted(() => {
       deletions: 3
     })),
     gitCheckoutBranch: vi.fn(async () => true),
-    gitCreateAndCheckoutBranch: vi.fn(async () => true),
     gitPullMasterForNewThread: vi.fn(async () => ({
       outcome: 'pulled' as const,
       message: 'Checked out master and pulled latest changes.'
     })),
     listThreads: vi.fn(async () => threadState),
-    createThread: vi.fn(async (_workspaceId: string, _agentId?: string, fullAccess?: boolean) => {
+    createThread: vi.fn(async (_workspaceId: string, fullAccess?: boolean) => {
       const next = {
         ...baseThread,
         id: `thread-${threadState.length + 1}`,
         title: 'New thread',
         fullAccess: Boolean(fullAccess),
-        claudeSessionId: null,
+        codexSessionId: null,
         lastResumeAt: null,
         lastNewSessionAt: null,
         updatedAt: new Date().toISOString()
@@ -384,19 +381,10 @@ const mocks = vi.hoisted(() => {
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
       return updated;
     }),
-    clearThreadClaudeSession: vi.fn(async (_workspaceId: string, threadId: string) => {
+    clearThreadCodexSession: vi.fn(async (_workspaceId: string, threadId: string) => {
       const updated = {
         ...threadState.find((thread) => thread.id === threadId)!,
-        claudeSessionId: null,
-        updatedAt: new Date().toISOString()
-      };
-      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
-      return updated;
-    }),
-    clearThreadAgentSession: vi.fn(async (_workspaceId: string, threadId: string) => {
-      const updated = {
-        ...threadState.find((thread) => thread.id === threadId)!,
-        claudeSessionId: null,
+        codexSessionId: null,
         updatedAt: new Date().toISOString()
       };
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
@@ -405,19 +393,11 @@ const mocks = vi.hoisted(() => {
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    setThreadAgent: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
-    latestClaudeSessionCwd: vi.fn(async () => null),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
+    latestCodexSessionCwd: vi.fn(async () => null),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -432,15 +412,12 @@ const mocks = vi.hoisted(() => {
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(terminalReadOutputImpl),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
+    validateImportableCodexSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
@@ -472,8 +449,8 @@ const mocks = vi.hoisted(() => {
     api.terminalStartSession.mockImplementation(terminalStartSessionImpl);
     api.terminalReadOutput.mockReset();
     api.terminalReadOutput.mockImplementation(terminalReadOutputImpl);
-    api.latestClaudeSessionCwd.mockReset();
-    api.latestClaudeSessionCwd.mockImplementation(async () => null);
+    api.latestCodexSessionCwd.mockReset();
+    api.latestCodexSessionCwd.mockImplementation(async () => null);
   };
 
   const helperMocks = {
@@ -491,8 +468,6 @@ const mocks = vi.hoisted(() => {
     },
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     emitTerminalData: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => {
       const sequenceKey =
         typeof event.sequence === 'number' ? `${event.sessionId}:${event.sequence}` : null;
@@ -582,8 +557,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,
@@ -603,31 +576,37 @@ vi.mock('../../src/lib/taskCompletionAlerts', () => ({
   sendTaskCompletionAlertsTestNotification: mocks.sendTaskCompletionAlertsTestNotification
 }));
 
-vi.mock('xterm', () => ({
-  Terminal: vi.fn((options: Record<string, unknown> = {}) => {
+vi.mock('@xterm/xterm', () => ({
+  Terminal: vi.fn(function Terminal(options: Record<string, unknown> = {}) {
     const term = mocks.createTerminal();
     term.options = { ...options };
     return term;
   })
 }));
 
-vi.mock('xterm-addon-fit', () => ({
-  FitAddon: vi.fn(() => ({
-    fit: mocks.fit,
-    proposeDimensions: () => {
-      mocks.fit();
-      return mocks.proposedDimensions;
-    },
-    dispose: vi.fn()
-  }))
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: vi.fn(function FitAddon() {
+    return {
+      fit: mocks.fit,
+      proposeDimensions: () => {
+        mocks.fit();
+        return mocks.proposedDimensions;
+      },
+      dispose: vi.fn()
+    };
+  })
 }));
 
-vi.mock('xterm-addon-web-links', () => ({
-  WebLinksAddon: vi.fn(() => ({}))
+vi.mock('@xterm/addon-web-links', () => ({
+  WebLinksAddon: vi.fn(function WebLinksAddon() {
+    return {};
+  })
 }));
 
-vi.mock('xterm-addon-search', () => ({
-  SearchAddon: vi.fn(() => mocks.createSearchAddon())
+vi.mock('@xterm/addon-search', () => ({
+  SearchAddon: vi.fn(function SearchAddon() {
+    return mocks.createSearchAddon();
+  })
 }));
 
 vi.mock('../../src/components/TerminalPanel', async () => {
@@ -715,7 +694,7 @@ describe('Terminal launch flags', () => {
 
     await waitFor(() => {
       expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith(
-        "claude --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions --permission-mode bypassPermissions"
+        "codex resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-bypass-approvals-and-sandbox"
       );
     });
   });
@@ -730,37 +709,21 @@ describe('Terminal launch flags', () => {
 
     await waitFor(() => {
       expect(mocks.api.openTerminalCommand).toHaveBeenCalledWith(
-        "cd '/tmp/workspace' && claude --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions --permission-mode bypassPermissions"
+        "cd '/tmp/workspace' && codex resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-bypass-approvals-and-sandbox"
       );
     });
   });
 
-  it('uses auto mode labels and resume flags when selected in settings', async () => {
-    mocks.api.getSettings.mockResolvedValueOnce({
-      claudeCliPath: '/usr/local/bin/claude',
-      claudePermissionMode: 'autoMode',
-      defaultNewThreadFullAccess: true
-    });
-
+  it('uses fixed Full access labels throughout the thread controls', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const row = await screen.findByRole('button', { name: /Full Access Thread/i });
-    expect(screen.getByTestId('full-access-toggle')).toHaveTextContent('Auto mode');
-    expect(screen.getByTestId('workspace-new-thread-ws-1')).toHaveTextContent('New Claude auto mode thread');
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    expect(screen.getByTestId('full-access-toggle')).toHaveTextContent('Full access');
+    expect(screen.getByTestId('workspace-new-thread-ws-1')).toHaveTextContent('New Codex thread');
 
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    expect(await screen.findByRole('button', { name: 'Claude auto mode thread' })).toBeInTheDocument();
-    await user.keyboard('{Escape}');
-
-    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Copy resume command' }));
-
-    await waitFor(() => {
-      expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith(
-        "claude --resume '123e4567-e89b-12d3-a456-426614174000' --permission-mode auto"
-      );
-    });
+    expect(await screen.findByRole('button', { name: 'Codex full access thread' })).toBeInTheDocument();
   });
 
   it('does not offer local Terminal resume for remote threads', async () => {
@@ -789,7 +752,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Codex thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -845,10 +808,10 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Claude full access thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Codex full access thread' }));
 
     await waitFor(() => {
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code', true);
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', true);
     });
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -880,10 +843,8 @@ describe('Terminal launch flags', () => {
 
     await waitFor(() => {
       expect(mocks.api.saveSettings).toHaveBeenCalledWith({
-        claudeCliPath: '/usr/local/bin/claude',
-        copilotCliPath: null,
+        codexCliPath: '/usr/local/bin/codex',
         appearanceMode: 'system',
-        claudePermissionMode: 'fullAccess',
         defaultNewThreadFullAccess: true,
         taskCompletionAlerts: false,
         terminalScrollbackLines: 100_000
@@ -891,12 +852,12 @@ describe('Terminal launch flags', () => {
     });
 
     const newThreadButton = screen.getByTestId('workspace-new-thread-ws-1');
-    expect(newThreadButton).toHaveTextContent('New Claude full access thread');
+    expect(newThreadButton).toHaveTextContent('New Codex full access thread');
 
     await user.click(newThreadButton);
 
     await waitFor(() => {
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code', true);
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', true);
     });
   });
 
@@ -918,10 +879,8 @@ describe('Terminal launch flags', () => {
 
     await waitFor(() => {
       expect(mocks.api.saveSettings).toHaveBeenCalledWith({
-        claudeCliPath: '/usr/local/bin/claude',
-        copilotCliPath: null,
+        codexCliPath: '/usr/local/bin/codex',
         appearanceMode: 'system',
-        claudePermissionMode: 'fullAccess',
         defaultNewThreadFullAccess: false,
         taskCompletionAlerts: true,
         terminalScrollbackLines: 100_000
@@ -932,7 +891,7 @@ describe('Terminal launch flags', () => {
 
   it('passes the saved terminal scrollback setting into terminal panels', async () => {
     mocks.api.getSettings.mockResolvedValueOnce({
-      claudeCliPath: '/usr/local/bin/claude',
+      codexCliPath: '/usr/local/bin/codex',
       terminalScrollbackLines: 250_000
     });
 
@@ -946,7 +905,7 @@ describe('Terminal launch flags', () => {
     const user = userEvent.setup();
 
     mocks.api.getSettings.mockResolvedValueOnce({
-      claudeCliPath: '/usr/local/bin/claude',
+      codexCliPath: '/usr/local/bin/codex',
       taskCompletionAlerts: true
     });
 
@@ -981,7 +940,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Codex thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1013,13 +972,13 @@ describe('Terminal launch flags', () => {
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('clears a fresh generated Claude session id before toggling full access on a new thread', async () => {
+  it('clears a fresh generated Codex session id before toggling full access on a new thread', async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Codex thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1034,7 +993,6 @@ describe('Terminal launch flags', () => {
       mocks.emitThreadUpdated({
         id: 'thread-2',
         workspaceId: 'ws-1',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [],
         createdAt: new Date().toISOString(),
@@ -1044,7 +1002,7 @@ describe('Terminal launch flags', () => {
         lastRunStatus: 'Idle',
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: '3e3483b5-067e-4e5c-baa1-7b5da3555412',
+        codexSessionId: '3e3483b5-067e-4e5c-baa1-7b5da3555412',
         lastResumeAt: null,
         lastNewSessionAt: new Date().toISOString()
       });
@@ -1053,7 +1011,7 @@ describe('Terminal launch flags', () => {
     await user.click(screen.getByTestId('full-access-toggle'));
 
     await waitFor(() => {
-      expect(mocks.api.clearThreadAgentSession).toHaveBeenCalledWith('ws-1', 'thread-2', 'claude');
+      expect(mocks.api.clearThreadCodexSession).toHaveBeenCalledWith('ws-1', 'thread-2');
     });
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1104,7 +1062,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Codex thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1152,7 +1110,7 @@ describe('Terminal launch flags', () => {
     expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-2');
     expect(mocks.api.terminalWrite).not.toHaveBeenCalledWith(
       'session-2',
-      expect.stringContaining("claude --resume '")
+      expect.stringContaining("codex resume '")
     );
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
   });
@@ -1165,7 +1123,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Codex thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1209,7 +1167,7 @@ describe('Terminal launch flags', () => {
     expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-2');
     expect(mocks.api.terminalWrite).not.toHaveBeenCalledWith(
       'session-2',
-      expect.stringContaining("claude --resume '")
+      expect.stringContaining("codex resume '")
     );
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
   });
@@ -1332,7 +1290,7 @@ describe('Terminal launch flags', () => {
     });
   });
 
-  it('waits for the replacement Claude session to hydrate before replaying the draft', async () => {
+  it('waits for the replacement Codex session to hydrate before replaying the draft', async () => {
     let replacementSessionReads = 0;
     mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
       if (sessionId === 'session-2') {
@@ -1384,8 +1342,8 @@ describe('Terminal launch flags', () => {
   });
 
   it('keeps a ready stateful stream in place when the local terminal resizes', async () => {
-    const initialSnapshot = '\u001b[2J\u001b[HClaude Code\nbypass permissions on';
-    const replacementSnapshot = '\u001b[2J\u001b[HClaude Code\nlatest frame only';
+    const initialSnapshot = '\u001b[2J\u001b[HOpenAI Codex\nfull access enabled';
+    const replacementSnapshot = '\u001b[2J\u001b[HOpenAI Codex\nlatest frame only';
     mocks.api.terminalReadOutput.mockResolvedValue({
       text: initialSnapshot,
       startPosition: 0,
@@ -1398,7 +1356,7 @@ describe('Terminal launch flags', () => {
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await waitFor(() => {
-      expect(screen.getByTestId('terminal-content-mock').textContent ?? '').toContain('bypass permissions on');
+      expect(screen.getByTestId('terminal-content-mock').textContent ?? '').toContain('full access enabled');
     });
 
     mocks.api.terminalReadOutput.mockClear();
@@ -1422,14 +1380,14 @@ describe('Terminal launch flags', () => {
 
     expect(mocks.api.terminalReadOutput).not.toHaveBeenCalled();
     const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
-    expect(rendered).toContain('bypass permissions on');
+    expect(rendered).toContain('full access enabled');
     expect(rendered).not.toContain('latest frame only');
   });
 
-  it('normalizes a fullscreen Claude snapshot to the latest replay-safe frame before rendering', async () => {
+  it('normalizes a fullscreen Codex snapshot to the latest replay-safe frame before rendering', async () => {
     const clear = '\u001b[2J\u001b[H';
-    const frameOne = `${clear}Claude Code\nframe one\n`;
-    const frameTwo = `${clear}Claude Code\nframe two\n`;
+    const frameOne = `${clear}OpenAI Codex\nframe one\n`;
+    const frameTwo = `${clear}OpenAI Codex\nframe two\n`;
     const rawSnapshot = `\u001b[?1049h${frameOne}${frameTwo}`;
     mocks.api.terminalReadOutput.mockResolvedValue({
       text: rawSnapshot,
@@ -1449,8 +1407,8 @@ describe('Terminal launch flags', () => {
   });
 
   it('rehydrates a ready stateful stream after switching away and back', async () => {
-    const initialSnapshot = '\u001b[2J\u001b[HClaude Code\nold dimensions';
-    const refreshedSnapshot = '\u001b[2J\u001b[HClaude Code\nnew dimensions';
+    const initialSnapshot = '\u001b[2J\u001b[HOpenAI Codex\nold dimensions';
+    const refreshedSnapshot = '\u001b[2J\u001b[HOpenAI Codex\nnew dimensions';
     const plainSnapshot = 'workspace shell';
     let useRefreshedSnapshot = false;
     mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
@@ -1485,7 +1443,7 @@ describe('Terminal launch flags', () => {
     });
 
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    await user.click(await screen.findByRole('button', { name: 'Claude thread' }));
+    await user.click(await screen.findByRole('button', { name: 'Codex thread' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -1546,7 +1504,7 @@ describe('Terminal launch flags', () => {
       expect(mocks.api.terminalSendSignal).toHaveBeenCalledWith('session-1', 'SIGINT');
       expect(mocks.api.terminalWrite).toHaveBeenCalledWith(
         'session-1',
-        "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= claude --resume '123e4567-e89b-12d3-a456-426614174000'\r"
+        "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= codex resume '123e4567-e89b-12d3-a456-426614174000' --sandbox workspace-write --ask-for-approval on-request\r"
       );
     });
 
@@ -1605,7 +1563,7 @@ describe('App terminal integration', () => {
     });
 
     const term = mocks.terminals[0];
-    const snapshot = '\u001b[2J\u001b[HClaude Code\nframe one';
+    const snapshot = '\u001b[2J\u001b[HOpenAI Codex\nframe one';
 
     await act(async () => {
       resolveReadOutput?.({

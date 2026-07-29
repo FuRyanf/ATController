@@ -1,6 +1,4 @@
 fn main() {
-    println!("cargo:rerun-if-env-changed=ATCONTROLLER_AGENT_PROVIDER");
-
     #[cfg(target_os = "macos")]
     {
         cc::Build::new()

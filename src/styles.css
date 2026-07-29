@@ -322,7 +322,7 @@ body.shell-drawer-resizing {
 }
 
 .add-project-button,
-.claude-path-button {
+.codex-path-button {
   height: 34px;
   padding: 0 10px;
   font-size: 13px;
@@ -349,7 +349,7 @@ body.shell-drawer-resizing {
   opacity: 0.78;
 }
 
-.claude-path-button {
+.codex-path-button {
   padding: 0 9px;
   color: #46556c;
   letter-spacing: -0.005em;
@@ -2012,6 +2012,241 @@ body.shell-drawer-resizing {
   flex-shrink: 0;
 }
 
+.codex-runtime-control {
+  position: relative;
+}
+
+.codex-runtime-trigger {
+  min-width: 178px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-card);
+  color: var(--ink);
+  padding: 4px 9px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  cursor: pointer;
+  transition: border-color var(--motion-fast), background-color var(--motion-fast);
+}
+
+.codex-runtime-trigger:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-input-hover);
+}
+
+.codex-runtime-trigger-main,
+.codex-runtime-trigger-usage {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-runtime-trigger-main {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.codex-runtime-trigger-usage {
+  color: var(--text-tertiary);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.codex-runtime-popover {
+  position: absolute;
+  z-index: 120;
+  right: 0;
+  bottom: calc(100% + 10px);
+  width: min(390px, calc(100vw - 24px));
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--surface-card-elevated);
+  color: var(--ink);
+  padding: 14px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.codex-runtime-popover-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.codex-runtime-popover-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.codex-runtime-popover-header strong {
+  font-size: 15px;
+}
+
+.codex-runtime-popover-header span,
+.codex-runtime-note {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.codex-runtime-refresh {
+  border: 0;
+  background: transparent;
+  color: var(--accent-tint);
+  padding: 2px 0;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.codex-runtime-refresh:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.codex-runtime-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.codex-runtime-fields label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.codex-runtime-fields select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-input);
+  color: var(--ink);
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.codex-speed-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.codex-speed-segments {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-input);
+  padding: 2px;
+  display: inline-flex;
+  gap: 2px;
+}
+
+.codex-speed-segments button {
+  min-width: 76px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.codex-speed-segments button.selected {
+  background: var(--surface-chip);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+}
+
+.codex-speed-segments button:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.codex-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.codex-usage-window {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-chip-soft);
+  padding: 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.codex-usage-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.codex-usage-progress {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--surface-input);
+  overflow: hidden;
+}
+
+.codex-usage-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.codex-usage-progress.unavailable {
+  opacity: 0.45;
+}
+
+.codex-usage-reset {
+  color: var(--text-tertiary);
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.codex-runtime-error {
+  margin: 0;
+  border: 1px solid var(--danger-line);
+  border-radius: 8px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  padding: 7px 8px;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.codex-runtime-note {
+  margin: 0;
+  line-height: 1.35;
+}
+
 .attachment-composer {
   min-width: 0;
   flex: 1;
@@ -3531,7 +3766,7 @@ html[data-theme='light'] .workspace-controls label {
   color: #223043;
 }
 
-html[data-theme='light'] .claude-path-button {
+html[data-theme='light'] .codex-path-button {
   color: var(--text-secondary);
 }
 
@@ -4215,7 +4450,7 @@ html[data-theme='light'] .attachment-clear-button:focus-visible {
   }
 
   .add-project-button,
-  .claude-path-button {
+  .codex-path-button {
     height: 30px;
     padding: 0 8px;
     font-size: 12px;

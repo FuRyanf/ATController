@@ -14,7 +14,7 @@ import { confirm, open } from '@tauri-apps/plugin-dialog';
 
 import './styles.css';
 import { AddWorkspaceModal } from './components/AddWorkspaceModal';
-import { BulkImportClaudeSessionsModal } from './components/BulkImportClaudeSessionsModal';
+import { BulkImportCodexSessionsModal } from './components/BulkImportCodexSessionsModal';
 import { ImportSessionModal } from './components/ImportSessionModal';
 import { BottomBar } from './components/BottomBar';
 import { HeaderBar } from './components/HeaderBar';
@@ -25,7 +25,6 @@ import { ThreadSkillsPopover } from './components/ThreadSkillsPopover';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { WorkspaceShellDrawer } from './components/WorkspaceShellDrawer';
 import * as apiModule from './lib/api';
-import { getConfiguredAgentProvider } from './lib/agentProvider';
 import { resolveAppendedTerminalLogChunk } from './lib/terminalLogChunkUpdate';
 import {
   presentTerminalEventData,
@@ -91,23 +90,18 @@ import { isRemoteWorkspaceKind } from './lib/workspaceKind';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
 import {
-  agentIdForProvider,
-  agentLabel,
-  agentProviderFromAgentId,
-  normalizeClaudePermissionMode,
   normalizeTerminalScrollbackLines,
-  type AgentProvider,
   type AppearanceMode,
-  type ClaudePermissionMode,
   type AppUpdateInfo,
-  type ClaudeTurnCompletionSummary,
+  type CodexTurnCompletionSummary,
   type CreateThreadOptions,
   type GitBranchEntry,
   type GitInfo,
   type GitWorkspaceStatus,
-  type ImportableClaudeProject,
-  type ImportableClaudeSession,
+  type ImportableCodexProject,
+  type ImportableCodexSession,
   type PreparedNativeFork,
+  type RecentCodexThread,
   type RunStatus,
   type Settings,
   type SkillInfo,
@@ -124,13 +118,8 @@ import {
   type Workspace
 } from './types';
 
-const CLAUDE_FULL_ACCESS_ARGS = [
-  '--dangerously-skip-permissions',
-  '--permission-mode',
-  'bypassPermissions'
-] as const;
-const CLAUDE_AUTO_MODE_ARGS = ['--permission-mode', 'auto'] as const;
-const COPILOT_AUTOPILOT_ARGS = ['--mode', 'autopilot'] as const;
+const CODEX_FULL_ACCESS_ARGS = ['--dangerously-bypass-approvals-and-sandbox'] as const;
+const CODEX_WORKSPACE_ACCESS_ARGS = ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'] as const;
 
 const { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } = apiModule;
 const onTerminalSshAuthStatus =
@@ -140,10 +129,8 @@ const onTerminalTurnCompleted =
   apiModule.onTerminalTurnCompleted ??
   (async (_handler: (event: TerminalTurnCompletedEvent) => void) => () => undefined);
 
-const ACTIVE_AGENT_PROVIDER = getConfiguredAgentProvider();
-const ACTIVE_AGENT_LABEL = agentLabel(ACTIVE_AGENT_PROVIDER);
-const ACTIVE_AGENT_ID = agentIdForProvider(ACTIVE_AGENT_PROVIDER);
-const STORAGE_PREFIX = ACTIVE_AGENT_PROVIDER === 'copilot' ? 'atcontroller:copilot' : 'atcontroller';
+const CODEX_LABEL = 'Codex';
+const STORAGE_PREFIX = 'atcontroller';
 const SELECTED_WORKSPACE_KEY = `${STORAGE_PREFIX}:selected-workspace`;
 const SIDEBAR_WIDTH_KEY = `${STORAGE_PREFIX}:sidebar-width`;
 const SHELL_DRAWER_HEIGHT_KEY = `${STORAGE_PREFIX}:shell-drawer-height`;
@@ -171,7 +158,7 @@ const STATEFUL_TERMINAL_RESYNC_DEBOUNCE_MS = 160;
 const STATEFUL_TERMINAL_REFRESH_RETRY_DELAYS_MS = [220, 520];
 const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
 const SESSION_SNAPSHOT_LATE_REFRESH_DELAYS_MS = [2200, 4200];
-const CLAUDE_IN_PLACE_RESTART_DELAY_MS = 120;
+const CODEX_IN_PLACE_RESTART_DELAY_MS = 120;
 const RDEV_SHELL_PROMPT_POLL_INTERVAL_MS = 120;
 const RDEV_SHELL_PROMPT_MAX_POLLS = 12;
 const AUTO_RECOVER_SESSION_TIMEOUT_MS = 900;
@@ -192,61 +179,32 @@ const MAX_PENDING_TERMINAL_DATA_SESSIONS = 64;
 const MAX_PENDING_TERMINAL_DATA_EVENTS_PER_SESSION = 64;
 const MAX_PENDING_TERMINAL_DATA_CHARS_PER_SESSION = 256_000;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
-function remoteAccessStartupBlockReason(accessLabel: string, providerLabel: string = ACTIVE_AGENT_LABEL): string {
+function remoteAccessStartupBlockReason(accessLabel: string): string {
   const lowerLabel = accessLabel.toLowerCase();
-  const threadLabel = `${providerLabel} ${lowerLabel} thread`;
+  const threadLabel = `${CODEX_LABEL} ${lowerLabel} thread`;
   return `Send a message first to establish the session, then toggle ${accessLabel}. To start with ${accessLabel}, use New thread options and choose ${threadLabel}, or enable ${lowerLabel} by default in Settings.`;
 }
 
 function normalizeSettings(settings?: Settings | null): Settings {
   return {
-    claudeCliPath: settings?.claudeCliPath ?? null,
-    copilotCliPath: settings?.copilotCliPath ?? null,
+    codexCliPath: settings?.codexCliPath ?? null,
     appearanceMode: normalizeAppearanceMode(settings?.appearanceMode),
-    claudePermissionMode: normalizeClaudePermissionMode(settings?.claudePermissionMode),
     defaultNewThreadFullAccess: settings?.defaultNewThreadFullAccess === true,
     taskCompletionAlerts: settings?.taskCompletionAlerts === true,
     terminalScrollbackLines: normalizeTerminalScrollbackLines(settings?.terminalScrollbackLines)
   };
 }
 
-function claudePermissionArgs(mode?: ClaudePermissionMode | null): readonly string[] {
-  return normalizeClaudePermissionMode(mode) === 'autoMode' ? CLAUDE_AUTO_MODE_ARGS : CLAUDE_FULL_ACCESS_ARGS;
-}
-
-function elevatedAccessLabel(
-  mode?: ClaudePermissionMode | null,
-  agentProvider: AgentProvider = ACTIVE_AGENT_PROVIDER
-): string {
-  if (agentProvider === 'copilot') {
-    return 'Autopilot';
-  }
-  return normalizeClaudePermissionMode(mode) === 'autoMode' ? 'Auto mode' : 'Full access';
-}
-
-function selectedProviderLabel(thread?: Pick<ThreadMetadata, 'agentId'> | null): string {
-  return agentLabel(threadAgentProvider(thread));
-}
-
 function detectActiveCliPath(): Promise<string | null> {
-  return ACTIVE_AGENT_PROVIDER === 'copilot' ? api.detectCopilotCliPath() : api.detectClaudeCliPath();
+  return api.detectCodexCliPath();
 }
 
-function threadAgentProvider(thread?: Pick<ThreadMetadata, 'agentId'> | null): AgentProvider {
-  return agentProviderFromAgentId(thread?.agentId ?? ACTIVE_AGENT_ID);
+function threadCodexSessionId(thread?: Pick<ThreadMetadata, 'codexSessionId'> | null): string {
+  return thread?.codexSessionId?.trim() ?? '';
 }
 
-function threadAgentSessionId(thread?: Pick<ThreadMetadata, 'agentId' | 'claudeSessionId' | 'copilotSessionId'> | null): string {
-  if (!thread) {
-    return '';
-  }
-  return threadAgentProvider(thread) === 'copilot'
-    ? thread.copilotSessionId?.trim() ?? ''
-    : thread.claudeSessionId?.trim() ?? '';
-}
-
-function isClaudeThread(thread?: Pick<ThreadMetadata, 'agentId'> | null): boolean {
-  return threadAgentProvider(thread) === 'claude';
+function codexAccessArgs(fullAccess: boolean): readonly string[] {
+  return fullAccess ? CODEX_FULL_ACCESS_ARGS : CODEX_WORKSPACE_ACCESS_ARGS;
 }
 
 interface PendingSessionStart {
@@ -273,7 +231,7 @@ interface ThreadAttentionState {
 }
 
 interface ThreadJsonlCompletionAttentionState {
-  claudeSessionId: string;
+  codexSessionId: string;
   latestCompletionIndex: number;
   lastSeenCompletionIndex: number;
   lastNotifiedCompletionIndex: number;
@@ -657,20 +615,20 @@ function normalizeThreadJsonlCompletionAttentionState(
   }
 
   const record = value as Record<string, unknown>;
-  const claudeSessionId =
-    typeof record.claudeSessionId === 'string' ? record.claudeSessionId.trim() : '';
+  const codexSessionId =
+    typeof record.codexSessionId === 'string' ? record.codexSessionId.trim() : '';
   const latestCompletionIndex = normalizeNonNegativeInteger(record.latestCompletionIndex);
   const lastSeenCompletionIndex = normalizeNonNegativeInteger(record.lastSeenCompletionIndex);
   const lastNotifiedCompletionIndex = normalizeNonNegativeInteger(record.lastNotifiedCompletionIndex);
   const latestStatus = normalizeThreadAttentionCompletionStatus(record.latestStatus);
   const latestCompletedAtMs = normalizePositiveInteger(record.latestCompletedAtMs);
 
-  if (!claudeSessionId || latestCompletionIndex === 0 || !latestStatus || latestCompletedAtMs === null) {
+  if (!codexSessionId || latestCompletionIndex === 0 || !latestStatus || latestCompletedAtMs === null) {
     return null;
   }
 
   return {
-    claudeSessionId,
+    codexSessionId,
     latestCompletionIndex,
     lastSeenCompletionIndex: Math.min(lastSeenCompletionIndex, latestCompletionIndex),
     lastNotifiedCompletionIndex: Math.min(lastNotifiedCompletionIndex, latestCompletionIndex),
@@ -726,7 +684,7 @@ function persistThreadJsonlCompletionAttentionStateMap(
   try {
     const entries = Object.entries(map).filter(([, value]) => {
       return (
-        value.claudeSessionId.trim().length > 0 &&
+        value.codexSessionId.trim().length > 0 &&
         value.latestCompletionIndex > 0 &&
         value.latestStatus !== null &&
         value.latestCompletedAtMs !== null
@@ -753,7 +711,7 @@ function areThreadJsonlCompletionAttentionStatesEqual(
     return false;
   }
   return (
-    left.claudeSessionId === right.claudeSessionId &&
+    left.codexSessionId === right.codexSessionId &&
     left.latestCompletionIndex === right.latestCompletionIndex &&
     left.lastSeenCompletionIndex === right.lastSeenCompletionIndex &&
     left.lastNotifiedCompletionIndex === right.lastNotifiedCompletionIndex &&
@@ -772,14 +730,13 @@ function isUnreadJsonlCompletionAttention(
 }
 
 function shouldTrackThreadJsonlCompletionAttention(
-  thread: Pick<ThreadMetadata, 'agentId' | 'isArchived' | 'claudeSessionId'>,
+  thread: Pick<ThreadMetadata, 'isArchived' | 'codexSessionId'>,
   workspaceKind: Workspace['kind'] | undefined | null
 ): boolean {
   return (
-    isClaudeThread(thread) &&
     !thread.isArchived &&
     workspaceKind === 'local' &&
-    (thread.claudeSessionId?.trim() ?? '').length > 0
+    (thread.codexSessionId?.trim() ?? '').length > 0
   );
 }
 
@@ -866,10 +823,9 @@ function isUuidLike(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
-function buildClaudeInPlaceRestartCommand(
+function buildCodexInPlaceRestartCommand(
   sessionId: string,
-  fullAccess: boolean,
-  permissionMode?: ClaudePermissionMode | null
+  fullAccess: boolean
 ): string {
   const parts = [
     'exec',
@@ -880,33 +836,11 @@ function buildClaudeInPlaceRestartCommand(
     'CLICOLOR_FORCE=1',
     'FORCE_COLOR=1',
     'NO_COLOR=',
-    'claude',
-    '--resume',
+    'codex',
+    'resume',
     shellQuote(sessionId)
   ];
-  if (fullAccess) {
-    parts.push(...claudePermissionArgs(permissionMode));
-  }
-  return parts.join(' ');
-}
-
-function buildCopilotInPlaceRestartCommand(sessionId: string, autopilot: boolean): string {
-  const parts = [
-    'exec',
-    'env',
-    'TERM=xterm-256color',
-    'COLORTERM=truecolor',
-    'CLICOLOR=1',
-    'CLICOLOR_FORCE=1',
-    'FORCE_COLOR=1',
-    'NO_COLOR=',
-    'copilot',
-    '--resume',
-    shellQuote(sessionId)
-  ];
-  if (autopilot) {
-    parts.push(...COPILOT_AUTOPILOT_ARGS);
-  }
+  parts.push(...codexAccessArgs(fullAccess));
   return parts.join(' ');
 }
 
@@ -914,58 +848,40 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function buildClaudeResumeCommand(
+function buildCodexResumeCommand(
   sessionId: string,
-  fullAccess: boolean,
-  permissionMode?: ClaudePermissionMode | null
+  fullAccess: boolean
 ): string {
-  const parts = ['claude', '--resume', shellQuote(sessionId)];
-  if (fullAccess) {
-    parts.push(...claudePermissionArgs(permissionMode));
-  }
+  const parts = ['codex', 'resume', shellQuote(sessionId)];
+  parts.push(...codexAccessArgs(fullAccess));
   return parts.join(' ');
 }
 
-function buildCopilotResumeCommand(sessionId: string, autopilot: boolean): string {
-  const parts = ['copilot', '--resume', shellQuote(sessionId)];
-  if (autopilot) {
-    parts.push(...COPILOT_AUTOPILOT_ARGS);
-  }
-  return parts.join(' ');
-}
-
-function buildAgentResumeCommand(
-  thread: Pick<ThreadMetadata, 'agentId' | 'claudeSessionId' | 'copilotSessionId' | 'fullAccess'>,
-  permissionMode?: ClaudePermissionMode | null
+function buildThreadResumeCommand(
+  thread: Pick<ThreadMetadata, 'codexSessionId' | 'fullAccess'>
 ): string | null {
-  const sessionId = threadAgentSessionId(thread);
+  const sessionId = threadCodexSessionId(thread);
   if (!sessionId) {
     return null;
   }
-  return threadAgentProvider(thread) === 'copilot'
-    ? buildCopilotResumeCommand(sessionId, thread.fullAccess)
-    : buildClaudeResumeCommand(sessionId, thread.fullAccess, permissionMode);
+  return buildCodexResumeCommand(sessionId, thread.fullAccess);
 }
 
-function buildAgentInPlaceRestartCommand(
-  thread: Pick<ThreadMetadata, 'agentId' | 'claudeSessionId' | 'copilotSessionId' | 'fullAccess'>,
-  permissionMode?: ClaudePermissionMode | null
+function buildThreadInPlaceRestartCommand(
+  thread: Pick<ThreadMetadata, 'codexSessionId' | 'fullAccess'>
 ): string | null {
-  const sessionId = threadAgentSessionId(thread);
+  const sessionId = threadCodexSessionId(thread);
   if (!sessionId) {
     return null;
   }
-  return threadAgentProvider(thread) === 'copilot'
-    ? buildCopilotInPlaceRestartCommand(sessionId, thread.fullAccess)
-    : buildClaudeInPlaceRestartCommand(sessionId, thread.fullAccess, permissionMode);
+  return buildCodexInPlaceRestartCommand(sessionId, thread.fullAccess);
 }
 
-function buildAgentResumeTerminalCommand(
-  thread: Pick<ThreadMetadata, 'agentId' | 'claudeSessionId' | 'copilotSessionId' | 'fullAccess'>,
-  cwd?: string | null,
-  permissionMode?: ClaudePermissionMode | null
+function buildThreadResumeTerminalCommand(
+  thread: Pick<ThreadMetadata, 'codexSessionId' | 'fullAccess'>,
+  cwd?: string | null
 ): string | null {
-  const command = buildAgentResumeCommand(thread, permissionMode);
+  const command = buildThreadResumeCommand(thread);
   if (!command) {
     return null;
   }
@@ -996,9 +912,8 @@ function hasShellPromptInSnapshot(snapshot: string): boolean {
     const line = lines[index];
     const lower = line.toLowerCase();
     if (
-      lower.includes('claude code') ||
       lower.includes('for shortcuts') ||
-      lower.includes('bypass permissions') ||
+      lower.includes('openai codex') ||
       lower.includes('starting ssh connection') ||
       lower.includes('uploading gh auth token')
     ) {
@@ -1012,7 +927,7 @@ function hasShellPromptInSnapshot(snapshot: string): boolean {
   return false;
 }
 
-function looksLikeClaudeUiReadyText(snapshot: string): boolean {
+function looksLikeCodexUiReadyText(snapshot: string): boolean {
   if (!snapshot) {
     return false;
   }
@@ -1020,8 +935,8 @@ function looksLikeClaudeUiReadyText(snapshot: string): boolean {
   const normalized = stripAnsi(snapshot).toLowerCase();
   return (
     normalized.includes('for shortcuts') ||
-    normalized.includes('bypass permissions') ||
-    normalized.includes('what should claude do instead')
+    normalized.includes('openai codex') ||
+    normalized.includes('ask codex')
   );
 }
 
@@ -1030,7 +945,7 @@ function isDefaultThreadTitle(title: string): boolean {
 }
 
 function normalizeTerminalInputChunk(data: string): string {
-  // Claude Code treats Esc+Enter as "insert newline without submitting".
+  // Codex treats Esc+Enter as "insert newline without submitting".
   // We preserve that behavior in app-side draft parsing so Shift/Option+Enter
   // stays multiline instead of looking like a normal submit.
   return data.replace(/\x1b\r/g, '\n');
@@ -1211,25 +1126,25 @@ function isThreadAwaitingConsumedForkResolution(thread: ThreadMetadata | null | 
   if (!thread?.pendingForkLaunchConsumed) {
     return false;
   }
-  const sourceClaudeSessionId = thread.pendingForkSourceClaudeSessionId?.trim() ?? '';
-  if (!isUuidLike(sourceClaudeSessionId)) {
+  const sourceCodexSessionId = thread.pendingForkSourceCodexSessionId?.trim() ?? '';
+  if (!isUuidLike(sourceCodexSessionId)) {
     return false;
   }
-  const currentClaudeSessionId = thread.claudeSessionId?.trim() ?? '';
-  return !isUuidLike(currentClaudeSessionId) || currentClaudeSessionId === sourceClaudeSessionId;
+  const currentCodexSessionId = thread.codexSessionId?.trim() ?? '';
+  return !isUuidLike(currentCodexSessionId) || currentCodexSessionId === sourceCodexSessionId;
 }
 
 function isThreadMissingClaimedForkSession(thread: ThreadMetadata | null | undefined): boolean {
-  const forkedFromClaudeSessionId = thread?.forkedFromClaudeSessionId?.trim() ?? '';
-  if (!isUuidLike(forkedFromClaudeSessionId)) {
+  const forkedFromCodexSessionId = thread?.forkedFromCodexSessionId?.trim() ?? '';
+  if (!isUuidLike(forkedFromCodexSessionId)) {
     return false;
   }
-  const currentClaudeSessionId = thread?.claudeSessionId?.trim() ?? '';
-  if (isUuidLike(currentClaudeSessionId)) {
+  const currentCodexSessionId = thread?.codexSessionId?.trim() ?? '';
+  if (isUuidLike(currentCodexSessionId)) {
     return false;
   }
-  const pendingSourceClaudeSessionId = thread?.pendingForkSourceClaudeSessionId?.trim() ?? '';
-  return !isUuidLike(pendingSourceClaudeSessionId);
+  const pendingSourceCodexSessionId = thread?.pendingForkSourceCodexSessionId?.trim() ?? '';
+  return !isUuidLike(pendingSourceCodexSessionId);
 }
 
 function isForkSessionAlreadyClaimedError(error: unknown): boolean {
@@ -1406,6 +1321,9 @@ function hasMeaningfulTerminalOutputChunk(chunk: string): boolean {
 }
 
 function statusFromExit(event: TerminalExitEvent): RunStatus {
+  if (event.persistenceError) {
+    return 'Failed';
+  }
   if (event.signal || event.code === 130) {
     return 'Canceled';
   }
@@ -1527,7 +1445,7 @@ export default function App() {
   const [threadSearch, setThreadSearch] = useState('');
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null);
   const [threadRuntimeCwdByThread, setThreadRuntimeCwdByThread] = useState<Record<string, string>>({});
-  const [focusedTerminalKind, setFocusedTerminalKind] = useState<'claude' | 'shell' | null>(null);
+  const [focusedTerminalKind, setFocusedTerminalKind] = useState<'codex' | 'shell' | null>(null);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [selectedTerminalFollowPaused, setSelectedTerminalFollowPaused] = useState(false);
   const appUnmountedRef = useRef(false);
@@ -1572,17 +1490,14 @@ export default function App() {
 
   const [settings, setSettings] = useState<Settings>(() =>
     normalizeSettings({
-      claudeCliPath: null,
-      copilotCliPath: null,
+      codexCliPath: null,
       appearanceMode: readStoredAppearanceMode(),
-      claudePermissionMode: 'fullAccess',
       defaultNewThreadFullAccess: false,
       taskCompletionAlerts: false,
       terminalScrollbackLines: undefined
     })
   );
-  const activeCliPath = ACTIVE_AGENT_PROVIDER === 'copilot' ? settings.copilotCliPath ?? '' : settings.claudeCliPath ?? '';
-  const activeAccessModeLabel = elevatedAccessLabel(settings.claudePermissionMode, ACTIVE_AGENT_PROVIDER);
+  const activeCliPath = settings.codexCliPath ?? '';
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
@@ -1604,10 +1519,17 @@ export default function App() {
   const [bulkImportLoading, setBulkImportLoading] = useState(false);
   const [bulkImporting, setBulkImporting] = useState(false);
   const [bulkImportError, setBulkImportError] = useState<string | null>(null);
-  const [discoveredImportableClaudeProjects, setDiscoveredImportableClaudeProjects] = useState<
-    ImportableClaudeProject[]
+  const [discoveredImportableCodexProjects, setDiscoveredImportableCodexProjects] = useState<
+    ImportableCodexProject[]
   >([]);
   const [selectedBulkImportSessionIds, setSelectedBulkImportSessionIds] = useState<string[]>([]);
+  const [recentCodexThreads, setRecentCodexThreads] = useState<RecentCodexThread[]>([]);
+  const [openingRecentCodexSessionIds, setOpeningRecentCodexSessionIds] = useState<
+    Record<string, boolean>
+  >({});
+  const recentCodexRefreshRequestIdRef = useRef(0);
+  const recentCodexRefreshRunningRef = useRef(false);
+  const suppressedRecentCodexSessionIdsRef = useRef(new Set<string>());
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -1635,7 +1557,7 @@ export default function App() {
 
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
-  const focusedTerminalKindRef = useRef<'claude' | 'shell' | null>(null);
+  const focusedTerminalKindRef = useRef<'codex' | 'shell' | null>(null);
   const shellTerminalSessionIdRef = useRef<string | null>(null);
   const shellTerminalWorkspaceIdRef = useRef<string | null>(null);
   const shellSessionStartRequestIdRef = useRef(0);
@@ -1746,10 +1668,7 @@ export default function App() {
         threadId: string;
         workspaceId: string;
         workspaceKind: Workspace['kind'];
-        agentProvider: AgentProvider;
-        agentSessionId?: string | null;
-        claudeSessionId?: string | null;
-        copilotSessionId?: string | null;
+        codexSessionId?: string | null;
         currentCwd?: string | null;
         mode: TerminalSessionMode;
         turnCompletionMode: TerminalTurnCompletionMode;
@@ -1780,29 +1699,52 @@ export default function App() {
     () => Object.fromEntries(workspaces.map((workspace) => [workspace.id, workspace])),
     [workspaces]
   );
+  const localWorkspaceHistoryKey = useMemo(
+    () =>
+      JSON.stringify(
+        workspaces
+          .filter((workspace) => workspace.kind === 'local')
+          .map((workspace) => [workspace.id, workspace.path])
+      ),
+    [workspaces]
+  );
 
-  const allThreads = useMemo(() => Object.values(threadsByWorkspace).flat(), [threadsByWorkspace]);
-  const importedClaudeSessionIds = useMemo(
+  const allThreads = useMemo(
+    () => Object.values(threadsByWorkspace).flat().filter((thread) => !thread.isArchived),
+    [threadsByWorkspace]
+  );
+  const importedCodexSessionIds = useMemo(
     () =>
       Array.from(
         new Set(
           allThreads
-            .filter((thread) => isClaudeThread(thread) && !thread.isArchived)
-            .map((thread) => thread.claudeSessionId?.trim() ?? '')
+            .filter((thread) => !thread.isArchived)
+            .map((thread) => thread.codexSessionId?.trim() ?? '')
             .filter((sessionId) => sessionId.length > 0)
         )
       ),
     [allThreads]
   );
-  const discoveredImportableClaudeSessionsById = useMemo(() => {
-    const lookup = new Map<string, { project: ImportableClaudeProject; session: ImportableClaudeSession }>();
-    for (const project of discoveredImportableClaudeProjects) {
+  const discoveredImportableCodexSessionsById = useMemo(() => {
+    const lookup = new Map<string, { project: ImportableCodexProject; session: ImportableCodexSession }>();
+    for (const project of discoveredImportableCodexProjects) {
       for (const session of project.sessions) {
         lookup.set(session.sessionId, { project, session });
       }
     }
     return lookup;
-  }, [discoveredImportableClaudeProjects]);
+  }, [discoveredImportableCodexProjects]);
+  const recentCodexThreadsByWorkspace = useMemo(() => {
+    const imported = new Set(importedCodexSessionIds);
+    const grouped: Record<string, RecentCodexThread[]> = {};
+    for (const thread of recentCodexThreads) {
+      if (imported.has(thread.sessionId)) {
+        continue;
+      }
+      (grouped[thread.workspaceId] ??= []).push(thread);
+    }
+    return grouped;
+  }, [importedCodexSessionIds, recentCodexThreads]);
 
   const selectedThread = useMemo(() => {
     if (!selectedThreadId) {
@@ -1810,9 +1752,6 @@ export default function App() {
     }
     return allThreads.find((thread) => thread.id === selectedThreadId);
   }, [allThreads, selectedThreadId]);
-  const selectedThreadProvider = threadAgentProvider(selectedThread);
-  const selectedThreadAgentLabel = selectedProviderLabel(selectedThread);
-  const selectedThreadAccessModeLabel = elevatedAccessLabel(settings.claudePermissionMode, selectedThreadProvider);
   const selectedThreadRuntimeCwd = selectedThread ? threadRuntimeCwdByThread[selectedThread.id] ?? null : null;
   const selectedGitContextPath = useMemo(() => {
     if (!selectedWorkspace || selectedWorkspace.kind !== 'local') {
@@ -1832,15 +1771,12 @@ export default function App() {
   useEffect(() => {
     let changed = false;
     for (const thread of allThreads) {
-      if (!isClaudeThread(thread)) {
-        continue;
-      }
       if (!allowFreshStartAfterForkFailureByThreadRef.current[thread.id]) {
         continue;
       }
       if (
-        isUuidLike(thread.claudeSessionId?.trim() ?? '') ||
-        isUuidLike(thread.pendingForkSourceClaudeSessionId?.trim() ?? '')
+        isUuidLike(thread.codexSessionId?.trim() ?? '') ||
+        isUuidLike(thread.pendingForkSourceCodexSessionId?.trim() ?? '')
       ) {
         delete allowFreshStartAfterForkFailureByThreadRef.current[thread.id];
         changed = true;
@@ -1853,9 +1789,6 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedThread) {
-      return;
-    }
-    if (!isClaudeThread(selectedThread)) {
       return;
     }
     if (allowFreshStartAfterForkFailureByThreadRef.current[selectedThread.id]) {
@@ -1903,7 +1836,7 @@ export default function App() {
     selectedWorkspace &&
     isRemoteWorkspaceKind(selectedWorkspace.kind) &&
     (isSelectedThreadStarting || !hasInteractedForSelectedThread)
-      ? remoteAccessStartupBlockReason(selectedThreadAccessModeLabel, selectedThreadAgentLabel)
+      ? remoteAccessStartupBlockReason('Full access')
       : null;
 
   const selectedTerminalStream = useMemo(() => {
@@ -1972,11 +1905,11 @@ export default function App() {
       : selectedThreadResumeFailureBlocked
       ? 'Session resume failed. Start fresh to continue.'
       : selectedStatefulHydrationFailedSessionId === selectedSessionId && Boolean(selectedSessionId)
-      ? `Could not refresh ${selectedThreadAgentLabel} screen yet. Waiting for new output...`
+      ? `Could not refresh ${CODEX_LABEL} screen yet. Waiting for new output...`
       : selectedStatefulHydrationSessionId === selectedSessionId && Boolean(selectedSessionId)
-      ? `Refreshing ${selectedThreadAgentLabel} screen...`
+      ? `Refreshing ${CODEX_LABEL} screen...`
       : !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
-      ? `Starting ${selectedThreadAgentLabel} session...`
+      ? `Starting ${CODEX_LABEL} session...`
       : undefined;
   const selectedThreadWorking = selectedThread ? runStore.isThreadWorking(selectedThread.id) : false;
 
@@ -2062,8 +1995,8 @@ export default function App() {
       .filter((skill): skill is SkillInfo => Boolean(skill));
   }, [selectedThread, selectedWorkspace, selectedWorkspaceSkills]);
 
-  const handleClaudeTerminalFocusChange = useCallback((focused: boolean) => {
-    setFocusedTerminalKind((current) => (focused ? 'claude' : current === 'claude' ? null : current));
+  const handleCodexTerminalFocusChange = useCallback((focused: boolean) => {
+    setFocusedTerminalKind((current) => (focused ? 'codex' : current === 'codex' ? null : current));
   }, []);
 
   const handleShellTerminalFocusChange = useCallback((focused: boolean) => {
@@ -2296,8 +2229,8 @@ export default function App() {
   );
 
   const resetThreadJsonlCompletionAttentionForSession = useCallback(
-    (threadId: string, claudeSessionId: string | null | undefined) => {
-      const normalizedSessionId = claudeSessionId?.trim() ?? '';
+    (threadId: string, codexSessionId: string | null | undefined) => {
+      const normalizedSessionId = codexSessionId?.trim() ?? '';
       const currentState = threadJsonlCompletionAttentionByThreadRef.current[threadId] ?? null;
       if (!currentState) {
         return null;
@@ -2305,7 +2238,7 @@ export default function App() {
       if (!normalizedSessionId) {
         return commitThreadJsonlCompletionAttentionState(threadId, null, { persistNow: true });
       }
-      if (currentState.claudeSessionId === normalizedSessionId) {
+      if (currentState.codexSessionId === normalizedSessionId) {
         return currentState;
       }
       return commitThreadJsonlCompletionAttentionState(threadId, null, { persistNow: true });
@@ -2320,12 +2253,12 @@ export default function App() {
     return typeof document === 'undefined' || document.visibilityState === 'visible';
   }, []);
 
-  const readLatestClaudeTurnCompletion = useCallback(async (workspacePath: string, claudeSessionId: string) => {
-    if (typeof api.latestClaudeTurnCompletion !== 'function') {
+  const readLatestCodexTurnCompletion = useCallback(async (workspacePath: string, codexSessionId: string) => {
+    if (typeof api.latestCodexTurnCompletion !== 'function') {
       return null;
     }
     try {
-      return await api.latestClaudeTurnCompletion(workspacePath, claudeSessionId);
+      return await api.latestCodexTurnCompletion(workspacePath, codexSessionId);
     } catch {
       return null;
     }
@@ -2338,9 +2271,9 @@ export default function App() {
       const thread = findThreadById(threadByIdRef.current, threadId);
       const workspaceId = sessionMeta?.workspaceId ?? thread?.workspaceId ?? '';
       const workspace = workspaceId ? workspaceById[workspaceId] ?? null : null;
-      const claudeSessionId =
-        sessionMeta?.claudeSessionId?.trim() ||
-        thread?.claudeSessionId?.trim() ||
+      const codexSessionId =
+        sessionMeta?.codexSessionId?.trim() ||
+        thread?.codexSessionId?.trim() ||
         '';
       const workspaceKind =
         sessionMeta?.workspaceKind ??
@@ -2348,15 +2281,15 @@ export default function App() {
         workspace?.kind ??
         null;
       const usesJsonlAttention =
-        isClaudeThread(thread) &&
+        Boolean(thread) &&
         workspaceKind === 'local' &&
-        claudeSessionId.length > 0;
+        codexSessionId.length > 0;
 
       return {
         thread,
         workspace,
         sessionMeta,
-        claudeSessionId,
+        codexSessionId,
         workspaceKind,
         usesJsonlAttention
       };
@@ -2366,32 +2299,25 @@ export default function App() {
 
   const resolveTrackedThreadJsonlCompletionAttention = useCallback(
     (thread: ThreadMetadata) => {
-      if (!isClaudeThread(thread)) {
-        return {
-          claudeSessionId: '',
-          workspaceKind: workspaceById[thread.workspaceId]?.kind ?? null
-        };
-      }
       const activeSessionId =
         activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
       const activeSessionMeta = activeSessionId ? sessionMetaBySessionIdRef.current[activeSessionId] ?? null : null;
-      const activeJsonlClaudeSessionId =
+      const activeJsonlCodexSessionId =
         activeSessionMeta &&
-        activeSessionMeta.agentProvider === 'claude' &&
         activeSessionMeta.workspaceKind === 'local' &&
         activeSessionMeta.turnCompletionMode === 'jsonl'
-          ? activeSessionMeta.claudeSessionId?.trim() ?? ''
+          ? activeSessionMeta.codexSessionId?.trim() ?? ''
           : '';
 
-      if (activeJsonlClaudeSessionId) {
+      if (activeJsonlCodexSessionId) {
         return {
-          claudeSessionId: activeJsonlClaudeSessionId,
+          codexSessionId: activeJsonlCodexSessionId,
           workspaceKind: activeSessionMeta?.workspaceKind ?? null
         };
       }
 
       return {
-        claudeSessionId: thread.claudeSessionId?.trim() ?? '',
+        codexSessionId: thread.codexSessionId?.trim() ?? '',
         workspaceKind: workspaceById[thread.workspaceId]?.kind ?? null
       };
     },
@@ -2417,7 +2343,7 @@ export default function App() {
   );
 
   const shouldSeedHistoricalJsonlCompletionAsSeen = useCallback(
-    (threadId: string, completion: ClaudeTurnCompletionSummary) => {
+    (threadId: string, completion: CodexTurnCompletionSummary) => {
       const visibleOutputGuard = visibleOutputGuardByThreadRef.current[threadId];
       if (visibleOutputGuard && visibleOutputGuard.seenAtMs >= completion.completedAtMs) {
         return true;
@@ -2441,8 +2367,8 @@ export default function App() {
   const observeThreadJsonlCompletion = useCallback(
     (
       threadId: string,
-      claudeSessionId: string,
-      completion: ClaudeTurnCompletionSummary,
+      codexSessionId: string,
+      completion: CodexTurnCompletionSummary,
       {
         persistNow = true,
         allowNotify = true,
@@ -2453,14 +2379,14 @@ export default function App() {
         allowHistoricalSeenBootstrap?: boolean;
       } = {}
     ) => {
-      const normalizedSessionId = claudeSessionId.trim();
+      const normalizedSessionId = codexSessionId.trim();
       if (!normalizedSessionId || completion.completionIndex <= 0) {
         return null;
       }
 
       const currentState = threadJsonlCompletionAttentionByThreadRef.current[threadId];
       const baseState =
-        currentState && currentState.claudeSessionId === normalizedSessionId
+        currentState && currentState.codexSessionId === normalizedSessionId
           ? currentState
           : null;
       const latestCompletionIndex = baseState?.latestCompletionIndex ?? 0;
@@ -2484,7 +2410,7 @@ export default function App() {
         shouldSeedHistoricalJsonlCompletionAsSeen(threadId, completion);
 
       let nextState: ThreadJsonlCompletionAttentionState = {
-        claudeSessionId: normalizedSessionId,
+        codexSessionId: normalizedSessionId,
         latestCompletionIndex: completion.completionIndex,
         lastSeenCompletionIndex: seedHistoricalCompletionAsSeen
           ? completion.completionIndex
@@ -2541,20 +2467,20 @@ export default function App() {
     async (
       threadId: string,
       workspacePath: string,
-      claudeSessionId: string,
+      codexSessionId: string,
       {
         allowNotify = true,
         allowHistoricalSeenBootstrap = false
       }: { allowNotify?: boolean; allowHistoricalSeenBootstrap?: boolean } = {}
     ) => {
-      const normalizedSessionId = claudeSessionId.trim();
+      const normalizedSessionId = codexSessionId.trim();
       if (!threadId || !workspacePath || !normalizedSessionId) {
         return null;
       }
 
       const requestId = (jsonlCompletionReconcileRequestIdByThreadRef.current[threadId] ?? 0) + 1;
       jsonlCompletionReconcileRequestIdByThreadRef.current[threadId] = requestId;
-      const completion = await readLatestClaudeTurnCompletion(workspacePath, normalizedSessionId);
+      const completion = await readLatestCodexTurnCompletion(workspacePath, normalizedSessionId);
       if (jsonlCompletionReconcileRequestIdByThreadRef.current[threadId] !== requestId) {
         return null;
       }
@@ -2562,9 +2488,9 @@ export default function App() {
       const activeSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
       const currentSessionId =
         (activeSessionId
-          ? sessionMetaBySessionIdRef.current[activeSessionId]?.claudeSessionId?.trim()
+          ? sessionMetaBySessionIdRef.current[activeSessionId]?.codexSessionId?.trim()
           : '') ||
-        findThreadById(threadByIdRef.current, threadId)?.claudeSessionId?.trim() ||
+        findThreadById(threadByIdRef.current, threadId)?.codexSessionId?.trim() ||
         '';
       if (currentSessionId && currentSessionId !== normalizedSessionId) {
         return null;
@@ -2580,7 +2506,7 @@ export default function App() {
         allowHistoricalSeenBootstrap
       });
     },
-    [observeThreadJsonlCompletion, readLatestClaudeTurnCompletion]
+    [observeThreadJsonlCompletion, readLatestCodexTurnCompletion]
   );
 
   const beginTurn = useCallback(
@@ -3176,9 +3102,8 @@ export default function App() {
       if (
         !shouldTrackThreadJsonlCompletionAttention(
           {
-            agentId: thread.agentId,
             isArchived: thread.isArchived,
-            claudeSessionId: trackedJsonlAttention.claudeSessionId
+            codexSessionId: trackedJsonlAttention.codexSessionId
           },
           trackedJsonlAttention.workspaceKind
         )
@@ -3193,14 +3118,14 @@ export default function App() {
       if (!workspace || workspace.kind !== 'local') {
         continue;
       }
-      const claudeSessionId = trackedJsonlAttention.claudeSessionId;
-      nextSeededJsonlSessions[thread.id] = claudeSessionId;
-      if (jsonlCompletionSeededSessionIdByThreadRef.current[thread.id] === claudeSessionId) {
+      const codexSessionId = trackedJsonlAttention.codexSessionId;
+      nextSeededJsonlSessions[thread.id] = codexSessionId;
+      if (jsonlCompletionSeededSessionIdByThreadRef.current[thread.id] === codexSessionId) {
         continue;
       }
-      jsonlCompletionSeededSessionIdByThreadRef.current[thread.id] = claudeSessionId;
-      resetThreadJsonlCompletionAttentionForSession(thread.id, claudeSessionId);
-      void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, claudeSessionId, {
+      jsonlCompletionSeededSessionIdByThreadRef.current[thread.id] = codexSessionId;
+      resetThreadJsonlCompletionAttentionForSession(thread.id, codexSessionId);
+      void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, codexSessionId, {
         allowNotify: false,
         allowHistoricalSeenBootstrap: true
       });
@@ -3539,23 +3464,23 @@ export default function App() {
     rememberThreadRuntimeCwd(threadId, null);
   }, [rememberThreadRuntimeCwd]);
 
-  const bootstrapThreadRuntimeCwdFromClaudeSession = useCallback(
+  const bootstrapThreadRuntimeCwdFromCodexSession = useCallback(
     async (threadId: string, sessionId: string) => {
       if (!threadId || !sessionId) {
         return;
       }
 
       const sessionMeta = sessionMetaBySessionIdRef.current[sessionId];
-      if (!sessionMeta || sessionMeta.agentProvider !== 'claude' || sessionMeta.workspaceKind !== 'local') {
+      if (!sessionMeta || sessionMeta.workspaceKind !== 'local') {
         return;
       }
 
       const thread = findThreadById(threadByIdRef.current, threadId);
-      if (!isClaudeThread(thread)) {
+      if (!thread) {
         return;
       }
-      const claudeSessionId = sessionMeta.claudeSessionId?.trim() || thread?.claudeSessionId?.trim() || '';
-      if (!claudeSessionId) {
+      const codexSessionId = sessionMeta.codexSessionId?.trim() || thread.codexSessionId?.trim() || '';
+      if (!codexSessionId) {
         return;
       }
 
@@ -3565,7 +3490,7 @@ export default function App() {
       }
 
       try {
-        const cwd = await api.latestClaudeSessionCwd(workspace.path, claudeSessionId);
+        const cwd = await api.latestCodexSessionCwd(workspace.path, codexSessionId);
         if (!cwd?.trim()) {
           return;
         }
@@ -3576,7 +3501,7 @@ export default function App() {
         if (!latestSessionMeta) {
           return;
         }
-        latestSessionMeta.claudeSessionId = claudeSessionId;
+        latestSessionMeta.codexSessionId = codexSessionId;
         latestSessionMeta.currentCwd = cwd;
         rememberThreadRuntimeCwd(threadId, cwd);
       } catch {
@@ -3591,26 +3516,23 @@ export default function App() {
       if (workspace.kind !== 'local') {
         return null;
       }
-      if (!isClaudeThread(thread)) {
-        return workspace.path;
-      }
 
       const remembered = threadRuntimeCwdByThreadRef.current[thread.id]?.trim() ?? '';
       if (remembered) {
         return remembered;
       }
 
-      const pendingForkSourceSessionId = thread.pendingForkSourceClaudeSessionId?.trim() ?? '';
-      const claudeSessionId =
+      const pendingForkSourceSessionId = thread.pendingForkSourceCodexSessionId?.trim() ?? '';
+      const codexSessionId =
         !thread.pendingForkLaunchConsumed && isUuidLike(pendingForkSourceSessionId)
           ? pendingForkSourceSessionId
-          : thread.claudeSessionId?.trim() ?? '';
-      if (!claudeSessionId) {
+          : thread.codexSessionId?.trim() ?? '';
+      if (!codexSessionId) {
         return workspace.path;
       }
 
       try {
-        const latestCwd = await api.latestClaudeSessionCwd(workspace.path, claudeSessionId);
+        const latestCwd = await api.latestCodexSessionCwd(workspace.path, codexSessionId);
         return latestCwd?.trim() || workspace.path;
       } catch {
         return workspace.path;
@@ -3638,7 +3560,7 @@ export default function App() {
   );
 
   // Returns true only if the user sent at least one message in the current session
-  // (i.e. after the most recent session bind). Prevents Claude's startup prompt from
+  // (i.e. after the most recent session bind). Prevents Codex's startup prompt from
   // being treated as fresh output on non-selected threads.
   const hasUserSentMessageInCurrentSession = useCallback((threadId: string) => {
     const sessionStart = lastSessionStartAtMsByThreadRef.current[threadId] ?? 0;
@@ -3681,9 +3603,8 @@ export default function App() {
       if (
         !shouldTrackThreadJsonlCompletionAttention(
           {
-            agentId: thread.agentId,
             isArchived: thread.isArchived,
-            claudeSessionId: trackedJsonlAttention.claudeSessionId
+            codexSessionId: trackedJsonlAttention.codexSessionId
           },
           trackedJsonlAttention.workspaceKind
         )
@@ -3691,8 +3612,8 @@ export default function App() {
         continue;
       }
       const state = threadJsonlCompletionAttentionByThreadRef.current[thread.id];
-      const claudeSessionId = trackedJsonlAttention.claudeSessionId;
-      if (!state || state.claudeSessionId !== claudeSessionId) {
+      const codexSessionId = trackedJsonlAttention.codexSessionId;
+      if (!state || state.codexSessionId !== codexSessionId) {
         continue;
       }
       if (!isUnreadJsonlCompletionAttention(state)) {
@@ -3846,6 +3767,39 @@ export default function App() {
     setSelectedWorkspace(nextWorkspaceId);
   }, [setSelectedThread, setSelectedWorkspace]);
 
+  const refreshRecentCodexThreads = useCallback(async () => {
+    recentCodexRefreshRequestIdRef.current += 1;
+    if (recentCodexRefreshRunningRef.current) {
+      return;
+    }
+    recentCodexRefreshRunningRef.current = true;
+    try {
+      while (true) {
+        const requestId = recentCodexRefreshRequestIdRef.current;
+        try {
+          const recent = await api.listRecentCodexThreads();
+          if (
+            requestId === recentCodexRefreshRequestIdRef.current &&
+            !appUnmountedRef.current
+          ) {
+            const suppressed = suppressedRecentCodexSessionIdsRef.current;
+            setRecentCodexThreads(
+              recent.filter((thread) => !suppressed.has(thread.sessionId))
+            );
+          }
+        } catch {
+          // History discovery is additive. Keep existing rows when Codex is
+          // unavailable or a local session file cannot be read.
+        }
+        if (requestId === recentCodexRefreshRequestIdRef.current) {
+          break;
+        }
+      }
+    } finally {
+      recentCodexRefreshRunningRef.current = false;
+    }
+  }, []);
+
   const primeRemoteThreadStartupOnSelection = useCallback(
     (thread: ThreadMetadata | undefined, workspaceOverride?: Workspace | null) => {
       if (!thread) {
@@ -3915,8 +3869,8 @@ export default function App() {
           return;
         }
 
-        const sourceClaudeSessionId = initialThread.pendingForkSourceClaudeSessionId?.trim() ?? '';
-        if (!isUuidLike(sourceClaudeSessionId)) {
+        const sourceCodexSessionId = initialThread.pendingForkSourceCodexSessionId?.trim() ?? '';
+        if (!isUuidLike(sourceCodexSessionId)) {
           return;
         }
 
@@ -3935,7 +3889,7 @@ export default function App() {
           if (!latestThread) {
             return;
           }
-          if ((latestThread.pendingForkSourceClaudeSessionId?.trim() ?? '') !== sourceClaudeSessionId) {
+          if ((latestThread.pendingForkSourceCodexSessionId?.trim() ?? '') !== sourceCodexSessionId) {
             return;
           }
 
@@ -3954,22 +3908,22 @@ export default function App() {
           }
 
           if (!waitingForFirstForkTurn) {
-            const childClaudeSessionId = (await api.resolveThreadForkCandidate(
-              sourceClaudeSessionId,
+            const childCodexSessionId = (await api.resolveThreadForkCandidate(
+              sourceCodexSessionId,
               [...excludedChildSessionIds],
               latestThread.pendingForkRequestedAt ?? null
             ))?.trim();
             if (
-              childClaudeSessionId &&
-              isUuidLike(childClaudeSessionId) &&
-              childClaudeSessionId !== sourceClaudeSessionId
+              childCodexSessionId &&
+              isUuidLike(childCodexSessionId) &&
+              childCodexSessionId !== sourceCodexSessionId
             ) {
               try {
                 delete forkResolutionTimeoutNotifiedByThreadRef.current[threadId];
-                const updatedThread = await api.setThreadClaudeSessionId(
+                const updatedThread = await api.setThreadCodexSessionId(
                   latestThread.workspaceId,
                   latestThread.id,
-                  childClaudeSessionId
+                  childCodexSessionId
                 );
                 applyThreadUpdate(updatedThread);
                 setForkResolutionFailureBlockedByThread((current) =>
@@ -3983,9 +3937,9 @@ export default function App() {
                 if (activeSessionId) {
                   const activeSessionMeta = sessionMetaBySessionIdRef.current[activeSessionId];
                   if (activeSessionMeta) {
-                    activeSessionMeta.claudeSessionId = childClaudeSessionId;
+                    activeSessionMeta.codexSessionId = childCodexSessionId;
                   }
-                  void api.terminalRebindClaudeSession(activeSessionId, childClaudeSessionId);
+                  void api.terminalRebindCodexSession(activeSessionId, childCodexSessionId);
                 }
                 if (activeSessionMode !== 'forked') {
                   clearThreadWorkingStopTimer(updatedThread.id);
@@ -3997,7 +3951,7 @@ export default function App() {
                 return;
               } catch (error) {
                 if (isForkSessionAlreadyClaimedError(error)) {
-                  excludedChildSessionIds.add(childClaudeSessionId);
+                  excludedChildSessionIds.add(childCodexSessionId);
                   continue;
                 }
                 throw error;
@@ -4013,7 +3967,7 @@ export default function App() {
         const timedOutThread = findThreadById(threadByIdRef.current, threadId);
         if (
           timedOutThread &&
-          (timedOutThread.pendingForkSourceClaudeSessionId?.trim() ?? '') === sourceClaudeSessionId
+          (timedOutThread.pendingForkSourceCodexSessionId?.trim() ?? '') === sourceCodexSessionId
         ) {
           try {
             const clearedThread = await api.clearThreadPendingFork(
@@ -4136,7 +4090,7 @@ export default function App() {
     }));
 
     try {
-      const skills = await api.listSkills(workspace.path, ACTIVE_AGENT_PROVIDER);
+      const skills = await api.listSkills(workspace.path);
       if (skillListRequestIdByWorkspaceRef.current[workspace.id] !== requestId) {
         return skills;
       }
@@ -4225,7 +4179,7 @@ export default function App() {
     if (shouldTrackNativeFork) {
       const thread = findThreadById(threadByIdRef.current, threadId);
       const workspace = thread ? workspaces.find((candidate) => candidate.id === thread.workspaceId) : null;
-      if (thread && isClaudeThread(thread) && workspace && !isRemoteWorkspaceKind(workspace.kind)) {
+      if (thread && workspace && !isRemoteWorkspaceKind(workspace.kind)) {
         try {
           preparedNativeFork = await api.prepareThreadNativeFork(thread.workspaceId, thread.id, sessionId);
         } catch (error) {
@@ -4293,7 +4247,7 @@ export default function App() {
         }
 
         const cached = lastTerminalLogByThreadRef.current[threadId] ?? '';
-        if (!hydrationPending && looksLikeClaudeUiReadyText(cached)) {
+        if (!hydrationPending && looksLikeCodexUiReadyText(cached)) {
           return true;
         }
 
@@ -4309,7 +4263,7 @@ export default function App() {
           hydrationSettledAtMs = Date.now();
         }
 
-        if (!hydrationStillPending && looksLikeClaudeUiReadyText(snapshot?.text ?? '')) {
+        if (!hydrationStillPending && looksLikeCodexUiReadyText(snapshot?.text ?? '')) {
           return true;
         }
 
@@ -4520,7 +4474,7 @@ export default function App() {
         }, nextDelayMs);
         return true;
       };
-      void bootstrapThreadRuntimeCwdFromClaudeSession(threadId, sessionId);
+      void bootstrapThreadRuntimeCwdFromCodexSession(threadId, sessionId);
       if (appUnmountedRef.current) {
         return;
       }
@@ -4596,7 +4550,7 @@ export default function App() {
       }
     },
     [
-      bootstrapThreadRuntimeCwdFromClaudeSession,
+      bootstrapThreadRuntimeCwdFromCodexSession,
       isThreadVisibleToUser,
       recordThreadVisibleOutput,
       normalizeThreadTerminalSnapshot,
@@ -4803,7 +4757,7 @@ export default function App() {
         const streamMatchesSession = existingStream?.sessionId === existing;
         const pendingHydration = streamMatchesSession && existingStream?.phase === 'hydrating';
         const sessionMeta = sessionMetaBySessionIdRef.current[existing];
-        void bootstrapThreadRuntimeCwdFromClaudeSession(thread.id, existing);
+        void bootstrapThreadRuntimeCwdFromCodexSession(thread.id, existing);
         const requiresReadySignal = requiresExplicitSshReadySignal(sessionMeta?.workspaceKind);
         if (!runLifecycleByThreadRef.current[thread.id]) {
           runLifecycleByThreadRef.current[thread.id] = createRunLifecycleState();
@@ -4907,33 +4861,16 @@ export default function App() {
 
         const startedAt = new Date().toISOString();
         const sessionCurrentCwd = response.currentCwd?.trim() || initialThreadCwd;
-        const responseAgentProvider = threadAgentProvider(response.thread);
-        const agentSessionId =
-          response.agentSessionId?.trim() ||
+        const codexSessionId =
+          response.thread.codexSessionId?.trim() ||
           response.resumeSessionId?.trim() ||
-          threadAgentSessionId(response.thread) ||
-          threadAgentSessionId(thread) ||
+          thread.codexSessionId?.trim() ||
           null;
-        const claudeSessionId =
-          responseAgentProvider === 'claude'
-            ? response.thread.claudeSessionId?.trim() ||
-              response.resumeSessionId?.trim() ||
-              thread.claudeSessionId?.trim() ||
-              agentSessionId ||
-              null
-            : null;
-        const copilotSessionId =
-          responseAgentProvider === 'copilot'
-            ? response.thread.copilotSessionId?.trim() || agentSessionId || null
-            : null;
         sessionMetaBySessionIdRef.current[sessionId] = {
           threadId: thread.id,
           workspaceId: thread.workspaceId,
           workspaceKind: workspace.kind,
-          agentProvider: responseAgentProvider,
-          agentSessionId,
-          claudeSessionId,
-          copilotSessionId,
+          codexSessionId,
           currentCwd: sessionCurrentCwd,
           mode: response.sessionMode,
           turnCompletionMode: response.turnCompletionMode ?? 'idle',
@@ -4941,10 +4878,10 @@ export default function App() {
         };
         rememberThreadRuntimeCwd(thread.id, sessionCurrentCwd);
         bindSession(thread.id, sessionId, startedAt);
-        if (responseAgentProvider === 'claude' && (response.turnCompletionMode ?? 'idle') === 'jsonl' && workspace.kind === 'local') {
-          resetThreadJsonlCompletionAttentionForSession(thread.id, claudeSessionId);
-          if (claudeSessionId) {
-            void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, claudeSessionId);
+        if ((response.turnCompletionMode ?? 'idle') === 'jsonl' && workspace.kind === 'local') {
+          resetThreadJsonlCompletionAttentionForSession(thread.id, codexSessionId);
+          if (codexSessionId) {
+            void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, codexSessionId);
           }
         }
         setHasInteractedByThread((current) => removeThreadFlag(current, thread.id));
@@ -4972,7 +4909,7 @@ export default function App() {
     [
       applyThreadUpdate,
       bindSession,
-      bootstrapThreadRuntimeCwdFromClaudeSession,
+      bootstrapThreadRuntimeCwdFromCodexSession,
       bumpSessionStartRequestId,
       flushPendingThreadInput,
       hasCachedTerminalLog,
@@ -5651,8 +5588,7 @@ export default function App() {
 
       const resolvedOptions: CreateThreadOptions = {
         ...(settings.defaultNewThreadFullAccess ? { fullAccess: true } : {}),
-        ...options,
-        agentId: ACTIVE_AGENT_ID
+        ...options
       };
 
       setWorkspaceCreatingThread(workspaceId, true);
@@ -5758,6 +5694,21 @@ export default function App() {
 
   const onDeleteThread = useCallback(
     async (workspaceId: string, threadId: string) => {
+      const threadToDelete = findThreadById(threadByIdRef.current, threadId);
+      const threadName = threadToDelete?.title?.trim() || 'this thread';
+      const message =
+        `Delete "${threadName}" from ATController?\n\n` +
+        'This removes its saved ATController metadata and terminal logs. The source Codex session history remains in Codex.';
+      const confirmed = await confirm(message, {
+        title: 'ATController',
+        kind: 'warning',
+        okLabel: 'Delete',
+        cancelLabel: 'Cancel'
+      }).catch(() => window.confirm(message));
+      if (!confirmed) {
+        return;
+      }
+
       deletedThreadIdsRef.current[threadId] = true;
       invalidatePendingSessionStart(threadId);
       clearThreadWorkingStopTimer(threadId);
@@ -5787,6 +5738,14 @@ export default function App() {
         delete deletedThreadIdsRef.current[threadId];
         pushToast(`Delete failed: ${String(error)}`, 'error');
         return;
+      }
+      const deletedCodexSessionId = threadToDelete?.codexSessionId?.trim();
+      if (deletedCodexSessionId) {
+        suppressedRecentCodexSessionIdsRef.current.add(deletedCodexSessionId);
+        setRecentCodexThreads((current) =>
+          current.filter((thread) => thread.sessionId !== deletedCodexSessionId)
+        );
+        void refreshRecentCodexThreads();
       }
       const deletedThread = findThreadById(threadByIdRef.current, threadId);
       if (deletedThread) {
@@ -5868,6 +5827,7 @@ export default function App() {
       finishSessionBinding,
       invalidatePendingSessionStart,
       pushToast,
+      refreshRecentCodexThreads,
       refreshThreadsForWorkspace,
       releaseRemovedThread,
       runStore,
@@ -6054,7 +6014,7 @@ export default function App() {
         clearForkResolutionFailureBlock(thread.id);
         allowFreshStartAfterForkFailureByThreadRef.current[thread.id] = true;
         sessionFailCountByThreadRef.current[thread.id] = 0;
-        const cleared = await api.clearThreadAgentSession(thread.workspaceId, thread.id, threadAgentProvider(thread));
+        const cleared = await api.clearThreadCodexSession(thread.workspaceId, thread.id);
         applyThreadUpdate(cleared);
         await restartThreadSession(cleared);
       } catch (error) {
@@ -6137,10 +6097,9 @@ export default function App() {
         persistAppearanceMode(savedSettings.appearanceMode ?? 'system');
         const detected = await detectActiveCliPath();
         setDetectedCliPath(detected);
-        const savedActiveCliPath =
-          ACTIVE_AGENT_PROVIDER === 'copilot' ? savedSettings.copilotCliPath : savedSettings.claudeCliPath;
+        const savedActiveCliPath = savedSettings.codexCliPath;
         if (!detected && !savedActiveCliPath) {
-          setBlockingError(`${ACTIVE_AGENT_LABEL} CLI is missing. Open Settings to configure the CLI path.`);
+          setBlockingError(`${CODEX_LABEL} CLI is missing. Open Settings to configure the CLI path.`);
         }
       } catch (error) {
         setBlockingError(String(error));
@@ -6214,6 +6173,7 @@ export default function App() {
 
   useEffect(() => {
     if (workspaces.length === 0) {
+      setRecentCodexThreads([]);
       return;
     }
 
@@ -6227,6 +6187,18 @@ export default function App() {
       })
     );
   }, [listThreads, workspaces]);
+
+  useEffect(() => {
+    if (localWorkspaceHistoryKey === '[]') {
+      setRecentCodexThreads([]);
+      return;
+    }
+    void refreshRecentCodexThreads();
+    const interval = window.setInterval(() => {
+      void refreshRecentCodexThreads();
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [localWorkspaceHistoryKey, refreshRecentCodexThreads]);
 
   useEffect(() => {
     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
@@ -6370,7 +6342,6 @@ export default function App() {
     const currentSelectedBindingSessionId =
       selectedSessionId ?? activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? null;
     if (
-      isClaudeThread(selectedThread) &&
       !allowFreshStartAfterForkFailureByThreadRef.current[selectedThread.id] &&
       isThreadMissingClaimedForkSession(selectedThread)
     ) {
@@ -6480,7 +6451,7 @@ export default function App() {
 
     void ensureSessionForThread(selectedThread).catch((error) => {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      pushToast(`Failed to start ${selectedThreadAgentLabel} session: ${String(error)}`, 'error');
+      pushToast(`Failed to start ${CODEX_LABEL} session: ${String(error)}`, 'error');
     });
     rememberSelectedTerminalBinding(null);
   }, [
@@ -6498,14 +6469,14 @@ export default function App() {
     selectedThreadSshStartupBlockReason,
     selectedWorkspace?.kind,
     selectedThread,
-    selectedThreadAgentLabel
+    CODEX_LABEL
   ]);
 
   useEffect(() => {
-    if (!selectedThread || !isClaudeThread(selectedThread) || !selectedWorkspace || isRemoteWorkspaceKind(selectedWorkspace.kind)) {
+    if (!selectedThread || !selectedWorkspace || isRemoteWorkspaceKind(selectedWorkspace.kind)) {
       return;
     }
-    if (!isUuidLike(selectedThread.pendingForkSourceClaudeSessionId?.trim() ?? '')) {
+    if (!isUuidLike(selectedThread.pendingForkSourceCodexSessionId?.trim() ?? '')) {
       return;
     }
 
@@ -6885,17 +6856,17 @@ export default function App() {
       }
 
       completeTurn(threadId, completionStatus, completedAtMs);
-      const claudeSessionId = jsonlAttentionContext.claudeSessionId;
+      const codexSessionId = jsonlAttentionContext.codexSessionId;
       const isQualifyingJsonlCompletion =
         event.completionIndex !== null &&
         event.completionIndex !== undefined &&
         (event.hasMeaningfulOutput === true || completionStatus === 'Failed');
-      if (isQualifyingJsonlCompletion && claudeSessionId) {
+      if (isQualifyingJsonlCompletion && codexSessionId) {
         observeThreadJsonlCompletion(
           threadId,
-          claudeSessionId,
+          codexSessionId,
           {
-            claudeSessionId,
+            codexSessionId,
             completionIndex: event.completionIndex!,
             completedAtMs,
             status: completionStatus,
@@ -6924,6 +6895,12 @@ export default function App() {
     (event: TerminalExitEvent) => {
       const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
       ignoreSshAuthStatusSession(event.sessionId);
+      if (event.persistenceError) {
+        pushToast(
+          `ATController could not save complete terminal history: ${event.persistenceError}`,
+          'error'
+        );
+      }
 
       if (shellTerminalSessionIdRef.current === event.sessionId) {
         clearTerminalSessionTracking(event.sessionId);
@@ -7023,7 +7000,8 @@ export default function App() {
       stopThreadWorking,
       clearTerminalSessionTracking,
       clearThreadWorkingStopTimer,
-      ignoreSshAuthStatusSession
+      ignoreSshAuthStatusSession,
+      pushToast
     ]
   );
 
@@ -7045,40 +7023,28 @@ export default function App() {
       if (!sessionMeta) {
         return;
       }
-      const agentProvider = threadAgentProvider(thread);
-      sessionMeta.agentProvider = agentProvider;
-      if (agentProvider === 'copilot') {
-        const copilotSessionId = thread.copilotSessionId?.trim() ?? '';
-        if (copilotSessionId) {
-          sessionMeta.copilotSessionId = copilotSessionId;
-          sessionMeta.agentSessionId = copilotSessionId;
-        }
-        return;
-      }
-      const claudeSessionId = thread.claudeSessionId?.trim() ?? '';
-      if (sessionMeta.turnCompletionMode === 'jsonl' && sessionMeta.workspaceKind === 'local' && !claudeSessionId) {
-        sessionMeta.claudeSessionId = null;
-        sessionMeta.agentSessionId = null;
+      const codexSessionId = thread.codexSessionId?.trim() ?? '';
+      if (sessionMeta.turnCompletionMode === 'jsonl' && sessionMeta.workspaceKind === 'local' && !codexSessionId) {
+        sessionMeta.codexSessionId = null;
         resetThreadJsonlCompletionAttentionForSession(thread.id, null);
         return;
       }
-      if (!claudeSessionId || sessionMeta.claudeSessionId === claudeSessionId) {
+      if (!codexSessionId || sessionMeta.codexSessionId === codexSessionId) {
         return;
       }
-      sessionMeta.claudeSessionId = claudeSessionId;
-      sessionMeta.agentSessionId = claudeSessionId;
+      sessionMeta.codexSessionId = codexSessionId;
       if (sessionMeta.turnCompletionMode === 'jsonl' && sessionMeta.workspaceKind === 'local') {
-        resetThreadJsonlCompletionAttentionForSession(thread.id, claudeSessionId);
+        resetThreadJsonlCompletionAttentionForSession(thread.id, codexSessionId);
         const workspace = workspaces.find((candidate) => candidate.id === thread.workspaceId);
         if (workspace?.kind === 'local') {
-          void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, claudeSessionId);
+          void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, codexSessionId);
         }
       }
-      void bootstrapThreadRuntimeCwdFromClaudeSession(thread.id, activeSessionId);
+      void bootstrapThreadRuntimeCwdFromCodexSession(thread.id, activeSessionId);
     },
     [
       applyThreadUpdate,
-      bootstrapThreadRuntimeCwdFromClaudeSession,
+      bootstrapThreadRuntimeCwdFromCodexSession,
       reconcileThreadJsonlCompletionAttention,
       resetThreadJsonlCompletionAttentionForSession,
       runStore,
@@ -7253,7 +7219,7 @@ export default function App() {
       const focusedSessionId =
         focusedTerminalKind === 'shell'
           ? shellTerminalSessionId
-          : focusedTerminalKind === 'claude'
+          : focusedTerminalKind === 'codex'
             ? selectedSessionId
             : null;
 
@@ -7288,7 +7254,6 @@ export default function App() {
     async (nextSettings: {
       cliPath: string;
       appearanceMode: AppearanceMode;
-      claudePermissionMode: ClaudePermissionMode;
       defaultNewThreadFullAccess: boolean;
       taskCompletionAlerts: boolean;
       terminalScrollbackLines: number;
@@ -7303,10 +7268,8 @@ export default function App() {
       const normalizedCliPath = nextSettings.cliPath.trim() || null;
       const saved = normalizeSettings(
         await api.saveSettings({
-          claudeCliPath: ACTIVE_AGENT_PROVIDER === 'claude' ? normalizedCliPath : settings.claudeCliPath ?? null,
-          copilotCliPath: ACTIVE_AGENT_PROVIDER === 'copilot' ? normalizedCliPath : settings.copilotCliPath ?? null,
+          codexCliPath: normalizedCliPath,
           appearanceMode: nextSettings.appearanceMode,
-          claudePermissionMode: nextSettings.claudePermissionMode,
           defaultNewThreadFullAccess: nextSettings.defaultNewThreadFullAccess,
           taskCompletionAlerts,
           terminalScrollbackLines
@@ -7331,7 +7294,7 @@ export default function App() {
         }
       }
     },
-    [pushToast, settings.claudeCliPath, settings.copilotCliPath, settings.taskCompletionAlerts]
+    [pushToast, settings.taskCompletionAlerts]
   );
 
   const sendTestAlert = useCallback(async () => {
@@ -7404,16 +7367,16 @@ export default function App() {
     return false;
   }, []);
 
-  const restartRdevAgentInPlace = useCallback(
+  const restartRdevCodexInPlace = useCallback(
     async (thread: ThreadMetadata) => {
       const sessionId =
         activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
-      const resumeSessionId = threadAgentSessionId(thread);
+      const resumeSessionId = threadCodexSessionId(thread);
       if (!sessionId || !isUuidLike(resumeSessionId)) {
         return false;
       }
 
-      const command = buildAgentInPlaceRestartCommand(thread, settings.claudePermissionMode);
+      const command = buildThreadInPlaceRestartCommand(thread);
       if (!command) {
         return false;
       }
@@ -7423,7 +7386,7 @@ export default function App() {
       if (!ready) {
         await api.terminalWrite(sessionId, '/exit\r').catch(() => false);
         await new Promise<void>((resolve) => {
-          window.setTimeout(() => resolve(), CLAUDE_IN_PLACE_RESTART_DELAY_MS);
+          window.setTimeout(() => resolve(), CODEX_IN_PLACE_RESTART_DELAY_MS);
         });
         ready = await waitForRdevShellPrompt(sessionId);
       }
@@ -7434,7 +7397,7 @@ export default function App() {
       const wrote = await api.terminalWrite(sessionId, `${command}\r`).catch(() => false);
       return wrote;
     },
-    [runStore, settings.claudePermissionMode, waitForRdevShellPrompt]
+    [runStore, waitForRdevShellPrompt]
   );
 
   const selectThread = useCallback(
@@ -7467,7 +7430,7 @@ export default function App() {
         !hasInteractedThisSession
       )
     ) {
-      pushToast(remoteAccessStartupBlockReason(selectedThreadAccessModeLabel, selectedThreadAgentLabel), 'info');
+      pushToast(remoteAccessStartupBlockReason('Full access'), 'info');
       return;
     }
     const nextValue = !selectedThread.fullAccess;
@@ -7478,19 +7441,15 @@ export default function App() {
       if (
         activeSessionMode === 'new' &&
         !hasInteractedThisSession &&
-        isUuidLike(threadAgentSessionId(updatedThread))
+        isUuidLike(threadCodexSessionId(updatedThread))
       ) {
-        updatedThread = await api.clearThreadAgentSession(
-          updatedThread.workspaceId,
-          updatedThread.id,
-          threadAgentProvider(updatedThread)
-        );
+        updatedThread = await api.clearThreadCodexSession(updatedThread.workspaceId, updatedThread.id);
         applyThreadUpdate(updatedThread);
       }
       const canRestartRdevInPlace =
-        workspace?.kind === 'rdev' && isUuidLike(threadAgentSessionId(updatedThread));
+        workspace?.kind === 'rdev' && isUuidLike(threadCodexSessionId(updatedThread));
       if (canRestartRdevInPlace) {
-        const switchedInPlace = await restartRdevAgentInPlace(updatedThread);
+        const switchedInPlace = await restartRdevCodexInPlace(updatedThread);
         if (switchedInPlace) {
           const sessionId =
             activeRunsByThreadRef.current[updatedThread.id]?.sessionId ?? runStore.sessionForThread(updatedThread.id) ?? null;
@@ -7499,7 +7458,7 @@ export default function App() {
             setSelectedWorkspace(updatedThread.workspaceId);
           }
           setSelectedThread(updatedThread.id);
-          pushToast(`${selectedThreadAccessModeLabel} ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
+          pushToast(`Full access ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
           return;
         }
         pushToast('Could not switch in-place for remote workspace; reconnecting session.', 'info');
@@ -7514,14 +7473,13 @@ export default function App() {
       await waitForThreadReplayWindow(updatedThread.id, nextSessionId);
       await replayThreadDraftInput(nextSessionId, draftInput);
     } catch (error) {
-      pushToast(`Failed to update ${selectedThreadAccessModeLabel}: ${String(error)}`, 'error');
+      pushToast(`Failed to update Full access: ${String(error)}`, 'error');
     } finally {
       setFullAccessUpdating(false);
     }
   }, [
     activeRunsByThreadRef,
     applyThreadUpdate,
-    selectedThreadAccessModeLabel,
     ensureSessionForThread,
     fullAccessUpdating,
     getThreadDraftInput,
@@ -7531,7 +7489,7 @@ export default function App() {
     primeRemoteThreadStartupOnSelection,
     pushToast,
     replayThreadDraftInput,
-    restartRdevAgentInPlace,
+    restartRdevCodexInPlace,
     runStore,
     sessionMetaBySessionIdRef,
     selectedThread,
@@ -7601,9 +7559,9 @@ export default function App() {
 
   const copyResumeCommand = useCallback(
     (thread: ThreadMetadata) => {
-      const command = buildAgentResumeCommand(thread, settings.claudePermissionMode);
+      const command = buildThreadResumeCommand(thread);
       if (!command) {
-        pushToast(`No ${selectedProviderLabel(thread)} session ID available — start a session first.`, 'error');
+        pushToast(`No ${CODEX_LABEL} session ID available — start a session first.`, 'error');
         return;
       }
       void writeTextToClipboard(command)
@@ -7614,7 +7572,7 @@ export default function App() {
           pushToast(`Failed to copy resume command: ${String(error)}`, 'error');
         });
     },
-    [pushToast, settings.claudePermissionMode, writeTextToClipboard]
+    [pushToast, writeTextToClipboard]
   );
 
   const openResumeCommandInTerminal = useCallback(
@@ -7631,9 +7589,9 @@ export default function App() {
           cwd = (await resolveInitialThreadCwd(thread, workspace).catch(() => null))?.trim() || cwd;
         }
 
-        const command = buildAgentResumeTerminalCommand(thread, cwd, settings.claudePermissionMode);
+        const command = buildThreadResumeTerminalCommand(thread, cwd);
         if (!command) {
-          pushToast(`No ${selectedProviderLabel(thread)} session ID available — start a session first.`, 'error');
+          pushToast(`No ${CODEX_LABEL} session ID available — start a session first.`, 'error');
           return;
         }
         await api.openTerminalCommand(command);
@@ -7642,7 +7600,7 @@ export default function App() {
         pushToast(`Failed to open resume command in Terminal: ${String(error)}`, 'error');
       });
     },
-    [pushToast, resolveInitialThreadCwd, settings.claudePermissionMode, workspaceById]
+    [pushToast, resolveInitialThreadCwd, workspaceById]
   );
 
   const copyWorkspaceCommand = useCallback(
@@ -7666,15 +7624,62 @@ export default function App() {
   );
 
   const onImportSession = useCallback((workspace: Workspace) => {
-    if (ACTIVE_AGENT_PROVIDER !== 'claude') {
-      return;
-    }
     setImportSessionWorkspace(workspace);
     setImportSessionError(null);
   }, []);
 
+  const openRecentCodexThread = useCallback(
+    async (workspace: Workspace, recentThread: RecentCodexThread) => {
+      if (openingRecentCodexSessionIds[recentThread.sessionId]) {
+        return;
+      }
+      setOpeningRecentCodexSessionIds((current) => ({
+        ...current,
+        [recentThread.sessionId]: true
+      }));
+      try {
+        const importedThread = await api.importCodexSession(
+          workspace.id,
+          recentThread.sessionId,
+          recentThread.title,
+          settings.defaultNewThreadFullAccess === true
+        );
+        suppressedRecentCodexSessionIdsRef.current.delete(recentThread.sessionId);
+        delete deletedThreadIdsRef.current[importedThread.id];
+        setRecentCodexThreads((current) =>
+          current.filter((thread) => thread.sessionId !== recentThread.sessionId)
+        );
+        if (selectedWorkspaceIdRef.current !== workspace.id) {
+          setSelectedWorkspace(workspace.id);
+        }
+        await refreshThreadsForWorkspace(workspace.id);
+        applyThreadUpdate(importedThread);
+        setSelectedThread(importedThread.id);
+        setTerminalFocusRequestId((current) => current + 1);
+        pushToast('Codex thread opened.', 'info');
+        void refreshRecentCodexThreads();
+      } catch (error) {
+        pushToast(`Unable to open Codex thread: ${String(error)}`, 'error');
+      } finally {
+        setOpeningRecentCodexSessionIds((current) =>
+          removeRecordEntry(current, recentThread.sessionId)
+        );
+      }
+    },
+    [
+      applyThreadUpdate,
+      openingRecentCodexSessionIds,
+      pushToast,
+      refreshRecentCodexThreads,
+      refreshThreadsForWorkspace,
+      settings.defaultNewThreadFullAccess,
+      setSelectedThread,
+      setSelectedWorkspace
+    ]
+  );
+
   const confirmImportSession = useCallback(
-    async (claudeSessionId: string) => {
+    async (codexSessionId: string) => {
       if (!importSessionWorkspace) {
         return;
       }
@@ -7683,41 +7688,32 @@ export default function App() {
       try {
         const importableSession =
           importSessionWorkspace.kind === 'local'
-            ? await api.getImportableClaudeSession(importSessionWorkspace.path, claudeSessionId)
+            ? await api.getImportableCodexSession(importSessionWorkspace.path, codexSessionId)
             : null;
-        if (importSessionWorkspace.kind === 'local') {
-          await api.validateImportableClaudeSession(importSessionWorkspace.path, claudeSessionId);
-        }
-        const thread = await api.createThread(
-          importSessionWorkspace.id,
-          'claude-code',
-          settings.defaultNewThreadFullAccess === true
-        );
-        let importedThread = await api.setThreadClaudeSessionId(
-          importSessionWorkspace.id,
-          thread.id,
-          claudeSessionId
-        );
         const sessionTitle =
           importableSession?.summary?.trim() ||
           importableSession?.firstPrompt?.trim() ||
           null;
-        if (sessionTitle) {
-          try {
-            importedThread = await api.renameThread(importSessionWorkspace.id, importedThread.id, sessionTitle);
-          } catch {
-            // Non-fatal: thread was already created and linked successfully.
-          }
-        }
-        applyThreadUpdate(importedThread);
+        const importedThread = await api.importCodexSession(
+          importSessionWorkspace.id,
+          codexSessionId,
+          sessionTitle,
+          settings.defaultNewThreadFullAccess === true
+        );
+        suppressedRecentCodexSessionIdsRef.current.delete(codexSessionId);
+        setRecentCodexThreads((current) =>
+          current.filter((thread) => thread.sessionId !== codexSessionId)
+        );
         delete deletedThreadIdsRef.current[importedThread.id];
         if (selectedWorkspaceIdRef.current !== importSessionWorkspace.id) {
           setSelectedWorkspace(importSessionWorkspace.id);
         }
         primeRemoteThreadStartupOnSelection(importedThread, importSessionWorkspace);
+        await refreshThreadsForWorkspace(importSessionWorkspace.id);
+        applyThreadUpdate(importedThread);
         setSelectedThread(importedThread.id);
         setTerminalFocusRequestId((current) => current + 1);
-        await refreshThreadsForWorkspace(importSessionWorkspace.id);
+        void refreshRecentCodexThreads();
         setImportSessionWorkspace(null);
         pushToast('Session imported — opening thread.', 'info');
       } catch (error) {
@@ -7732,21 +7728,19 @@ export default function App() {
       primeRemoteThreadStartupOnSelection,
       pushToast,
       refreshThreadsForWorkspace,
+      refreshRecentCodexThreads,
       settings.defaultNewThreadFullAccess,
       setSelectedThread,
       setSelectedWorkspace
     ]
   );
 
-  const refreshImportableClaudeSessionsDiscovery = useCallback(async () => {
-    if (ACTIVE_AGENT_PROVIDER !== 'claude') {
-      return;
-    }
+  const refreshImportableCodexSessionsDiscovery = useCallback(async () => {
     setBulkImportLoading(true);
     setBulkImportError(null);
     try {
-      const discovered = await api.discoverImportableClaudeSessions();
-      setDiscoveredImportableClaudeProjects(discovered);
+      const discovered = await api.discoverImportableCodexSessions();
+      setDiscoveredImportableCodexProjects(discovered);
       const availableSessionIds = new Set(
         discovered.flatMap((project) => project.sessions.map((session) => session.sessionId))
       );
@@ -7759,9 +7753,6 @@ export default function App() {
   }, []);
 
   const openBulkImportModal = useCallback(() => {
-    if (ACTIVE_AGENT_PROVIDER !== 'claude') {
-      return;
-    }
     setSettingsOpen(false);
     setAddWorkspaceOpen(false);
     setAddWorkspaceError(null);
@@ -7770,8 +7761,8 @@ export default function App() {
     setBulkImportOpen(true);
     setBulkImportError(null);
     setSelectedBulkImportSessionIds([]);
-    void refreshImportableClaudeSessionsDiscovery();
-  }, [refreshImportableClaudeSessionsDiscovery]);
+    void refreshImportableCodexSessionsDiscovery();
+  }, [refreshImportableCodexSessionsDiscovery]);
 
   const closeBulkImportModal = useCallback(() => {
     if (bulkImporting) {
@@ -7792,7 +7783,7 @@ export default function App() {
   }, []);
 
   const toggleBulkImportProjectSelection = useCallback(
-    (_project: ImportableClaudeProject, visibleImportableSessionIds: string[], selected: boolean) => {
+    (_project: ImportableCodexProject, visibleImportableSessionIds: string[], selected: boolean) => {
       setSelectedBulkImportSessionIds((current) => {
         const next = new Set(current);
         if (selected) {
@@ -7806,32 +7797,33 @@ export default function App() {
     []
   );
 
-  const confirmBulkImportClaudeSessions = useCallback(async () => {
+  const confirmBulkImportCodexSessions = useCallback(async () => {
     if (bulkImporting) {
       return;
     }
 
-    const importedSessionIdSet = new Set(importedClaudeSessionIds);
+    const importedSessionIdSet = new Set(importedCodexSessionIds);
     const sessionIdsToImport = selectedBulkImportSessionIds.filter((sessionId) => {
-      const discovered = discoveredImportableClaudeSessionsById.get(sessionId);
+      const discovered = discoveredImportableCodexSessionsById.get(sessionId);
       return Boolean(discovered?.project.pathExists) && !importedSessionIdSet.has(sessionId);
     });
 
     if (sessionIdsToImport.length === 0) {
-      setBulkImportError('Select at least one Claude session that has not already been imported.');
+      setBulkImportError('Select at least one Codex session that has not already been imported.');
       return;
     }
 
     setBulkImporting(true);
     setBulkImportError(null);
 
+    let importedCount = 0;
     try {
       const workspaceByProjectPath = new Map<string, Workspace>();
       const impactedWorkspaceIds = new Set<string>();
       const importedThreads: Array<{ workspace: Workspace; thread: ThreadMetadata }> = [];
 
       for (const sessionId of sessionIdsToImport) {
-        const discovered = discoveredImportableClaudeSessionsById.get(sessionId);
+        const discovered = discoveredImportableCodexSessionsById.get(sessionId);
         if (!discovered) {
           continue;
         }
@@ -7850,30 +7842,26 @@ export default function App() {
         }
         workspaceByProjectPath.set(project.path, workspace);
 
-        await api.validateImportableClaudeSession(workspace.path, sessionId);
-        const thread = await api.createThread(
-          workspace.id,
-          'claude-code',
-          settings.defaultNewThreadFullAccess === true
-        );
-        let importedThread = await api.setThreadClaudeSessionId(workspace.id, thread.id, sessionId);
-
         const sessionTitle =
           discovered.session.summary?.trim() ||
           discovered.session.firstPrompt?.trim() ||
           null;
-        if (sessionTitle) {
-          try {
-            importedThread = await api.renameThread(workspace.id, importedThread.id, sessionTitle);
-          } catch {
-            // Non-fatal: thread was already created and linked successfully.
-          }
-        }
+        const importedThread = await api.importCodexSession(
+          workspace.id,
+          sessionId,
+          sessionTitle,
+          settings.defaultNewThreadFullAccess === true
+        );
 
+        suppressedRecentCodexSessionIdsRef.current.delete(sessionId);
         applyThreadUpdate(importedThread);
+        setRecentCodexThreads((current) =>
+          current.filter((thread) => thread.sessionId !== sessionId)
+        );
         delete deletedThreadIdsRef.current[importedThread.id];
         impactedWorkspaceIds.add(workspace.id);
         importedThreads.push({ workspace, thread: importedThread });
+        importedCount += 1;
       }
 
       await Promise.all(Array.from(impactedWorkspaceIds, (workspaceId) => refreshThreadsForWorkspace(workspaceId)));
@@ -7889,25 +7877,31 @@ export default function App() {
 
       setBulkImportOpen(false);
       setSelectedBulkImportSessionIds([]);
+      void refreshRecentCodexThreads();
       pushToast(
         importedThreads.length === 1
-          ? 'Imported 1 Claude session.'
-          : `Imported ${importedThreads.length} Claude sessions.`,
+          ? 'Imported 1 Codex session.'
+          : `Imported ${importedThreads.length} Codex sessions.`,
         'info'
       );
     } catch (error) {
-      setBulkImportError(String(error));
+      setBulkImportError(
+        importedCount > 0
+          ? `Imported ${importedCount} before the remaining import failed: ${String(error)}`
+          : String(error)
+      );
     } finally {
       setBulkImporting(false);
     }
   }, [
     applyThreadUpdate,
     bulkImporting,
-    discoveredImportableClaudeSessionsById,
+    discoveredImportableCodexSessionsById,
     ensureLocalWorkspaceByPath,
-    importedClaudeSessionIds,
+    importedCodexSessionIds,
     pushToast,
     refreshThreadsForWorkspace,
+    refreshRecentCodexThreads,
     selectedBulkImportSessionIds,
     settings.defaultNewThreadFullAccess,
     setSelectedThread,
@@ -7951,6 +7945,9 @@ export default function App() {
       const workspaceThreads = threadsByWorkspaceRef.current[workspace.id] ?? [];
       const threadIds = workspaceThreads.map((thread) => thread.id);
       const threadIdSet = new Set(threadIds);
+      const workspaceCodexSessionIds = workspaceThreads
+        .map((thread) => thread.codexSessionId?.trim() ?? '')
+        .filter((sessionId) => sessionId.length > 0);
 
       for (const threadId of threadIds) {
         invalidatePendingSessionStart(threadId);
@@ -7968,6 +7965,15 @@ export default function App() {
         pushToast(`Project "${workspace.name}" was already removed.`, 'info');
         await refreshWorkspaces();
         return;
+      }
+      for (const sessionId of workspaceCodexSessionIds) {
+        suppressedRecentCodexSessionIdsRef.current.add(sessionId);
+      }
+      if (workspaceCodexSessionIds.length > 0) {
+        const suppressed = new Set(workspaceCodexSessionIds);
+        setRecentCodexThreads((current) =>
+          current.filter((thread) => !suppressed.has(thread.sessionId))
+        );
       }
 
       window.localStorage.removeItem(threadSelectionKey(workspace.id));
@@ -8113,6 +8119,7 @@ export default function App() {
       }
 
       await refreshWorkspaces();
+      void refreshRecentCodexThreads();
       pushToast(`Removed project "${workspace.name}".`, 'info');
     },
     [
@@ -8120,6 +8127,7 @@ export default function App() {
       invalidatePendingSessionStart,
       pushToast,
       refreshWorkspaces,
+      refreshRecentCodexThreads,
       clearThreadWorkingStopTimer,
       setSelectedThread,
       setHasInteractedByThread,
@@ -8168,7 +8176,7 @@ export default function App() {
     inputControlCarryByThreadRef.current[selectedThread.id] = parsed.nextControlCarry;
     const submittedLines = parsed.submittedLines;
     const nativeForkCommand =
-      selectedWorkspace && isClaudeThread(selectedThread) && !isRemoteWorkspaceKind(selectedWorkspace.kind)
+      selectedWorkspace && !isRemoteWorkspaceKind(selectedWorkspace.kind)
         ? detectNativeForkCommand(submittedLines)
         : null;
 
@@ -8342,13 +8350,12 @@ export default function App() {
         sidebarWidth={sidebarWidth}
         workspaces={workspaces}
         threadsByWorkspace={threadsByWorkspace}
+        recentCodexThreadsByWorkspace={recentCodexThreadsByWorkspace}
+        openingRecentCodexSessionIds={openingRecentCodexSessionIds}
         selectedWorkspaceId={selectedWorkspaceId}
         selectedThreadId={selectedThreadId}
         threadSearch={threadSearch}
         defaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
-        agentLabel={ACTIVE_AGENT_LABEL}
-        elevatedAccessLabel={activeAccessModeLabel}
-        showImportSession={ACTIVE_AGENT_PROVIDER === 'claude'}
         creatingThreadByWorkspace={creatingThreadByWorkspace}
         onOpenWorkspacePicker={openWorkspacePicker}
         onOpenSettings={openSettings}
@@ -8370,6 +8377,7 @@ export default function App() {
         onOpenResumeCommandInTerminal={openResumeCommandInTerminal}
         onCopyWorkspaceCommand={copyWorkspaceCommand}
         onImportSession={onImportSession}
+        onOpenRecentCodexThread={openRecentCodexThread}
       />
       <div
         className="sidebar-resizer"
@@ -8434,11 +8442,11 @@ export default function App() {
               searchToggleRequestId={terminalSearchToggleRequestId}
               onData={stableTerminalOnData}
               onResize={stableTerminalOnResize}
-              onFocusChange={handleClaudeTerminalFocusChange}
+              onFocusChange={handleCodexTerminalFocusChange}
               onFollowOutputPausedChange={handleSelectedTerminalFollowPausedChange}
             />
           ) : (
-            <div className="terminal-empty">Select a thread to start {ACTIVE_AGENT_LABEL}.</div>
+            <div className="terminal-empty">Select a thread to start {CODEX_LABEL}.</div>
           )}
         </section>
         <BottomBar
@@ -8449,7 +8457,6 @@ export default function App() {
               <ThreadSkillsPopover
                 workspace={selectedWorkspace}
                 thread={selectedThread}
-                agentLabel={selectedThreadAgentLabel}
                 skills={selectedWorkspaceSkills}
                 loading={selectedWorkspaceSkillsLoading}
                 error={selectedWorkspaceSkillError}
@@ -8470,7 +8477,6 @@ export default function App() {
           attachmentDraftPaths={selectedThreadDraftAttachments}
           attachmentsEnabled={Boolean(selectedThread)}
           fullAccessUpdating={fullAccessUpdating}
-          elevatedAccessLabel={selectedThreadAccessModeLabel}
           gitInfo={gitInfo}
           onPickAttachments={pickAttachmentFiles}
           onAddAttachmentPaths={addAttachmentPathsFromDrop}
@@ -8509,13 +8515,10 @@ export default function App() {
         open={settingsOpen}
         initialCliPath={activeCliPath}
         initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
-        initialClaudePermissionMode={normalizeClaudePermissionMode(settings.claudePermissionMode)}
         initialDefaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
         initialTaskCompletionAlerts={settings.taskCompletionAlerts === true}
         initialTerminalScrollbackLines={normalizeTerminalScrollbackLines(settings.terminalScrollbackLines)}
         detectedCliPath={detectedCliPath}
-        agentProvider={ACTIVE_AGENT_PROVIDER}
-        elevatedAccessLabel={activeAccessModeLabel}
         copyEnvDiagnosticsDisabled={!selectedWorkspace || selectedWorkspace.kind !== 'local'}
         onClose={() => setSettingsOpen(false)}
         onSave={(nextSettings) => void saveSettings(nextSettings)}
@@ -8546,44 +8549,40 @@ export default function App() {
         onConfirmSsh={(command, displayName, remotePath) =>
           void confirmSshWorkspace(command, displayName, remotePath)
         }
-        onOpenBulkImport={ACTIVE_AGENT_PROVIDER === 'claude' ? openBulkImportModal : undefined}
+        onOpenBulkImport={openBulkImportModal}
       />
 
-      {ACTIVE_AGENT_PROVIDER === 'claude' ? (
-        <>
-          <ImportSessionModal
-            open={Boolean(importSessionWorkspace)}
-            workspaceName={importSessionWorkspace?.name ?? ''}
-            error={importSessionError}
-            saving={importingSession}
-            onClose={() => {
-              setImportSessionWorkspace(null);
-              setImportSessionError(null);
-            }}
-            onConfirm={(claudeSessionId) => void confirmImportSession(claudeSessionId)}
-          />
+      <ImportSessionModal
+        open={Boolean(importSessionWorkspace)}
+        workspaceName={importSessionWorkspace?.name ?? ''}
+        error={importSessionError}
+        saving={importingSession}
+        onClose={() => {
+          setImportSessionWorkspace(null);
+          setImportSessionError(null);
+        }}
+        onConfirm={(codexSessionId) => void confirmImportSession(codexSessionId)}
+      />
 
-          <BulkImportClaudeSessionsModal
-            open={bulkImportOpen}
-            loading={bulkImportLoading}
-            importing={bulkImporting}
-            projects={discoveredImportableClaudeProjects}
-            selectedSessionIds={selectedBulkImportSessionIds}
-            alreadyImportedSessionIds={importedClaudeSessionIds}
-            error={bulkImportError}
-            onClose={closeBulkImportModal}
-            onToggleSession={toggleBulkImportSessionSelection}
-            onToggleProject={toggleBulkImportProjectSelection}
-            onImport={() => void confirmBulkImportClaudeSessions()}
-          />
-        </>
-      ) : null}
+      <BulkImportCodexSessionsModal
+        open={bulkImportOpen}
+        loading={bulkImportLoading}
+        importing={bulkImporting}
+        projects={discoveredImportableCodexProjects}
+        selectedSessionIds={selectedBulkImportSessionIds}
+        alreadyImportedSessionIds={importedCodexSessionIds}
+        error={bulkImportError}
+        onClose={closeBulkImportModal}
+        onToggleSession={toggleBulkImportSessionSelection}
+        onToggleProject={toggleBulkImportProjectSelection}
+        onImport={() => void confirmBulkImportCodexSessions()}
+      />
 
       {resumeFailureModal ? (
         <div className="modal-backdrop">
           <section className="modal">
             <h3>Failed to resume session. Start fresh?</h3>
-            <p>{selectedThreadAgentLabel} could not resume this thread&apos;s saved session id.</p>
+            <p>{CODEX_LABEL} could not resume this thread&apos;s saved session id.</p>
             {resumeFailureModal.showLog ? <pre>{resumeFailureModal.log || '(No logs captured)'}</pre> : null}
             <footer className="modal-actions">
               <button

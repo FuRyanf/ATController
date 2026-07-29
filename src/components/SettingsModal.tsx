@@ -4,10 +4,7 @@ import {
   TERMINAL_SCROLLBACK_LINES_MAX,
   TERMINAL_SCROLLBACK_LINES_MIN,
   normalizeTerminalScrollbackLines,
-  agentLabel,
-  type AgentProvider,
-  type AppearanceMode,
-  type ClaudePermissionMode
+  type AppearanceMode
 } from '../types';
 import { SettingsActionFooter, SettingsRow, SettingsSection } from './SettingsLayout';
 
@@ -15,19 +12,15 @@ interface SettingsModalProps {
   open: boolean;
   initialCliPath: string;
   initialAppearanceMode: AppearanceMode;
-  initialClaudePermissionMode: ClaudePermissionMode;
   initialDefaultNewThreadFullAccess: boolean;
   initialTaskCompletionAlerts: boolean;
   initialTerminalScrollbackLines: number;
   detectedCliPath?: string | null;
-  agentProvider?: AgentProvider;
-  elevatedAccessLabel?: string;
   copyEnvDiagnosticsDisabled?: boolean;
   onClose: () => void;
   onSave: (settings: {
     cliPath: string;
     appearanceMode: AppearanceMode;
-    claudePermissionMode: ClaudePermissionMode;
     defaultNewThreadFullAccess: boolean;
     taskCompletionAlerts: boolean;
     terminalScrollbackLines: number;
@@ -56,18 +49,6 @@ const APPEARANCE_OPTIONS: Array<{ value: AppearanceMode; label: string; descript
 ];
 
 const SCROLLBACK_FIELD_STEP = 1_000;
-const CLAUDE_PERMISSION_MODE_OPTIONS: Array<{ value: ClaudePermissionMode; label: string; description: string }> = [
-  {
-    value: 'autoMode',
-    label: 'Auto mode',
-    description: 'Use Claude auto mode for elevated threads.'
-  },
-  {
-    value: 'fullAccess',
-    label: 'Full access',
-    description: 'Bypass permission checks for elevated threads.'
-  }
-];
 
 function formatScrollbackLines(value: number): string {
   return value.toLocaleString('en-US');
@@ -77,13 +58,10 @@ export function SettingsModal({
   open,
   initialCliPath,
   initialAppearanceMode,
-  initialClaudePermissionMode,
   initialDefaultNewThreadFullAccess,
   initialTaskCompletionAlerts,
   initialTerminalScrollbackLines,
   detectedCliPath,
-  agentProvider = 'claude',
-  elevatedAccessLabel,
   copyEnvDiagnosticsDisabled = false,
   onClose,
   onSave,
@@ -93,7 +71,6 @@ export function SettingsModal({
 }: SettingsModalProps) {
   const [cliPath, setCliPath] = useState(initialCliPath);
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(initialAppearanceMode);
-  const [claudePermissionMode, setClaudePermissionMode] = useState<ClaudePermissionMode>(initialClaudePermissionMode);
   const [defaultNewThreadFullAccess, setDefaultNewThreadFullAccess] = useState(initialDefaultNewThreadFullAccess);
   const [taskCompletionAlerts, setTaskCompletionAlerts] = useState(initialTaskCompletionAlerts);
   const [terminalScrollbackLinesInput, setTerminalScrollbackLinesInput] = useState(
@@ -106,13 +83,11 @@ export function SettingsModal({
     }
     setCliPath(initialCliPath);
     setAppearanceMode(initialAppearanceMode);
-    setClaudePermissionMode(initialClaudePermissionMode);
     setDefaultNewThreadFullAccess(initialDefaultNewThreadFullAccess);
     setTaskCompletionAlerts(initialTaskCompletionAlerts);
     setTerminalScrollbackLinesInput(String(normalizeTerminalScrollbackLines(initialTerminalScrollbackLines)));
   }, [
     initialAppearanceMode,
-    initialClaudePermissionMode,
     initialCliPath,
     initialDefaultNewThreadFullAccess,
     initialTaskCompletionAlerts,
@@ -146,11 +121,6 @@ export function SettingsModal({
   const terminalScrollbackLines = normalizeTerminalScrollbackLines(
     Number.parseInt(terminalScrollbackLinesInput, 10)
   );
-  const providerLabel = agentLabel(agentProvider);
-  const isCopilot = agentProvider === 'copilot';
-  const accessLabel = elevatedAccessLabel ?? (claudePermissionMode === 'autoMode' ? 'Auto mode' : 'Full access');
-  const accessLabelLower = accessLabel.toLowerCase();
-  const accessArticle = /^[aeiou]/i.test(accessLabel) ? 'an' : 'a';
 
   return (
     <div className="modal-backdrop">
@@ -158,7 +128,7 @@ export function SettingsModal({
         <header className="settings-modal-header">
           <div>
             <h2 id="settings-title">Settings</h2>
-            <p>Keep appearance, Claude, and alerts in one place.</p>
+            <p>Configure ATController, Codex, and task alerts.</p>
           </div>
         </header>
 
@@ -193,12 +163,12 @@ export function SettingsModal({
               />
             </SettingsSection>
 
-            <SettingsSection title="Alerts" description="Notifications for long-running Claude tasks.">
+            <SettingsSection title="Alerts" description="Notifications for long-running Codex tasks.">
               <SettingsRow
                 label={<span id="settings-task-completion-alerts-title">Task completion alerts</span>}
                 description={
                   <span id="settings-task-completion-alerts-description">
-                    Show a desktop notification and play a sound when Claude finishes a task.
+                    Show a desktop notification and play a sound when Codex finishes a task.
                   </span>
                 }
                 control={
@@ -253,19 +223,19 @@ export function SettingsModal({
 
           <div className="settings-panel-column">
             <SettingsSection
-              title={providerLabel}
-              description={`Set the ${providerLabel} CLI path and the default access level used for new threads.`}
+              title="Codex"
+              description="Set the Codex CLI path and choose whether new threads start with Full access."
             >
               <SettingsRow
                 align="start"
-                label={<label htmlFor="cli-path">{providerLabel} path</label>}
+                label={<label htmlFor="cli-path">Codex path</label>}
                 controlClassName="settings-row-control-stack"
                 control={
                   <>
                     <input
                       id="cli-path"
                       type="text"
-                      placeholder={isCopilot ? '/opt/homebrew/bin/copilot' : '/opt/homebrew/bin/claude'}
+                      placeholder="/opt/homebrew/bin/codex"
                       value={cliPath}
                       onChange={(event) => setCliPath(event.target.value)}
                     />
@@ -288,40 +258,13 @@ export function SettingsModal({
                 }
               />
 
-              {isCopilot ? null : (
-                <SettingsRow
-                  align="start"
-                  label="Elevated mode"
-                  description="Choose how elevated threads ask Claude to handle tool permissions."
-                  controlClassName="settings-row-control-wrap"
-                  control={
-                    <div className="appearance-toggle-group" role="radiogroup" aria-label="Claude elevated mode">
-                      {CLAUDE_PERMISSION_MODE_OPTIONS.map((option) => {
-                        const active = claudePermissionMode === option.value;
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            role="radio"
-                            aria-checked={active}
-                            aria-description={option.description}
-                            className={active ? 'appearance-toggle-option active' : 'appearance-toggle-option'}
-                            onClick={() => setClaudePermissionMode(option.value)}
-                          >
-                            <span className="appearance-toggle-label">{option.label}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  }
-                />
-              )}
-
               <SettingsRow
-                label={<span id="settings-default-full-access-title">Start new threads with {accessLabel}</span>}
+                align="start"
+                label={<span id="settings-default-full-access-title">Start new threads with Full access</span>}
                 description={
                   <span id="settings-default-full-access-description">
-                    When enabled, the main new-thread action creates {accessArticle} {accessLabelLower} thread by default.
+                    Warning: Full access runs Codex without approval prompts or sandbox restrictions. Leave this off to
+                    use the workspace-write sandbox and ask before actions that need broader access.
                   </span>
                 }
                 control={
@@ -378,7 +321,6 @@ export function SettingsModal({
                   onSave({
                     cliPath: cliPath.trim(),
                     appearanceMode,
-                    claudePermissionMode,
                     defaultNewThreadFullAccess,
                     taskCompletionAlerts,
                     terminalScrollbackLines

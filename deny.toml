@@ -1,0 +1,5 @@
+[advisories]
+# Vulnerable, unsound, and yanked crates fail CI. Unmaintained-only notices are
+# reported separately because some macOS UI transitive dependencies are outside
+# ATController's direct control.
+ignore = []

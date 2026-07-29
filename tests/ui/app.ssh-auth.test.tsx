@@ -18,7 +18,6 @@ const mocks = vi.hoisted(() => {
   const baseThread = {
     id: 'thread-1',
     workspaceId: 'ws-ssh',
-    agentId: 'claude-code',
     fullAccess: false,
     enabledSkills: [] as string[],
     createdAt: new Date().toISOString(),
@@ -28,7 +27,7 @@ const mocks = vi.hoisted(() => {
     lastRunStatus: 'Idle' as const,
     lastRunStartedAt: null,
     lastRunEndedAt: null,
-    claudeSessionId: null,
+    codexSessionId: null,
     lastResumeAt: null,
     lastNewSessionAt: null
   };
@@ -67,7 +66,6 @@ const mocks = vi.hoisted(() => {
     setWorkspaceOrder: vi.fn(async () => [workspace]),
     setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async () => workspace),
     getGitInfo: vi.fn(async () => null),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitPullMasterForNewThread: vi.fn(async () => ({
       outcome: 'pulled' as const,
       message: 'Checked out master and pulled latest changes.'
@@ -92,27 +90,19 @@ const mocks = vi.hoisted(() => {
     setThreadFullAccess: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    clearThreadClaudeSession: vi.fn(async () => {
+    clearThreadCodexSession: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    setThreadClaudeSessionId: vi.fn(async () => {
+    setThreadCodexSessionId: vi.fn(async () => {
       throw new Error('not needed');
     }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    setThreadAgent: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -135,17 +125,14 @@ const mocks = vi.hoisted(() => {
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openExternalUrl: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
-    discoverImportableClaudeSessions: vi.fn(async () => []),
+    validateImportableCodexSession: vi.fn(async () => true),
+    discoverImportableCodexSessions: vi.fn(async () => []),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
@@ -187,8 +174,6 @@ const mocks = vi.hoisted(() => {
     emitTerminalExit: (event: { sessionId: string; code?: number | null; signal?: string | null }) => {
       terminalExitHandler?.(event);
     },
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(
       async (
         handler: (event: {
@@ -247,8 +232,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,
@@ -379,7 +362,6 @@ describe('App SSH auth flow', () => {
           ...({
             id: 'thread-1',
             workspaceId: 'ws-ssh',
-            agentId: 'claude-code',
             fullAccess: false,
             enabledSkills: [],
             createdAt: new Date().toISOString(),
@@ -389,7 +371,7 @@ describe('App SSH auth flow', () => {
             lastRunStatus: 'Idle',
             lastRunStartedAt: null,
             lastRunEndedAt: null,
-            claudeSessionId: null,
+            codexSessionId: null,
             lastResumeAt: null,
             lastNewSessionAt: new Date().toISOString()
           } as const)
@@ -447,7 +429,6 @@ describe('App SSH auth flow', () => {
         thread: {
           id: 'thread-1',
           workspaceId: 'ws-ssh',
-          agentId: 'claude-code',
           fullAccess: false,
           enabledSkills: [],
           createdAt: new Date().toISOString(),
@@ -457,7 +438,7 @@ describe('App SSH auth flow', () => {
           lastRunStatus: 'Idle',
           lastRunStartedAt: null,
           lastRunEndedAt: null,
-          claudeSessionId: null,
+          codexSessionId: null,
           lastResumeAt: null,
           lastNewSessionAt: new Date().toISOString()
         }
@@ -539,7 +520,6 @@ describe('App SSH auth flow', () => {
           thread: {
             id: 'thread-1',
             workspaceId: 'ws-ssh',
-            agentId: 'claude-code',
             fullAccess: false,
             enabledSkills: [],
             createdAt: new Date().toISOString(),
@@ -549,7 +529,7 @@ describe('App SSH auth flow', () => {
             lastRunStatus: 'Idle',
             lastRunStartedAt: null,
             lastRunEndedAt: null,
-            claudeSessionId: null,
+            codexSessionId: null,
             lastResumeAt: null,
             lastNewSessionAt: new Date().toISOString()
           }
@@ -627,7 +607,6 @@ describe('App SSH auth flow', () => {
           thread: {
             id: 'thread-1',
             workspaceId: 'ws-ssh',
-            agentId: 'claude-code',
             fullAccess: false,
             enabledSkills: [],
             createdAt: new Date().toISOString(),
@@ -637,7 +616,7 @@ describe('App SSH auth flow', () => {
             lastRunStatus: 'Idle',
             lastRunStartedAt: null,
             lastRunEndedAt: null,
-            claudeSessionId: null,
+            codexSessionId: null,
             lastResumeAt: null,
             lastNewSessionAt: new Date().toISOString()
           }
@@ -685,7 +664,6 @@ describe('App SSH auth flow', () => {
         thread: {
           id: 'thread-1',
           workspaceId: 'ws-ssh',
-          agentId: 'claude-code',
           fullAccess: false,
           enabledSkills: [],
           createdAt: new Date().toISOString(),
@@ -695,7 +673,7 @@ describe('App SSH auth flow', () => {
           lastRunStatus: 'Idle',
           lastRunStartedAt: null,
           lastRunEndedAt: null,
-          claudeSessionId: null,
+          codexSessionId: null,
           lastResumeAt: null,
           lastNewSessionAt: new Date().toISOString()
         }
@@ -745,7 +723,6 @@ describe('App SSH auth flow', () => {
         thread: {
           id: 'thread-1',
           workspaceId: 'ws-ssh',
-          agentId: 'claude-code',
           fullAccess: false,
           enabledSkills: [],
           createdAt: new Date().toISOString(),
@@ -755,7 +732,7 @@ describe('App SSH auth flow', () => {
           lastRunStatus: 'Idle',
           lastRunStartedAt: null,
           lastRunEndedAt: null,
-          claudeSessionId: null,
+          codexSessionId: null,
           lastResumeAt: null,
           lastNewSessionAt: new Date().toISOString()
         }

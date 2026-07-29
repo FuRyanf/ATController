@@ -119,13 +119,13 @@ export function AddWorkspaceModal({
                   onClick={() => onOpenBulkImport()}
                   disabled={saving}
                 >
-                  Import Claude sessions
+                  Import Codex sessions
                 </button>
               ) : null}
             </div>
             {onOpenBulkImport ? (
               <p className="muted">
-                Discover sessions from <code>~/.claude/projects</code> and add missing local projects automatically.
+                Discover sessions from <code>~/.codex/sessions</code> and add missing local projects automatically.
               </p>
             ) : null}
 

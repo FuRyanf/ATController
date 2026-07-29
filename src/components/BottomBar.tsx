@@ -2,7 +2,9 @@ import * as React from 'react';
 import { createPortal } from 'react-dom';
 import { convertFileSrc } from '@tauri-apps/api/core';
 
+import { api } from '../lib/api';
 import type { GitBranchEntry, GitInfo, GitWorkspaceStatus, ThreadMetadata, Workspace } from '../types';
+import { CodexRuntimeControl } from './CodexRuntimeControl';
 
 interface BranchSwitcherSnapshot {
   branches: GitBranchEntry[];
@@ -17,7 +19,6 @@ interface BottomBarProps {
   attachmentsEnabled: boolean;
   fullAccessUpdating?: boolean;
   fullAccessToggleBlockedReason?: string | null;
-  elevatedAccessLabel?: string;
   gitInfo: GitInfo | null;
   onPickAttachments: () => Promise<void>;
   onAddAttachmentPaths: (paths: string[]) => boolean;
@@ -188,16 +189,45 @@ const AttachmentChip = React.memo(function AttachmentChip({
   onRemove: (path: string) => void;
 }) {
   const [previewFailed, setPreviewFailed] = React.useState(false);
+  const [previewSrc, setPreviewSrc] = React.useState<string | null>(null);
   const imageAttachment = isImageAttachmentPath(path);
-  const previewSrc = imageAttachment && !previewFailed ? safeConvertAttachmentPreviewSrc(path) : null;
   const displayName = attachmentDisplayName(path);
   const secondaryLabel = imageAttachment ? displayName : attachmentSecondaryLabel(path);
   const primaryLabel = imageAttachment ? `Image #${index + 1}` : displayName;
 
+  React.useEffect(() => {
+    let cancelled = false;
+    setPreviewFailed(false);
+    setPreviewSrc(null);
+    if (!imageAttachment) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void (async () => {
+      try {
+        const authorizedPath = await api.authorizeAttachmentPreview(path);
+        const nextSrc = safeConvertAttachmentPreviewSrc(authorizedPath);
+        if (!cancelled && nextSrc) {
+          setPreviewSrc(nextSrc);
+        }
+      } catch {
+        if (!cancelled) {
+          setPreviewFailed(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [imageAttachment, path]);
+
   return (
     <span key={path} className={imageAttachment ? 'attachment-chip image' : 'attachment-chip'} title={path}>
       <span className={imageAttachment ? 'attachment-chip-preview image' : 'attachment-chip-preview'} aria-hidden="true">
-        {previewSrc ? (
+        {previewSrc && !previewFailed ? (
           <img src={previewSrc} alt="" onError={() => setPreviewFailed(true)} />
         ) : imageAttachment ? (
           <ImageIcon />
@@ -247,7 +277,6 @@ export function BottomBar({
   attachmentsEnabled,
   fullAccessUpdating = false,
   fullAccessToggleBlockedReason = null,
-  elevatedAccessLabel = 'Full access',
   gitInfo,
   onPickAttachments,
   onAddAttachmentPaths,
@@ -743,6 +772,7 @@ export function BottomBar({
       </div>
 
       <div className="bottom-bar-right">
+        <CodexRuntimeControl workspace={workspace} />
         {skillsControl}
         <button
           type="button"
@@ -754,7 +784,7 @@ export function BottomBar({
             .filter(Boolean)
             .join(' ')}
           data-testid="full-access-toggle"
-          aria-label={`Toggle ${elevatedAccessLabel}`}
+          aria-label="Toggle Full access"
           aria-pressed={selectedThread?.fullAccess ?? false}
           aria-disabled={fullAccessToggleBlocked || undefined}
           disabled={!selectedThread || fullAccessUpdating}
@@ -766,7 +796,7 @@ export function BottomBar({
           }}
           title={
             fullAccessToggleBlockedReason ??
-            (!selectedThread ? 'Select a thread' : selectedThread.fullAccess ? `Disable ${elevatedAccessLabel}` : `Enable ${elevatedAccessLabel}`)
+            (!selectedThread ? 'Select a thread' : selectedThread.fullAccess ? 'Disable Full access' : 'Enable Full access')
           }
         >
           <span className="full-access-icon" aria-hidden="true">
@@ -781,7 +811,7 @@ export function BottomBar({
               />
             </svg>
           </span>
-          <span className="full-access-label">{fullAccessUpdating ? 'Updating...' : elevatedAccessLabel}</span>
+          <span className="full-access-label">{fullAccessUpdating ? 'Updating...' : 'Full access'}</span>
           <span className="full-access-chevron" aria-hidden="true">
             <svg viewBox="0 0 24 24">
               <path d="M7 10.5 12 15l5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" />

@@ -39,11 +39,11 @@ describe('task completion alerts', () => {
 
     expect(coreMocks.invoke).toHaveBeenNthCalledWith(1, 'send_desktop_notification', {
       title: 'Your task "Refactor thread" finished',
-      body: 'Claude is ready.'
+      body: 'Codex is ready.'
     });
     expect(coreMocks.invoke).toHaveBeenNthCalledWith(2, 'send_desktop_notification', {
       title: 'ATController alerts enabled',
-      body: 'You will now get a notification when Claude finishes a task.'
+      body: 'You will now get a notification when Codex finishes a task.'
     });
     expect(coreMocks.invoke).toHaveBeenNthCalledWith(3, 'send_desktop_notification', {
       title: 'ATController test alert',

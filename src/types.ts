@@ -1,14 +1,8 @@
 export type RunStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled';
-export type ContextPack = 'Minimal' | 'Git Diff' | 'Debug';
 export type TerminalSessionMode = 'resumed' | 'new' | 'forked';
 export type TerminalTurnCompletionMode = 'idle' | 'jsonl';
 export type WorkspaceKind = 'local' | 'rdev' | 'ssh';
 export type AppearanceMode = 'dark' | 'light' | 'system';
-export type ClaudePermissionMode = 'fullAccess' | 'autoMode';
-export type AgentProvider = 'claude' | 'copilot';
-
-export const CLAUDE_AGENT_ID = 'claude-code';
-export const COPILOT_AGENT_ID = 'github-copilot';
 
 export const TERMINAL_SCROLLBACK_LINES_MIN = 10_000;
 export const TERMINAL_SCROLLBACK_LINES_DEFAULT = 100_000;
@@ -22,26 +16,6 @@ export function normalizeTerminalScrollbackLines(value?: number | null): number 
     TERMINAL_SCROLLBACK_LINES_MAX,
     Math.max(TERMINAL_SCROLLBACK_LINES_MIN, Math.round(value))
   );
-}
-
-export function normalizeClaudePermissionMode(value?: string | null): ClaudePermissionMode {
-  return value === 'autoMode' ? 'autoMode' : 'fullAccess';
-}
-
-export function normalizeAgentProvider(value?: string | null): AgentProvider {
-  return value === 'copilot' ? 'copilot' : 'claude';
-}
-
-export function agentIdForProvider(provider?: AgentProvider | null): string {
-  return normalizeAgentProvider(provider) === 'copilot' ? COPILOT_AGENT_ID : CLAUDE_AGENT_ID;
-}
-
-export function agentProviderFromAgentId(agentId?: string | null): AgentProvider {
-  return agentId === COPILOT_AGENT_ID ? 'copilot' : 'claude';
-}
-
-export function agentLabel(provider?: AgentProvider | null): string {
-  return normalizeAgentProvider(provider) === 'copilot' ? 'Copilot' : 'Claude';
 }
 
 export interface Workspace {
@@ -67,13 +41,11 @@ export interface ThreadMetadata {
   lastRunStatus: RunStatus;
   lastRunStartedAt?: string | null;
   lastRunEndedAt?: string | null;
-  agentId: string;
   fullAccess: boolean;
   enabledSkills: string[];
-  claudeSessionId?: string | null;
-  copilotSessionId?: string | null;
-  forkedFromClaudeSessionId?: string | null;
-  pendingForkSourceClaudeSessionId?: string | null;
+  codexSessionId?: string | null;
+  forkedFromCodexSessionId?: string | null;
+  pendingForkSourceCodexSessionId?: string | null;
   pendingForkKnownChildSessionIds?: string[];
   pendingForkRequestedAt?: string | null;
   pendingForkLaunchConsumed?: boolean;
@@ -83,15 +55,6 @@ export interface ThreadMetadata {
 
 export interface CreateThreadOptions {
   fullAccess?: boolean;
-  agentId?: string;
-}
-
-export interface TranscriptEntry {
-  id: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  createdAt: string;
-  runId?: string | null;
 }
 
 export interface GitInfo {
@@ -124,16 +87,14 @@ export interface GitPullForNewThreadResult {
 }
 
 export interface Settings {
-  claudeCliPath?: string | null;
-  copilotCliPath?: string | null;
+  codexCliPath?: string | null;
   appearanceMode?: AppearanceMode | null;
-  claudePermissionMode?: ClaudePermissionMode | null;
   defaultNewThreadFullAccess?: boolean;
   taskCompletionAlerts?: boolean;
   terminalScrollbackLines?: number;
 }
 
-export interface ImportableClaudeSession {
+export interface ImportableCodexSession {
   sessionId: string;
   summary?: string | null;
   firstPrompt?: string | null;
@@ -143,13 +104,60 @@ export interface ImportableClaudeSession {
   gitBranch?: string | null;
 }
 
-export interface ImportableClaudeProject {
+export interface ImportableCodexProject {
   path: string;
   name: string;
   pathExists: boolean;
   workspaceId?: string | null;
   workspaceName?: string | null;
-  sessions: ImportableClaudeSession[];
+  sessions: ImportableCodexSession[];
+}
+
+export interface RecentCodexThread {
+  sessionId: string;
+  workspaceId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  recencyAt?: number | null;
+}
+
+export interface CodexReasoningEffortOption {
+  value: string;
+  description: string;
+}
+
+export interface CodexModelOption {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: CodexReasoningEffortOption[];
+  supportsFastMode: boolean;
+}
+
+export interface CodexRateLimitWindow {
+  usedPercent: number;
+  windowDurationMins: number;
+  resetsAt?: number | null;
+}
+
+export interface CodexRuntimeOverview {
+  models: CodexModelOption[];
+  selectedModel: string;
+  selectedReasoningEffort: string;
+  fastMode: boolean;
+  fiveHourLimit?: CodexRateLimitWindow | null;
+  weeklyLimit?: CodexRateLimitWindow | null;
+  planType?: string | null;
+}
+
+export interface CodexRuntimePreferences {
+  model: string;
+  reasoningEffort: string;
+  fastMode: boolean;
 }
 
 export interface AppUpdateInfo {
@@ -170,49 +178,19 @@ export interface SkillInfo {
   warning?: string | null;
 }
 
-export interface ContextFilePreview {
-  path: string;
-  size: number;
-}
-
-export interface ContextPreview {
-  files: ContextFilePreview[];
-  totalSize: number;
-  contextText: string;
-}
-
-export interface RunClaudeRequest {
-  workspacePath: string;
-  threadId: string;
-  message: string;
-  enabledSkills: string[];
-  fullAccess: boolean;
-  contextPack: ContextPack;
-}
-
-export interface RunClaudeResponse {
-  runId: string;
-}
-
 export interface TerminalStartResponse {
   sessionId: string;
   sessionMode: TerminalSessionMode;
   resumeSessionId?: string | null;
-  agentSessionId?: string | null;
   turnCompletionMode?: TerminalTurnCompletionMode;
   currentCwd?: string | null;
   thread: ThreadMetadata;
 }
 
 export interface PreparedNativeFork {
-  sourceClaudeSessionId: string;
+  sourceCodexSessionId: string;
   knownChildSessionIds: string[];
   requestedAt: string;
-}
-
-export interface FinalizedNativeFork {
-  currentThread: ThreadMetadata;
-  preservedThread: ThreadMetadata;
 }
 
 export interface WorkspaceShellStartResponse {
@@ -255,6 +233,7 @@ export interface TerminalExitEvent {
   sessionId: string;
   code?: number | null;
   signal?: string | null;
+  persistenceError?: string | null;
 }
 
 export interface TerminalTurnCompletedEvent {
@@ -267,29 +246,10 @@ export interface TerminalTurnCompletedEvent {
   currentCwd?: string | null;
 }
 
-export interface ClaudeTurnCompletionSummary {
-  claudeSessionId: string;
+export interface CodexTurnCompletionSummary {
+  codexSessionId: string;
   completionIndex: number;
   completedAtMs: number;
   status: Extract<RunStatus, 'Succeeded' | 'Failed'>;
   hasMeaningfulOutput: boolean;
-}
-
-export interface RunStreamEvent {
-  runId: string;
-  threadId: string;
-  stream: 'stdout' | 'stderr';
-  chunk: string;
-}
-
-export interface RunExitEvent {
-  runId: string;
-  threadId: string;
-  exitCode?: number;
-  durationMs: number;
-}
-
-export interface GitDiffSummary {
-  stat: string;
-  diffExcerpt: string;
 }

@@ -16,7 +16,6 @@ interface SkillsPopoverPosition {
 interface ThreadSkillsPopoverProps {
   workspace?: Workspace;
   thread?: ThreadMetadata;
-  agentLabel?: string;
   skills: SkillInfo[];
   loading: boolean;
   error?: string | null;
@@ -72,7 +71,6 @@ function isGlobalSkill(skill: SkillInfo): boolean {
 export function ThreadSkillsPopover({
   workspace,
   thread,
-  agentLabel = 'Claude',
   skills,
   loading,
   error,
@@ -347,7 +345,7 @@ export function ThreadSkillsPopover({
                 {remoteWorkspace
                   ? 'Local repo skills are only available for local workspaces right now.'
                   : selectedSkills.length > 0 || missingSkillIds.length > 0
-                    ? `Selected skills are prepended off-screen before ${agentLabel} receives your next submitted prompt.`
+                    ? 'Selected skills are prepended off-screen before Codex receives your next submitted prompt.'
                     : 'Choose one or more skills below to use them in this thread.'}
               </div>
 
@@ -402,7 +400,7 @@ export function ThreadSkillsPopover({
 
               {remoteWorkspace ? (
                 <div className="skills-empty">
-                  Project skill discovery currently scans local repositories only. Remote sessions can keep using normal Claude prompts.
+                  Project skill discovery currently scans local repositories only. Remote sessions can keep using normal Codex prompts.
                 </div>
               ) : error ? (
                 <div className="skills-error" role="status">
@@ -413,7 +411,7 @@ export function ThreadSkillsPopover({
                 <div className="skills-empty">Scanning workspace and global skills…</div>
               ) : sortedSkills.length === 0 ? (
                 <div className="skills-empty">
-                  No skills found. Add folders like `.claude/skills/review/SKILL.md` or `~/.claude/skills/review/SKILL.md` to make them available here.
+                  No skills found. Add folders like `.agents/skills/review/SKILL.md` or `~/.agents/skills/review/SKILL.md` to make them available here.
                 </div>
               ) : filteredSkills.length === 0 ? (
                 <div className="skills-empty" role="status">

@@ -58,6 +58,39 @@ describe('TerminalWriteQueue', () => {
     vi.useRealTimers();
   });
 
+  it('splits one oversized enqueue into bounded writes without changing output', async () => {
+    vi.useFakeTimers();
+    const queue = new TerminalWriteQueue({
+      maxBatchBytes: 4,
+      scheduleFlush: (flush) => window.setTimeout(flush, 0),
+      cancelFlush: (id) => window.clearTimeout(id)
+    });
+
+    const writes: string[] = [];
+    queue.setSink({
+      write: (chunk, done) => {
+        writes.push(chunk);
+        done();
+      }
+    });
+
+    const burst = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    queue.enqueue(burst);
+    const idlePromise = queue.whenIdle();
+
+    vi.runAllTimers();
+    await idlePromise;
+
+    expect(writes.join('')).toBe(burst);
+    expect(writes).toHaveLength(Math.ceil(burst.length / 4));
+    expect(writes.every((chunk) => chunk.length <= 4)).toBe(true);
+    expect(queue.getStats()).toMatchObject({
+      pendingBytes: 0,
+      totalBytesWritten: burst.length
+    });
+    vi.useRealTimers();
+  });
+
   it('forces a flush when scheduled frame flush is delayed beyond max latency', async () => {
     vi.useFakeTimers();
     const queue = new TerminalWriteQueue({

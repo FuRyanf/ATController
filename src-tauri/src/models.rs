@@ -42,9 +42,10 @@ pub struct Workspace {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum ThreadRunStatus {
+    #[default]
     Idle,
     Running,
     Succeeded,
@@ -52,63 +53,11 @@ pub enum ThreadRunStatus {
     Canceled,
 }
 
-impl Default for ThreadRunStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
-
-fn default_agent_id() -> String {
-    "claude-code".to_string()
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentProvider {
-    #[default]
-    Claude,
-    Copilot,
-}
-
-impl AgentProvider {
-    pub fn from_agent_id(agent_id: &str) -> Self {
-        if agent_id == "github-copilot" {
-            Self::Copilot
-        } else {
-            Self::Claude
-        }
-    }
-
-    pub fn from_config_value(value: &str) -> Self {
-        if value.eq_ignore_ascii_case("copilot") {
-            Self::Copilot
-        } else {
-            Self::Claude
-        }
-    }
-
-    pub fn agent_id(self) -> &'static str {
-        match self {
-            Self::Claude => "claude-code",
-            Self::Copilot => "github-copilot",
-        }
-    }
-
-    pub fn cli_name(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Copilot => "copilot",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadMetadata {
     pub id: String,
     pub workspace_id: String,
-    #[serde(default = "default_agent_id")]
-    pub agent_id: String,
     #[serde(default)]
     pub full_access: bool,
     #[serde(default)]
@@ -125,13 +74,11 @@ pub struct ThreadMetadata {
     #[serde(default)]
     pub last_run_ended_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub claude_session_id: Option<String>,
+    pub codex_session_id: Option<String>,
     #[serde(default)]
-    pub copilot_session_id: Option<String>,
+    pub forked_from_codex_session_id: Option<String>,
     #[serde(default)]
-    pub forked_from_claude_session_id: Option<String>,
-    #[serde(default)]
-    pub pending_fork_source_claude_session_id: Option<String>,
+    pub pending_fork_source_codex_session_id: Option<String>,
     #[serde(default)]
     pub pending_fork_known_child_session_ids: Vec<String>,
     #[serde(default)]
@@ -144,16 +91,6 @@ pub struct ThreadMetadata {
     pub last_new_session_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptEntry {
-    pub id: String,
-    pub role: String,
-    pub content: String,
-    pub created_at: DateTime<Utc>,
-    pub run_id: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AppearanceMode {
@@ -163,25 +100,13 @@ pub enum AppearanceMode {
     Dark,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub enum ClaudePermissionMode {
-    #[default]
-    FullAccess,
-    AutoMode,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     #[serde(default)]
-    pub claude_cli_path: Option<String>,
-    #[serde(default)]
-    pub copilot_cli_path: Option<String>,
+    pub codex_cli_path: Option<String>,
     #[serde(default)]
     pub appearance_mode: AppearanceMode,
-    #[serde(default)]
-    pub claude_permission_mode: ClaudePermissionMode,
     #[serde(default)]
     pub default_new_thread_full_access: bool,
     #[serde(default)]
@@ -193,10 +118,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            claude_cli_path: None,
-            copilot_cli_path: None,
+            codex_cli_path: None,
             appearance_mode: AppearanceMode::System,
-            claude_permission_mode: ClaudePermissionMode::FullAccess,
             default_new_thread_full_access: false,
             task_completion_alerts: false,
             terminal_scrollback_lines: TERMINAL_SCROLLBACK_LINES_DEFAULT,
@@ -206,12 +129,8 @@ impl Default for Settings {
 
 impl Settings {
     pub fn normalized(mut self) -> Self {
-        self.claude_cli_path = self
-            .claude_cli_path
-            .map(|path| path.trim().to_string())
-            .filter(|path| !path.is_empty());
-        self.copilot_cli_path = self
-            .copilot_cli_path
+        self.codex_cli_path = self
+            .codex_cli_path
             .map(|path| path.trim().to_string())
             .filter(|path| !path.is_empty());
         self.terminal_scrollback_lines =
@@ -222,7 +141,7 @@ impl Settings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ImportableClaudeSession {
+pub struct ImportableCodexSession {
     pub session_id: String,
     #[serde(default)]
     pub summary: Option<String>,
@@ -240,7 +159,7 @@ pub struct ImportableClaudeSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ImportableClaudeProject {
+pub struct ImportableCodexProject {
     pub path: String,
     pub name: String,
     #[serde(default)]
@@ -249,7 +168,71 @@ pub struct ImportableClaudeProject {
     pub workspace_id: Option<String>,
     #[serde(default)]
     pub workspace_name: Option<String>,
-    pub sessions: Vec<ImportableClaudeSession>,
+    pub sessions: Vec<ImportableCodexSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentCodexThread {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub title: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub recency_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningEffortOption {
+    pub value: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelOption {
+    pub id: String,
+    pub model: String,
+    pub display_name: String,
+    pub description: String,
+    pub is_default: bool,
+    pub default_reasoning_effort: String,
+    pub supported_reasoning_efforts: Vec<CodexReasoningEffortOption>,
+    pub supports_fast_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRateLimitWindow {
+    pub used_percent: i64,
+    pub window_duration_mins: i64,
+    #[serde(default)]
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRuntimeOverview {
+    pub models: Vec<CodexModelOption>,
+    pub selected_model: String,
+    pub selected_reasoning_effort: String,
+    pub fast_mode: bool,
+    #[serde(default)]
+    pub five_hour_limit: Option<CodexRateLimitWindow>,
+    #[serde(default)]
+    pub weekly_limit: Option<CodexRateLimitWindow>,
+    #[serde(default)]
+    pub plan_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRuntimePreferences {
+    pub model: String,
+    pub reasoning_effort: String,
+    pub fast_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,13 +255,6 @@ pub struct GitInfo {
     pub is_main_worktree: bool,
     pub worktree_label: Option<String>,
     pub worktree_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitDiffSummary {
-    pub stat: String,
-    pub diff_excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,43 +298,10 @@ pub struct SkillInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ContextFilePreview {
-    pub path: String,
-    pub size: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextPreview {
-    pub files: Vec<ContextFilePreview>,
-    pub total_size: usize,
-    pub context_text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunClaudeRequest {
-    pub workspace_path: String,
-    pub thread_id: String,
-    pub message: String,
-    pub enabled_skills: Vec<String>,
-    pub full_access: bool,
-    pub context_pack: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunClaudeResponse {
-    pub run_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TerminalStartResponse {
     pub session_id: String,
     pub session_mode: String,
     pub resume_session_id: Option<String>,
-    pub agent_session_id: Option<String>,
     pub turn_completion_mode: String,
     pub current_cwd: Option<String>,
     pub thread: ThreadMetadata,
@@ -367,24 +310,10 @@ pub struct TerminalStartResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedNativeFork {
-    pub source_claude_session_id: String,
+    pub source_codex_session_id: String,
     #[serde(default)]
     pub known_child_session_ids: Vec<String>,
     pub requested_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FinalizedNativeFork {
-    pub current_thread: ThreadMetadata,
-    pub preserved_thread: ThreadMetadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ForkThreadResult {
-    pub source_thread: ThreadMetadata,
-    pub forked_thread: ThreadMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,8 +372,8 @@ pub struct TerminalTurnCompletedEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ClaudeTurnCompletionSummary {
-    pub claude_session_id: String,
+pub struct CodexTurnCompletionSummary {
+    pub codex_session_id: String,
     pub completion_index: u64,
     pub completed_at_ms: i64,
     pub status: String,
@@ -457,43 +386,13 @@ pub struct TerminalExitEvent {
     pub session_id: String,
     pub code: Option<i32>,
     pub signal: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StreamEvent {
-    pub run_id: String,
-    pub thread_id: String,
-    pub stream: String,
-    pub chunk: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunExitEvent {
-    pub run_id: String,
-    pub thread_id: String,
-    pub exit_code: Option<i32>,
-    pub duration_ms: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunMetadata {
-    pub run_id: String,
-    pub thread_id: String,
-    pub workspace_id: String,
-    pub started_at: DateTime<Utc>,
-    pub ended_at: DateTime<Utc>,
-    pub duration_ms: i64,
-    pub exit_code: Option<i32>,
-    pub command: Vec<String>,
+    pub persistence_error: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_terminal_scrollback_lines, AppearanceMode, ClaudePermissionMode, Settings,
+        normalize_terminal_scrollback_lines, AppearanceMode, Settings,
         TERMINAL_SCROLLBACK_LINES_DEFAULT, TERMINAL_SCROLLBACK_LINES_MAX,
         TERMINAL_SCROLLBACK_LINES_MIN,
     };
@@ -503,10 +402,6 @@ mod tests {
         let settings = Settings::default();
 
         assert_eq!(settings.appearance_mode, AppearanceMode::System);
-        assert_eq!(
-            settings.claude_permission_mode,
-            ClaudePermissionMode::FullAccess
-        );
         assert!(!settings.default_new_thread_full_access);
         assert_eq!(
             settings.terminal_scrollback_lines,
@@ -519,10 +414,6 @@ mod tests {
         let settings: Settings = serde_json::from_str("{}").expect("settings should deserialize");
 
         assert_eq!(settings.appearance_mode, AppearanceMode::System);
-        assert_eq!(
-            settings.claude_permission_mode,
-            ClaudePermissionMode::FullAccess
-        );
         assert!(!settings.default_new_thread_full_access);
         assert_eq!(
             settings.terminal_scrollback_lines,

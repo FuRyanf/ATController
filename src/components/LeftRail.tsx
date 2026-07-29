@@ -1,19 +1,17 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
-import { agentLabel, agentProviderFromAgentId } from '../types';
-import type { CreateThreadOptions, ThreadMetadata, Workspace } from '../types';
+import type { CreateThreadOptions, RecentCodexThread, ThreadMetadata, Workspace } from '../types';
 
 interface LeftRailProps {
   sidebarWidth: number;
   workspaces: Workspace[];
   threadsByWorkspace: Record<string, ThreadMetadata[]>;
+  recentCodexThreadsByWorkspace?: Record<string, RecentCodexThread[]>;
+  openingRecentCodexSessionIds?: Record<string, boolean>;
   selectedWorkspaceId?: string;
   selectedThreadId?: string;
   threadSearch: string;
   defaultNewThreadFullAccess?: boolean;
-  agentLabel?: string;
-  elevatedAccessLabel?: string;
-  showImportSession?: boolean;
   creatingThreadByWorkspace?: Record<string, boolean>;
   isThreadWorking?: (threadId: string) => boolean;
   unreadCompletedTurnByThread?: Record<string, true>;
@@ -35,6 +33,10 @@ interface LeftRailProps {
   onOpenResumeCommandInTerminal: (thread: ThreadMetadata) => void;
   onCopyWorkspaceCommand: (workspace: Workspace) => void;
   onImportSession: (workspace: Workspace) => void;
+  onOpenRecentCodexThread?: (
+    workspace: Workspace,
+    thread: RecentCodexThread
+  ) => Promise<void>;
 }
 
 interface ThreadContextMenuState {
@@ -89,17 +91,8 @@ function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
   return kind === 'rdev' || kind === 'ssh';
 }
 
-function getThreadAgentSessionId(thread?: ThreadMetadata | null): string {
-  if (!thread) {
-    return '';
-  }
-  return agentProviderFromAgentId(thread.agentId) === 'copilot'
-    ? thread.copilotSessionId?.trim() ?? ''
-    : thread.claudeSessionId?.trim() ?? '';
-}
-
-function getThreadAgentLabel(thread?: ThreadMetadata | null): string {
-  return agentLabel(agentProviderFromAgentId(thread?.agentId));
+function getThreadCodexSessionId(thread?: ThreadMetadata | null): string {
+  return thread?.codexSessionId?.trim() ?? '';
 }
 
 function clampMenuCoordinate(x: number, y: number, width: number, height: number) {
@@ -463,17 +456,69 @@ const ThreadRow = React.memo(function ThreadRow({
   );
 });
 
+const RecentCodexThreadRow = React.memo(function RecentCodexThreadRow({
+  workspace,
+  thread,
+  relativeTime,
+  opening,
+  onOpen
+}: {
+  workspace: Workspace;
+  thread: RecentCodexThread;
+  relativeTime: string | null;
+  opening: boolean;
+  onOpen?: (workspace: Workspace, thread: RecentCodexThread) => Promise<void>;
+}) {
+  return (
+    <li
+      className="thread-item codex-history-thread"
+      data-codex-session-id={thread.sessionId}
+    >
+      <button
+        type="button"
+        className="thread-button codex-history-thread-button"
+        disabled={opening}
+        onClick={() => {
+          if (onOpen) {
+            void onOpen(workspace, thread);
+          }
+        }}
+        title={`Open Codex thread: ${thread.title}`}
+      >
+        <span className="thread-main-row">
+          <span className="thread-main-leading">
+            <span className="thread-title">{thread.title}</span>
+          </span>
+          <span className="thread-main-trailing">
+            {opening ? (
+              <span className="thread-running" aria-label="Opening Codex thread">
+                <span className="spinner-dot" />
+              </span>
+            ) : relativeTime ? (
+              <span
+                className="thread-time"
+                data-testid={`codex-thread-recency-${thread.sessionId}`}
+              >
+                {relativeTime}
+              </span>
+            ) : null}
+          </span>
+        </span>
+      </button>
+    </li>
+  );
+});
+
 function LeftRailComponent({
   sidebarWidth,
   workspaces,
   threadsByWorkspace,
+  recentCodexThreadsByWorkspace = {},
+  openingRecentCodexSessionIds = {},
   selectedWorkspaceId,
   selectedThreadId,
   threadSearch,
   defaultNewThreadFullAccess = false,
-  agentLabel = 'Claude',
-  elevatedAccessLabel = 'Full access',
-  showImportSession = true,
   creatingThreadByWorkspace = {},
   isThreadWorking,
   unreadCompletedTurnByThread = {},
@@ -494,7 +539,8 @@ function LeftRailComponent({
   onCopyResumeCommand,
   onOpenResumeCommandInTerminal,
   onCopyWorkspaceCommand,
-  onImportSession
+  onImportSession,
+  onOpenRecentCodexThread
 }: LeftRailProps) {
   const [editingThreadId, setEditingThreadId] = React.useState<string | null>(null);
   const [editingValue, setEditingValue] = React.useState('');
@@ -503,9 +549,8 @@ function LeftRailComponent({
   const [workspaceContextMenu, setWorkspaceContextMenu] = React.useState<WorkspaceContextMenuState | null>(null);
   const [newThreadMenu, setNewThreadMenu] = React.useState<NewThreadMenuState | null>(null);
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
-  const elevatedAccessLabelLower = elevatedAccessLabel.toLowerCase();
-  const normalThreadLabel = `${agentLabel} thread`;
-  const elevatedThreadLabel = `${agentLabel} ${elevatedAccessLabelLower} thread`;
+  const normalThreadLabel = 'Codex thread';
+  const elevatedThreadLabel = 'Codex full access thread';
   const [workspaceDragState, setWorkspaceDragState] = React.useState<WorkspaceDragState | null>(null);
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
@@ -926,11 +971,10 @@ function LeftRailComponent({
   const contextThreadWorkspace = contextMenu
     ? workspaces.find((workspace) => workspace.id === contextMenu.thread.workspaceId) ?? null
     : null;
-  const contextThreadHasSession = Boolean(getThreadAgentSessionId(contextMenu?.thread));
-  const contextThreadAgentLabel = getThreadAgentLabel(contextMenu?.thread);
+  const contextThreadHasSession = Boolean(getThreadCodexSessionId(contextMenu?.thread));
   const contextThreadRemote = contextThreadWorkspace?.kind === 'rdev' || contextThreadWorkspace?.kind === 'ssh';
   const openResumeInTerminalDisabledReason = !contextThreadHasSession
-    ? `No ${contextThreadAgentLabel} session ID available`
+    ? 'No Codex session ID available'
     : contextThreadRemote
       ? 'Open resume in Terminal is only available for local projects. Copy the resume command for remote projects.'
       : null;
@@ -1036,7 +1080,7 @@ function LeftRailComponent({
                       : 'Enable git pull on default branch for new threads'}
                   </button>
                 ) : null}
-                {showImportSession ? (
+                {workspaceContextMenu.workspace.kind === 'local' ? (
                   <button
                     type="button"
                     onClick={() => {
@@ -1045,7 +1089,7 @@ function LeftRailComponent({
                       onImportSession(workspace);
                     }}
                   >
-                    Import session…
+                    Import Codex session…
                   </button>
                 ) : null}
                 <div className="thread-context-divider" />
@@ -1147,7 +1191,9 @@ function LeftRailComponent({
             const isRemoteWorkspace = isRemoteWorkspaceKind(workspace.kind);
             const isCreatingThread = Boolean(creatingThreadByWorkspace[workspace.id]);
             const gitPullEnabled = workspace.kind === 'local' && Boolean(workspace.gitPullOnMasterForNewThreads);
-            const allThreads = threadsByWorkspace[workspace.id] ?? [];
+            const allThreads = (threadsByWorkspace[workspace.id] ?? []).filter(
+              (thread) => !thread.isArchived
+            );
             const visibleThreads = allThreads.filter((thread) => {
               if (!query) {
                 return true;
@@ -1155,6 +1201,29 @@ function LeftRailComponent({
               const titleMatch = thread.title.toLowerCase().includes(query);
               const contentMatch = (getSearchTextForThread?.(thread.id) ?? '').toLowerCase().includes(query);
               return titleMatch || contentMatch;
+            });
+            const allRecentCodexThreads = isRemoteWorkspace
+              ? []
+              : recentCodexThreadsByWorkspace[workspace.id] ?? [];
+            const visibleRecentCodexThreads = allRecentCodexThreads.filter(
+              (thread) => !query || thread.title.toLowerCase().includes(query)
+            );
+            const visibleThreadItems = [
+              ...visibleThreads.map((thread) => ({
+                kind: 'stored' as const,
+                thread,
+                timestampMs: getThreadDisplayTimestampMs(thread)
+              })),
+              ...visibleRecentCodexThreads.map((thread) => ({
+                kind: 'codex' as const,
+                thread,
+                timestampMs: (thread.recencyAt ?? thread.updatedAt ?? thread.createdAt) * 1000
+              }))
+            ].sort((left, right) => {
+              if (left.timestampMs !== right.timestampMs) {
+                return right.timestampMs - left.timestampMs;
+              }
+              return left.thread.title.localeCompare(right.thread.title);
             });
 
             return (
@@ -1343,21 +1412,37 @@ function LeftRailComponent({
                           <ChevronDownIcon />
                         </button>
                       </div>
-                      {visibleThreads.length > 0 ? (
+                      {visibleThreadItems.length > 0 ? (
                         <ul className="workspace-thread-list">
-                          {visibleThreads.map((thread) => {
+                          {visibleThreadItems.map((item) => {
+                            if (item.kind === 'codex') {
+                              return (
+                                <RecentCodexThreadRow
+                                  key={`codex-${item.thread.sessionId}`}
+                                  workspace={workspace}
+                                  thread={item.thread}
+                                  relativeTime={formatRecencyShort(item.timestampMs || null, nowMs)}
+                                  opening={Boolean(
+                                    openingRecentCodexSessionIds[item.thread.sessionId]
+                                  )}
+                                  onOpen={onOpenRecentCodexThread}
+                                />
+                              );
+                            }
                             return (
                               <ThreadRow
-                                key={thread.id}
-                                thread={thread}
-                                active={thread.id === selectedThreadId}
+                                key={item.thread.id}
+                                thread={item.thread}
+                                active={item.thread.id === selectedThreadId}
                                 relativeTime={formatRecencyShort(
-                                  getThreadDisplayTimestampMs(thread) || null,
+                                  item.timestampMs || null,
                                   nowMs
                                 )}
-                                isWorking={Boolean(isThreadWorking?.(thread.id))}
-                                hasUnreadCompletedTurn={Boolean(unreadCompletedTurnByThread[thread.id])}
-                                isEditing={editingThreadId === thread.id}
+                                isWorking={Boolean(isThreadWorking?.(item.thread.id))}
+                                hasUnreadCompletedTurn={Boolean(
+                                  unreadCompletedTurnByThread[item.thread.id]
+                                )}
+                                isEditing={editingThreadId === item.thread.id}
                                 editingValue={editingValue}
                                 onEditingValueChange={setEditingValue}
                                 onStartRename={onStartRename}
@@ -1370,7 +1455,8 @@ function LeftRailComponent({
                             );
                           })}
                         </ul>
-                      ) : query && allThreads.length > 0 ? (
+                      ) : query &&
+                        (allThreads.length > 0 || allRecentCodexThreads.length > 0) ? (
                         <p className="muted workspace-group-empty">No matching threads.</p>
                       ) : null}
                     </div>

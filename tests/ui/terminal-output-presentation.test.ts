@@ -9,8 +9,8 @@ import {
 
 describe('terminal output presentation', () => {
   it('preserves raw snapshots when the incoming text looks stateful', () => {
-    const raw = '\u001b[?1049h\u001b[2J\u001b[HClaude Code\nscreen body\n';
-    const stripHiddenPrompts = vi.fn((text: string) => text.replace('Claude Code', ''));
+    const raw = '\u001b[?1049h\u001b[2J\u001b[HOpenAI Codex\nscreen body\n';
+    const stripHiddenPrompts = vi.fn((text: string) => text.replace('OpenAI Codex', ''));
 
     const next = presentTerminalText(raw, {
       currentText: '',
@@ -18,7 +18,7 @@ describe('terminal output presentation', () => {
       stripHiddenPrompts
     });
 
-    expect(next).toBe('\u001b[2J\u001b[HClaude Code\nscreen body\n');
+    expect(next).toBe('\u001b[2J\u001b[HOpenAI Codex\nscreen body\n');
     expect(stripHiddenPrompts).not.toHaveBeenCalled();
   });
 
@@ -27,7 +27,7 @@ describe('terminal output presentation', () => {
     const stripHiddenPrompts = vi.fn((text: string) => text.replace('Reading', ''));
 
     const next = presentTerminalEventData(rawEvent, {
-      currentText: '\u001b[?1049h\u001b[2J\u001b[HClaude Code\nscreen body\n',
+      currentText: '\u001b[?1049h\u001b[2J\u001b[HOpenAI Codex\nscreen body\n',
       stripHiddenPrompts
     });
 
@@ -52,15 +52,15 @@ describe('terminal output presentation', () => {
     expect(
       shouldPreserveRawTerminalPresentation(
         'plain follow-up chunk',
-        '\u001b[?1049h\u001b[2J\u001b[HClaude Code\nscreen body\n'
+        '\u001b[?1049h\u001b[2J\u001b[HOpenAI Codex\nscreen body\n'
       )
     ).toBe(true);
   });
 
   it('keeps only the latest fullscreen frame when the log is under the clamp limit', () => {
     const clear = '\u001b[2J\u001b[H';
-    const frame1 = `${clear}Claude Code\nframe one\n`;
-    const frame2 = `${clear}Claude Code\nframe two\n`;
+    const frame1 = `${clear}OpenAI Codex\nframe one\n`;
+    const frame2 = `${clear}OpenAI Codex\nframe two\n`;
     const raw = `${frame1}${frame2}`;
 
     const next = presentTerminalWindow(raw, {

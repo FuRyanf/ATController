@@ -8,7 +8,7 @@ interface ImportSessionModalProps {
   error?: string | null;
   saving?: boolean;
   onClose: () => void;
-  onConfirm: (claudeSessionId: string) => void;
+  onConfirm: (codexSessionId: string) => void;
 }
 
 export function ImportSessionModal({
@@ -51,12 +51,12 @@ export function ImportSessionModal({
   return (
     <div className="modal-backdrop" onKeyDown={handleKeyDown}>
       <section className="modal import-session-modal">
-        <h2>Import Claude Session</h2>
+        <h2>Import Codex Session</h2>
         <p className="import-session-description">
-          Creates a new thread in <strong>{workspaceName}</strong> that resumes an existing Claude conversation.
+          Creates a new thread in <strong>{workspaceName}</strong> that resumes an existing Codex conversation.
         </p>
         <form onSubmit={handleSubmit}>
-          <label htmlFor="import-session-id">Claude session ID</label>
+          <label htmlFor="import-session-id">Codex session ID</label>
           <input
             ref={inputRef}
             id="import-session-id"

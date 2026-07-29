@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 
 const mode = process.argv[2];
 const versionArg = process.argv[3];
-const semverPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const stableSemverPattern = /^\d+\.\d+\.\d+$/;
 
 const packageJsonPath = new URL('../package.json', import.meta.url);
 const tauriConfigPath = new URL('../src-tauri/tauri.conf.json', import.meta.url);
@@ -10,8 +10,8 @@ const cargoTomlPath = new URL('../src-tauri/Cargo.toml', import.meta.url);
 const cargoLockPath = new URL('../src-tauri/Cargo.lock', import.meta.url);
 
 function assertSemver(version) {
-  if (!semverPattern.test(version)) {
-    throw new Error(`Invalid version "${version}". Expected SemVer like 0.0.1.`);
+  if (!stableSemverPattern.test(version)) {
+    throw new Error(`Invalid version "${version}". Expected stable SemVer like 0.0.1.`);
   }
 }
 
@@ -35,6 +35,14 @@ async function readVersions() {
   if (!cargoTomlMatch || !cargoLockMatch) {
     throw new Error('Unable to parse Rust version metadata.');
   }
+  assertSemver(pkg.version);
+  const expectedBundleVersion = pkg.version;
+  const bundleVersion = tauri.bundle?.macOS?.bundleVersion;
+  if (bundleVersion !== expectedBundleVersion) {
+    throw new Error(
+      `macOS bundle version mismatch: bundleVersion=${bundleVersion}, expected=${expectedBundleVersion}.`
+    );
+  }
 
   return {
     packageJson: pkg.version,
@@ -53,6 +61,9 @@ async function setVersion(version) {
 
   const tauri = await readJson(tauriConfigPath);
   tauri.version = version;
+  tauri.bundle ??= {};
+  tauri.bundle.macOS ??= {};
+  tauri.bundle.macOS.bundleVersion = version;
   await writeJson(tauriConfigPath, tauri);
 
   const cargoToml = await readFile(cargoTomlPath, 'utf8');

@@ -18,7 +18,6 @@ const mocks = vi.hoisted(() => {
   const baseThread = {
     id: 'thread-1',
     workspaceId: 'ws-1',
-    agentId: 'claude-code',
     fullAccess: false,
     enabledSkills: [] as string[],
     createdAt: new Date().toISOString(),
@@ -28,7 +27,7 @@ const mocks = vi.hoisted(() => {
     lastRunStatus: 'Idle' as const,
     lastRunStartedAt: null,
     lastRunEndedAt: null,
-    claudeSessionId: null,
+    codexSessionId: null,
     lastResumeAt: null,
     lastNewSessionAt: null
   };
@@ -41,8 +40,8 @@ const mocks = vi.hoisted(() => {
       name: 'Review',
       description: 'Review changes before shipping them.',
       entryPoints: ['/skill review'],
-      path: '/tmp/workspace/.claude/skills/review',
-      relativePath: '.claude/skills/review/SKILL.md',
+      path: '/tmp/workspace/.agents/skills/review',
+      relativePath: '.agents/skills/review/SKILL.md',
       warning: null
     },
     {
@@ -50,8 +49,8 @@ const mocks = vi.hoisted(() => {
       name: 'Refactor',
       description: 'Refactor carefully and keep behavior stable.',
       entryPoints: ['/skill refactor'],
-      path: '/tmp/workspace/.claude/skills/refactor',
-      relativePath: '.claude/skills/refactor/SKILL.md',
+      path: '/tmp/workspace/.agents/skills/refactor',
+      relativePath: '.agents/skills/refactor/SKILL.md',
       warning: null
     }
   ];
@@ -71,7 +70,6 @@ const mocks = vi.hoisted(() => {
       ahead: 0,
       behind: 0
     })),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitListBranches: vi.fn(async () => [{ name: 'main', isCurrent: true, lastCommitUnix: 1700000000 }]),
     gitWorkspaceStatus: vi.fn(async () => ({
       isDirty: false,
@@ -80,7 +78,6 @@ const mocks = vi.hoisted(() => {
       deletions: 0
     })),
     gitCheckoutBranch: vi.fn(async () => true),
-    gitCreateAndCheckoutBranch: vi.fn(async () => true),
     gitPullMasterForNewThread: vi.fn(async () => ({
       outcome: 'pulled' as const,
       message: 'Checked out master and pulled latest changes.'
@@ -111,7 +108,7 @@ const mocks = vi.hoisted(() => {
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
       return updated;
     }),
-    clearThreadClaudeSession: vi.fn(async () => threadState[0]),
+    clearThreadCodexSession: vi.fn(async () => threadState[0]),
     setThreadSkills: vi.fn(async (_workspaceId: string, threadId: string, enabledSkills: string[]) => {
       const updated = {
         ...threadState.find((thread) => thread.id === threadId)!,
@@ -121,18 +118,10 @@ const mocks = vi.hoisted(() => {
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
       return updated;
     }),
-    setThreadAgent: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => skills),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude', appearanceMode: 'dark' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex', appearanceMode: 'dark' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -157,16 +146,13 @@ const mocks = vi.hoisted(() => {
       endPosition: '? for shortcuts'.length,
       truncated: false
     })),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openExternalUrl: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
+    validateImportableCodexSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
@@ -184,8 +170,6 @@ const mocks = vi.hoisted(() => {
     api,
     reset,
     currentThread: () => threadState[0],
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
     onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalSshAuthStatus: vi.fn(async () => () => undefined),
@@ -199,8 +183,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,
@@ -245,7 +227,7 @@ describe('Skills management', () => {
     await user.click(skillsButton);
 
     expect(await screen.findByText('Review')).toBeInTheDocument();
-    expect(screen.getByText('.claude/skills/review/SKILL.md')).toBeInTheDocument();
+    expect(screen.getByText('.agents/skills/review/SKILL.md')).toBeInTheDocument();
 
     await user.click(screen.getByText('Review').closest('button')!);
 
@@ -254,7 +236,7 @@ describe('Skills management', () => {
     });
 
     expect(
-      screen.getByText(/selected skills are prepended off-screen before claude receives your next submitted prompt/i)
+      screen.getByText(/selected skills are prepended off-screen before codex receives your next submitted prompt/i)
     ).toBeInTheDocument();
   });
 
@@ -317,7 +299,7 @@ describe('Skills management', () => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalled();
     });
     await waitFor(() => {
-      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace', 'claude');
+      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace');
     });
 
     await user.click(await screen.findByRole('button', { name: /^skills$/i }));
@@ -336,7 +318,7 @@ describe('Skills management', () => {
     const lastPayload = terminalWriteCalls[terminalWriteCalls.length - 1]?.[1];
     expect(lastPayload).toContain('ship it');
     expect(lastPayload).toContain('Project skills to use for this request when relevant:');
-    expect(lastPayload).toContain('Review (.claude/skills/review/SKILL.md)');
+    expect(lastPayload).toContain('Review (.agents/skills/review/SKILL.md)');
     expect(lastPayload.endsWith('\r')).toBe(true);
 
     await waitFor(() => {
@@ -405,7 +387,7 @@ describe('Skills management', () => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalled();
     });
     await waitFor(() => {
-      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace', 'claude');
+      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace');
     });
 
     await user.click(await screen.findByRole('button', { name: /^skills$/i }));
@@ -437,7 +419,7 @@ describe('Skills management', () => {
     await user.click(await screen.findByRole('button', { name: /^skills$/i }));
 
     expect(await screen.findByText(/No skills found\./i)).toBeInTheDocument();
-    expect(screen.getByText(/\.claude\/skills\/review\/SKILL\.md/i)).toBeInTheDocument();
-    expect(screen.getByText(/~\/\.claude\/skills\/review\/SKILL\.md/i)).toBeInTheDocument();
+    expect(screen.getByText(/\.agents\/skills\/review\/SKILL\.md/i)).toBeInTheDocument();
+    expect(screen.getByText(/~\/\.agents\/skills\/review\/SKILL\.md/i)).toBeInTheDocument();
   });
 });

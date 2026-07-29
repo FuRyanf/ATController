@@ -1,26 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import type { ImportableClaudeProject, ImportableClaudeSession } from '../types';
+import type { ImportableCodexProject, ImportableCodexSession } from '../types';
 
-interface BulkImportClaudeSessionsModalProps {
+interface BulkImportCodexSessionsModalProps {
   open: boolean;
   loading?: boolean;
   importing?: boolean;
-  projects: ImportableClaudeProject[];
+  projects: ImportableCodexProject[];
   selectedSessionIds: string[];
   alreadyImportedSessionIds: string[];
   error?: string | null;
   onClose: () => void;
   onToggleSession: (sessionId: string, selected: boolean) => void;
   onToggleProject: (
-    project: ImportableClaudeProject,
+    project: ImportableCodexProject,
     visibleImportableSessionIds: string[],
     selected: boolean
   ) => void;
   onImport: () => void;
 }
 
-function projectStatusLabel(project: ImportableClaudeProject) {
+function projectStatusLabel(project: ImportableCodexProject) {
   if (!project.pathExists) {
     return 'Folder missing';
   }
@@ -30,8 +30,8 @@ function projectStatusLabel(project: ImportableClaudeProject) {
   return 'Will add project';
 }
 
-function sessionTitle(session: ImportableClaudeSession) {
-  return truncatePreview(session.summary?.trim() || session.firstPrompt?.trim() || 'Untitled Claude session', 110);
+function sessionTitle(session: ImportableCodexSession) {
+  return truncatePreview(session.summary?.trim() || session.firstPrompt?.trim() || 'Untitled Codex session', 110);
 }
 
 function truncatePreview(value: string, maxLength = 180) {
@@ -42,7 +42,7 @@ function truncatePreview(value: string, maxLength = 180) {
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
-function sessionSubtitle(session: ImportableClaudeSession) {
+function sessionSubtitle(session: ImportableCodexSession) {
   const firstPrompt = session.firstPrompt?.trim();
   const summary = session.summary?.trim();
   if (!firstPrompt || firstPrompt === summary) {
@@ -65,7 +65,7 @@ function formatTimestamp(value?: string | null) {
   }).format(timestamp);
 }
 
-function sessionTimestampMs(session: ImportableClaudeSession) {
+function sessionTimestampMs(session: ImportableCodexSession) {
   const modifiedAtMs = session.modifiedAt ? Date.parse(session.modifiedAt) : Number.NaN;
   if (Number.isFinite(modifiedAtMs)) {
     return modifiedAtMs;
@@ -79,7 +79,7 @@ function sessionTimestampMs(session: ImportableClaudeSession) {
   return null;
 }
 
-function sessionMatchesTimeRange(session: ImportableClaudeSession, earliestSessionMs: number | null) {
+function sessionMatchesTimeRange(session: ImportableCodexSession, earliestSessionMs: number | null) {
   if (earliestSessionMs === null) {
     return true;
   }
@@ -89,7 +89,7 @@ function sessionMatchesTimeRange(session: ImportableClaudeSession, earliestSessi
 }
 
 function visibleProjectSessions(
-  project: ImportableClaudeProject,
+  project: ImportableCodexProject,
   importedSet: ReadonlySet<string>,
   includeAlreadyImported: boolean,
   earliestSessionMs: number | null
@@ -104,7 +104,7 @@ function visibleProjectSessions(
 }
 
 function visibleImportableSessionIds(
-  sessions: ImportableClaudeSession[],
+  sessions: ImportableCodexSession[],
   importedSet: ReadonlySet<string>
 ) {
   return sessions
@@ -112,7 +112,7 @@ function visibleImportableSessionIds(
     .map((session) => session.sessionId);
 }
 
-function projectListKey(project: ImportableClaudeProject) {
+function projectListKey(project: ImportableCodexProject) {
   const firstSessionId = project.sessions[0]?.sessionId ?? '';
   const lastSessionId = project.sessions[project.sessions.length - 1]?.sessionId ?? '';
   return [
@@ -125,7 +125,7 @@ function projectListKey(project: ImportableClaudeProject) {
   ].join('::');
 }
 
-export function BulkImportClaudeSessionsModal({
+export function BulkImportCodexSessionsModal({
   open,
   loading = false,
   importing = false,
@@ -137,7 +137,7 @@ export function BulkImportClaudeSessionsModal({
   onToggleSession,
   onToggleProject,
   onImport
-}: BulkImportClaudeSessionsModalProps) {
+}: BulkImportCodexSessionsModalProps) {
   const selectedSet = useMemo(() => new Set(selectedSessionIds), [selectedSessionIds]);
   const importedSet = useMemo(() => new Set(alreadyImportedSessionIds), [alreadyImportedSessionIds]);
   const selectedCount = selectedSessionIds.length;
@@ -248,8 +248,8 @@ export function BulkImportClaudeSessionsModal({
       <section className="modal bulk-import-modal" role="dialog" aria-modal="true" aria-labelledby="bulk-import-title">
         <header className="bulk-import-modal-header">
           <div>
-            <h2 id="bulk-import-title">Bulk Import Claude Sessions</h2>
-            <p>Discover Claude’s local session history, pick the conversations you want, and import them as threads.</p>
+            <h2 id="bulk-import-title">Bulk Import Codex Sessions</h2>
+            <p>Discover Codex’s local session history, pick the conversations you want, and import them as threads.</p>
           </div>
         </header>
 
@@ -304,11 +304,11 @@ export function BulkImportClaudeSessionsModal({
 
         {error ? <p className="modal-error">{error}</p> : null}
 
-        {loading ? <div className="bulk-import-empty">Scanning Claude session history…</div> : null}
+        {loading ? <div className="bulk-import-empty">Scanning Codex session history…</div> : null}
 
         {!loading && projects.length === 0 ? (
           <div className="bulk-import-empty">
-            No Claude sessions were found under <code>~/.claude/projects</code>.
+            No Codex sessions were found under <code>~/.codex/sessions</code>.
           </div>
         ) : null}
 
@@ -361,7 +361,6 @@ export function BulkImportClaudeSessionsModal({
                     ) : null}
                     {visibleSessions.map((session) => {
                       const alreadyImported = importedSet.has(session.sessionId);
-                      const recoverableImported = alreadyImported && !includeAlreadyImported;
                       const disabled = importing || !project.pathExists || alreadyImported;
                       const subtitle = sessionSubtitle(session);
                       const timestamp = formatTimestamp(session.modifiedAt ?? session.createdAt);

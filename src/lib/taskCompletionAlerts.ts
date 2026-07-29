@@ -12,13 +12,13 @@ function alertCopy(status: Extract<RunStatus, 'Succeeded' | 'Failed'>, threadTit
   if (status === 'Succeeded') {
     return {
       title: `Your task "${normalizedTitle}" finished`,
-      body: 'Claude is ready.'
+      body: 'Codex is ready.'
     };
   }
 
   return {
     title: `Your task "${normalizedTitle}" failed`,
-    body: 'Claude ended with an error.'
+    body: 'Codex ended with an error.'
   };
 }
 
@@ -41,7 +41,7 @@ export async function sendTaskCompletionAlert({
 export async function sendTaskCompletionAlertsEnabledConfirmation(): Promise<boolean> {
   return await sendDesktopNotification(
     'ATController alerts enabled',
-    'You will now get a notification when Claude finishes a task.'
+    'You will now get a notification when Codex finishes a task.'
   );
 }
 

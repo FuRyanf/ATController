@@ -10,8 +10,8 @@ describe('skill usage ranking', () => {
         name: 'Alpha',
         description: '',
         entryPoints: [],
-        path: '/tmp/workspace/.claude/skills/alpha',
-        relativePath: '.claude/skills/alpha/SKILL.md',
+        path: '/tmp/workspace/.agents/skills/alpha',
+        relativePath: '.agents/skills/alpha/SKILL.md',
         warning: null
       },
       {
@@ -19,8 +19,8 @@ describe('skill usage ranking', () => {
         name: 'Beta',
         description: '',
         entryPoints: [],
-        path: '/tmp/workspace/.claude/skills/beta',
-        relativePath: '.claude/skills/beta/SKILL.md',
+        path: '/tmp/workspace/.agents/skills/beta',
+        relativePath: '.agents/skills/beta/SKILL.md',
         warning: null
       },
       {
@@ -28,8 +28,8 @@ describe('skill usage ranking', () => {
         name: 'Charlie',
         description: '',
         entryPoints: [],
-        path: '/tmp/workspace/.claude/skills/charlie',
-        relativePath: '.claude/skills/charlie/SKILL.md',
+        path: '/tmp/workspace/.agents/skills/charlie',
+        relativePath: '.agents/skills/charlie/SKILL.md',
         warning: null
       }
     ];
@@ -53,8 +53,8 @@ describe('skill usage ranking', () => {
       name: 'Review',
       description: 'Keep behavior stable while cleaning up internals.',
       entryPoints: [],
-      path: '/tmp/workspace/.claude/skills/review',
-      relativePath: '.claude/skills/review/SKILL.md',
+      path: '/tmp/workspace/.agents/skills/review',
+      relativePath: '.agents/skills/review/SKILL.md',
       warning: null
     };
 

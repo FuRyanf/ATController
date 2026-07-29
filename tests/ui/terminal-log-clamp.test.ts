@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { clampTerminalLog } from '../../src/lib/terminalLogClamp';
+import { clampTerminalLog, coalesceTerminalRedrawFrames } from '../../src/lib/terminalLogClamp';
 
 describe('terminal log clamp', () => {
   it('returns input unchanged when within limit', () => {
@@ -57,5 +57,29 @@ describe('terminal log clamp', () => {
     const maxChars = frame2.length - 5;
 
     expect(clampTerminalLog(text, maxChars)).toBe(frame2);
+  });
+
+  it('coalesces fullscreen redraw history while preserving active alternate-screen mode', () => {
+    const alternateScreen = '\u001b[?1049h';
+    const clear = '\u001b[2J\u001b[H';
+    const frame1 = `${clear}OpenAI Codex frame one\nworking\n`;
+    const frame2 = `${clear}OpenAI Codex frame two\ndone\n`;
+
+    expect(coalesceTerminalRedrawFrames(`${alternateScreen}${frame1}${frame2}`)).toBe(
+      `${alternateScreen}${frame2}`
+    );
+  });
+
+  it('coalesces ANSI carriage-return redraws on the current line', () => {
+    const alternateScreen = '\u001b[?1049h';
+    const redraw = (value: string) => `\u001b[2K\r\u001b[32mOpenAI Codex ${value}\u001b[0m`;
+    const history = `${alternateScreen}${Array.from(
+      { length: 2_000 },
+      (_, index) => redraw(`frame ${index}`)
+    ).join('')}`;
+    const latestFrame = redraw('frame 1999');
+
+    expect(coalesceTerminalRedrawFrames(history)).toBe(`${alternateScreen}${latestFrame}`);
+    expect(coalesceTerminalRedrawFrames('100%\r90%')).toBe('100%\r90%');
   });
 });

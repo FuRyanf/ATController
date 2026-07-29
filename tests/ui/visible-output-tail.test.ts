@@ -25,7 +25,7 @@ describe('visible output tail', () => {
     expect(appendMeaningfulOutputTail('previous result', 'project$ ')).toBe('previous result');
   });
 
-  it('ignores Claude prompt glyph chunks when extending a visible tail', () => {
+  it('ignores Codex prompt glyph chunks when extending a visible tail', () => {
     expect(appendMeaningfulOutputTail('previous result', '›')).toBe('previous result');
   });
 

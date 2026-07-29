@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
-import { CLAUDE_AGENT_ID, type CreateThreadOptions, type RunStatus, type ThreadMetadata } from '../types';
+import type { CreateThreadOptions, RunStatus, ThreadMetadata } from '../types';
 
 const LAST_USER_INPUT_AT_STORAGE_KEY = 'atcontroller:last-user-input-at';
 
@@ -63,7 +63,7 @@ function persistThreadTimestampMap(storageKey: string, map: Record<string, numbe
 }
 
 function threadActivityTimestampMs(thread: ThreadMetadata): number {
-  // Only use lastRunEndedAt (Claude finished) and createdAt (new-thread fallback).
+  // Only use lastRunEndedAt (Codex finished) and createdAt (new-thread fallback).
   // updatedAt and lastRunStartedAt are set on every session start (every click), so
   // including them would bump sort order on mere thread selection with no real work done.
   return Math.max(
@@ -164,7 +164,9 @@ export function useThreadStore(): ThreadStore {
     const requestId = (listRequestIdByWorkspaceRef.current[workspaceId] ?? 0) + 1;
     listRequestIdByWorkspaceRef.current[workspaceId] = requestId;
     const threads = await api.listThreads(workspaceId);
-    const visibleThreads = threads.filter((thread) => !removedThreadIdsRef.current[thread.id]);
+    const visibleThreads = threads.filter(
+      (thread) => !thread.isArchived && !removedThreadIdsRef.current[thread.id]
+    );
     const sortedVisibleThreads = sortThreads(visibleThreads, lastUserInputAtByThreadRef.current);
     if (listRequestIdByWorkspaceRef.current[workspaceId] !== requestId) {
       return sortedVisibleThreads;
@@ -185,11 +187,10 @@ export function useThreadStore(): ThreadStore {
   }, []);
 
   const createThread = useCallback(async (workspaceId: string, options?: CreateThreadOptions) => {
-    const agentId = options?.agentId ?? CLAUDE_AGENT_ID;
     const thread =
       options?.fullAccess === true
-        ? await api.createThread(workspaceId, agentId, true)
-        : await api.createThread(workspaceId, agentId);
+        ? await api.createThread(workspaceId, true)
+        : await api.createThread(workspaceId);
     delete removedThreadIdsRef.current[thread.id];
     delete removedThreadWorkspaceIdByThreadRef.current[thread.id];
     setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));

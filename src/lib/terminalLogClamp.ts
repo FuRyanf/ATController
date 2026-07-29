@@ -10,6 +10,19 @@ const TERMINAL_REPAINT_BOUNDARIES = [
   '\u001b[2J',
   '\u001b[3J'
 ] as const;
+const TERMINAL_LINE_REPAINT_BOUNDARIES = [
+  '\r\u001b[2K',
+  '\r\u001b[K',
+  '\r\u001b[0K',
+  '\u001b[2K\r',
+  '\u001b[K\r',
+  '\u001b[0K\r',
+  '\u001b[1G\u001b[2K',
+  '\u001b[1G\u001b[K',
+  '\u001b[1G\u001b[0K'
+] as const;
+const ALT_SCREEN_ENTERS = ['\u001b[?1049h', '\u001b[?1047h'] as const;
+const ALT_SCREEN_EXITS = ['\u001b[?1049l', '\u001b[?1047l'] as const;
 
 function alignStartToBoundary(text: string, start: number): number {
   if (start <= 0) {
@@ -84,8 +97,85 @@ function findIntersectingTerminalRepaintBoundary(text: string, start: number): n
   return intersectingBoundary;
 }
 
+function findLatestBoundary(text: string, boundaries: readonly string[]): number {
+  let latestBoundary = -1;
+  for (const marker of boundaries) {
+    const index = text.lastIndexOf(marker);
+    if (index > latestBoundary) {
+      latestBoundary = index;
+    }
+  }
+  return latestBoundary;
+}
+
+function terminalRepaintBoundaryLengthAt(text: string, index: number): number {
+  let boundaryLength = 0;
+  for (const marker of TERMINAL_REPAINT_BOUNDARIES) {
+    if (text.startsWith(marker, index) && marker.length > boundaryLength) {
+      boundaryLength = marker.length;
+    }
+  }
+  return boundaryLength;
+}
+
+function activeAlternateScreenPreamble(text: string, beforeIndex: number): string {
+  let latestEnterIndex = -1;
+  let latestEnter = '';
+  for (const marker of ALT_SCREEN_ENTERS) {
+    const index = text.lastIndexOf(marker, Math.max(0, beforeIndex - 1));
+    if (index > latestEnterIndex) {
+      latestEnterIndex = index;
+      latestEnter = marker;
+    }
+  }
+
+  let latestExitIndex = -1;
+  for (const marker of ALT_SCREEN_EXITS) {
+    latestExitIndex = Math.max(
+      latestExitIndex,
+      text.lastIndexOf(marker, Math.max(0, beforeIndex - 1))
+    );
+  }
+  return latestEnterIndex > latestExitIndex ? latestEnter : '';
+}
+
 export function findLatestTerminalRepaintBoundary(text: string): number {
   return findLastTerminalRepaintBoundary(text, 0);
+}
+
+/**
+ * Removes terminal output that is guaranteed to have been superseded by a
+ * later fullscreen or current-line repaint. This is intended for replaying a
+ * stored terminal stream into a fresh emulator; ordinary output and bare
+ * carriage returns are left untouched.
+ */
+export function coalesceTerminalRedrawFrames(text: string): string {
+  if (!text) {
+    return text;
+  }
+
+  const repaintBoundary = findLatestTerminalRepaintBoundary(text);
+  const replayStart = Math.max(0, repaintBoundary);
+  let replay = text.slice(replayStart);
+  const requiredPrefixLength =
+    repaintBoundary === -1 ? 0 : terminalRepaintBoundaryLengthAt(text, repaintBoundary);
+
+  const lineRepaintBoundary = findLatestBoundary(replay, TERMINAL_LINE_REPAINT_BOUNDARIES);
+  if (lineRepaintBoundary > requiredPrefixLength) {
+    const latestLineBreak = replay.lastIndexOf('\n', lineRepaintBoundary);
+    const prefixEnd = Math.max(requiredPrefixLength, latestLineBreak + 1);
+    replay = `${replay.slice(0, prefixEnd)}${replay.slice(lineRepaintBoundary)}`;
+  }
+
+  if (replayStart === 0) {
+    return replay;
+  }
+
+  const alternateScreenPreamble = activeAlternateScreenPreamble(text, replayStart);
+  if (!alternateScreenPreamble || replay.startsWith(alternateScreenPreamble)) {
+    return replay;
+  }
+  return `${alternateScreenPreamble}${replay}`;
 }
 
 export function findSafeTerminalLogStart(text: string, maxChars: number): number {

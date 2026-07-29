@@ -1,15 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent as ReactFocusEvent } from 'react';
 
-import 'xterm/css/xterm.css';
-import { FitAddon } from 'xterm-addon-fit';
-import { SearchAddon, type ISearchOptions } from 'xterm-addon-search';
-import { WebLinksAddon } from 'xterm-addon-web-links';
-import { Terminal } from 'xterm';
+import '@xterm/xterm/css/xterm.css';
+import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Terminal } from '@xterm/xterm';
 import { api } from '../lib/api';
+import { coalesceTerminalRedrawFrames } from '../lib/terminalLogClamp';
 import type { TerminalSessionStreamState } from '../lib/terminalSessionStream';
 import { looksLikeStatefulTerminalUi } from '../lib/terminalUiHeuristics';
+import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 import { normalizeTerminalScrollbackLines, TERMINAL_SCROLLBACK_LINES_DEFAULT } from '../types';
 
+const OUTPUT_BATCH_BYTES = 16 * 1024;
+const OUTPUT_MAX_FLUSH_DELAY_MS = 48;
+const STATEFUL_REPLAY_COALESCE_MIN_CHARS = 64 * 1024;
 const VIEWPORT_OFF_BOTTOM_THRESHOLD_LINES = 0;
 const VIEWPORT_OFF_BOTTOM_THRESHOLD_PX = 0;
 const PROGRAMMATIC_SCROLL_SUPPRESSION_MS = 220;
@@ -98,7 +103,7 @@ function openExternalLink(event: MouseEvent, uri: string) {
   void api.openExternalUrl(uri);
 }
 
-function writeTerminalChunk(term: Terminal, chunk: string, callback?: () => void) {
+function writeTerminalControl(term: Terminal, chunk: string, callback?: () => void) {
   if (!chunk) {
     callback?.();
     return;
@@ -108,10 +113,17 @@ function writeTerminalChunk(term: Terminal, chunk: string, callback?: () => void
   });
 }
 
-function writeTerminalChunkAsync(term: Terminal, chunk: string): Promise<void> {
+function writeTerminalControlAsync(term: Terminal, chunk: string): Promise<void> {
   return new Promise((resolve) => {
-    writeTerminalChunk(term, chunk, resolve);
+    writeTerminalControl(term, chunk, resolve);
   });
+}
+
+function prepareTerminalReplayText(text: string, stateful: boolean): string {
+  if (!stateful || text.length < STATEFUL_REPLAY_COALESCE_MIN_CHARS) {
+    return text;
+  }
+  return coalesceTerminalRedrawFrames(text);
 }
 
 export function LiveTerminalPanel({
@@ -154,6 +166,12 @@ export function LiveTerminalPanel({
   const searchDecorationsEnabledRef = useRef(true);
   const streamStateRef = useRef(streamState);
   const replayWriteChainRef = useRef(Promise.resolve());
+  const writeQueueRef = useRef(
+    new TerminalWriteQueue({
+      maxBatchBytes: OUTPUT_BATCH_BYTES,
+      maxFlushDelayMs: OUTPUT_MAX_FLUSH_DELAY_MS
+    })
+  );
   const renderedResetTokenRef = useRef(streamState?.resetToken ?? 0);
   const renderedEndPositionRef = useRef(streamState?.endPosition ?? 0);
   const renderedTextRef = useRef(streamState?.text ?? '');
@@ -262,6 +280,17 @@ export function LiveTerminalPanel({
     replayWriteChainRef.current = replayWriteChainRef.current.then(runMutation, runMutation);
   }, []);
 
+  const writeTerminalChunkAsync = useCallback(async (chunk: string) => {
+    if (!chunk) {
+      return;
+    }
+    writeQueueRef.current.enqueue(chunk);
+    // Preserve the low-latency behavior for ordinary output while the queue
+    // keeps any remainder bounded and paced across later animation frames.
+    writeQueueRef.current.flushImmediate();
+    await writeQueueRef.current.whenIdle();
+  }, []);
+
   const applyLocalResize = useCallback((
     term: Terminal,
     dims: { cols: number; rows: number } | null | undefined,
@@ -314,12 +343,16 @@ export function LiveTerminalPanel({
     delta: string
   ) => {
     const expectedResetEpoch = resetReplayEpochRef.current;
+    const statefulReplay =
+      looksLikeStatefulTerminalUi(nextStreamState.text) ||
+      looksLikeStatefulTerminalUi(renderedTextRef.current);
+    const replayDelta = prepareTerminalReplayText(delta, statefulReplay);
     renderedSessionIdRef.current = nextStreamState.sessionId ?? sessionIdRef.current ?? null;
     renderedEndPositionRef.current = nextStreamState.endPosition;
     renderedTextRef.current = nextStreamState.text;
     enqueueTerminalMutation(term, async () => {
-      if (delta.length > 0) {
-        await writeTerminalChunkAsync(term, delta);
+      if (replayDelta.length > 0) {
+        await writeTerminalChunkAsync(replayDelta);
       }
       committedSessionIdRef.current = nextStreamState.sessionId ?? sessionIdRef.current ?? null;
       committedResetTokenRef.current = nextStreamState.resetToken;
@@ -329,10 +362,11 @@ export function LiveTerminalPanel({
         scrollToLatest(term);
       }
     }, { resetEpoch: expectedResetEpoch });
-  }, [enqueueTerminalMutation, scrollToLatest]);
+  }, [enqueueTerminalMutation, scrollToLatest, writeTerminalChunkAsync]);
 
   const resetTerminalToSnapshot = useCallback((term: Terminal, nextStreamState: TerminalSessionStreamState | null) => {
     const nextText = nextStreamState?.text ?? '';
+    const replayText = prepareTerminalReplayText(nextText, looksLikeStatefulTerminalUi(nextText));
     const preserveOffset = followOutputPausedRef.current ? captureScrollbackOffset(term) : 0;
     const preserveViewport = followOutputPausedRef.current && preserveOffset > 0;
     const resetReplayEpoch = resetReplayEpochRef.current + 1;
@@ -350,10 +384,10 @@ export function LiveTerminalPanel({
       try {
         term.reset();
         if (!cursorVisibleRef.current) {
-          await writeTerminalChunkAsync(term, DECTCEM_HIDE);
+          await writeTerminalControlAsync(term, DECTCEM_HIDE);
         }
-        if (nextText.length > 0) {
-          await writeTerminalChunkAsync(term, nextText);
+        if (replayText.length > 0) {
+          await writeTerminalChunkAsync(replayText);
         }
         if (terminalRef.current !== term || resetReplayEpochRef.current !== resetReplayEpoch) {
           return;
@@ -373,7 +407,7 @@ export function LiveTerminalPanel({
         }
       }
     }, { resetEpoch: resetReplayEpoch });
-  }, [enqueueTerminalMutation, scrollToLatest]);
+  }, [enqueueTerminalMutation, scrollToLatest, writeTerminalChunkAsync]);
 
   const handleFollowOutputScroll = useCallback((term: Terminal, viewport: HTMLElement | null = null) => {
     const isProgrammatic = Date.now() < programmaticScrollSuppressUntilRef.current;
@@ -491,7 +525,7 @@ export function LiveTerminalPanel({
     cursorVisibleRef.current = cursorVisible;
     const term = terminalRef.current;
     if (term && previousCursorVisibleRef.current !== cursorVisible) {
-      writeTerminalChunk(term, cursorVisible ? DECTCEM_SHOW : DECTCEM_HIDE);
+      writeTerminalControl(term, cursorVisible ? DECTCEM_SHOW : DECTCEM_HIDE);
     }
     previousCursorVisibleRef.current = cursorVisible;
   }, [cursorVisible]);
@@ -534,9 +568,6 @@ export function LiveTerminalPanel({
     }
 
     const nextSessionId = streamState.sessionId ?? sessionId ?? null;
-    const statefulLiveScreen =
-      Boolean(nextSessionId) &&
-      (looksLikeStatefulTerminalUi(streamState.text) || looksLikeStatefulTerminalUi(renderedTextRef.current));
     const hasAuthoritativeStateAdvance =
       renderedResetTokenRef.current !== streamState.resetToken ||
       renderedEndPositionRef.current !== streamState.endPosition ||
@@ -669,6 +700,11 @@ export function LiveTerminalPanel({
     const fitAddon = new FitAddon();
     const searchAddon = new SearchAddon({ highlightLimit: TERMINAL_SEARCH_HIGHLIGHT_LIMIT });
     terminalRef.current = term;
+    writeQueueRef.current.setSink({
+      write: (chunk, done) => {
+        term.write(chunk, done);
+      }
+    });
     fitAddonRef.current = fitAddon;
     searchAddonRef.current = searchAddon;
     term.loadAddon(fitAddon);
@@ -715,7 +751,7 @@ export function LiveTerminalPanel({
         !cursorVisibleRef.current &&
         looksLikeStatefulTerminalUi(renderedTextRef.current)
       ) {
-        writeTerminalChunk(term, DECTCEM_HIDE);
+        writeTerminalControl(term, DECTCEM_HIDE);
       }
     });
 
@@ -834,6 +870,8 @@ export function LiveTerminalPanel({
       searchResultsDisposable?.dispose?.();
       onKeyDisposable.dispose();
       onDataDisposable.dispose();
+      writeQueueRef.current.setSink(null);
+      writeQueueRef.current.clear();
       term.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;

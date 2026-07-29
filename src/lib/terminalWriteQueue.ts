@@ -55,6 +55,7 @@ function defaultCancelTimer(id: number) {
 
 interface PendingChunk {
   chunk: string;
+  offset: number;
   enqueuedAtMs: number;
 }
 
@@ -133,6 +134,7 @@ export class TerminalWriteQueue {
     const nowMs = Date.now();
     this.pendingChunks.push({
       chunk,
+      offset: 0,
       enqueuedAtMs: nowMs
     });
     this.pendingBytes += chunk.length;
@@ -303,13 +305,37 @@ export class TerminalWriteQueue {
       if (!head) {
         break;
       }
-      if (parts.length > 0 && batchBytes + head.chunk.length > this.maxBatchBytes) {
+
+      const remainingBatchBytes = this.maxBatchBytes - batchBytes;
+      if (remainingBatchBytes <= 0) {
         break;
       }
-      parts.push(head.chunk);
-      this.pendingStartIndex += 1;
-      this.pendingBytes -= head.chunk.length;
-      batchBytes += head.chunk.length;
+
+      const remainingChunkBytes = head.chunk.length - head.offset;
+      if (parts.length > 0 && remainingChunkBytes > remainingBatchBytes) {
+        break;
+      }
+      let takeBytes = Math.min(remainingBatchBytes, remainingChunkBytes);
+      const splitIndex = head.offset + takeBytes;
+      if (
+        splitIndex < head.chunk.length &&
+        splitIndex > head.offset &&
+        /[\uD800-\uDBFF]/u.test(head.chunk[splitIndex - 1] ?? '') &&
+        /[\uDC00-\uDFFF]/u.test(head.chunk[splitIndex] ?? '')
+      ) {
+        // Keep UTF-16 surrogate pairs in the same xterm write. With a one-code-unit
+        // batch limit this can exceed the requested limit by one code unit, which
+        // is preferable to rendering a replacement character.
+        takeBytes = takeBytes === 1 ? 2 : takeBytes - 1;
+      }
+
+      parts.push(head.chunk.slice(head.offset, head.offset + takeBytes));
+      head.offset += takeBytes;
+      this.pendingBytes -= takeBytes;
+      batchBytes += takeBytes;
+      if (head.offset >= head.chunk.length) {
+        this.pendingStartIndex += 1;
+      }
       if (batchBytes >= this.maxBatchBytes) {
         break;
       }

@@ -1,121 +1,51 @@
 # Known Issues
 
-## CLI Status Bar Rendering Drift (Terminal Corruption)
+## Unsigned Development Builds
 
-### Symptom
+Pull-request, `main`, and manually dispatched workflows build ATController without Apple signing credentials. macOS Gatekeeper may block an unsigned development artifact on first launch.
 
-During long-running Claude sessions with sparse terminal output (builds waiting
-on I/O, long tool executions), the CLI's status bar text ("Wrangling...",
-progress indicators, token counts) gradually bleeds into content lines. This
-produces jumbled or misplaced characters, typically visible in the top-left
-area of the terminal. Manual window resize fixes it instantly, but the
-corruption returns over time.
+Version-tag builds require Developer ID signing and notarization credentials and fail before publication if they are unavailable. Only production release artifacts are intended for normal installation.
 
-### Root Cause
+## Terminal Rendering Differences
 
-The Claude CLI draws its status bar using **relative ANSI cursor moves**:
+ATController renders the Codex terminal UI through xterm.js. Font metrics, Unicode width rules, and rapid cursor redraws can differ slightly from Terminal.app.
 
-- `\r` (carriage return) to go to column 0
-- `\e[1B` (CUD1) to move down one row
-- `\e[1C` (CUF1) to move forward one column (used as spacing)
+If the display becomes stale or misaligned:
 
-The CLI does **not** use absolute cursor positioning (`\e[row;colH`) or
-cursor save/restore (`\e[s` / `\e[u`).
+1. Resize the ATController window.
+2. Switch to another thread and back.
+3. Use the terminal refresh action.
 
-The drift is caused by **unicode/emoji character width disagreements** between
-the CLI's `wcwidth` implementation and xterm.js. When the CLI renders a
-character like `*` (U+2733 eight-spoked asterisk), it calculates the display
-width as N cells, but xterm.js may render it as M cells (where M != N). The
-`\e[1C` spacing after the character then positions the cursor at the wrong
-column.
+Report reproducible cases with the macOS version, Codex CLI version, terminal dimensions, and a redacted tail of the affected run’s `output.log`.
 
-Each status bar redraw (every few seconds during active sessions) accumulates
-a small positional error. Over ~5 minutes of sparse output, the error becomes
-visually apparent.
+## Session Discovery Depends on Local Rollout Files
 
-### Evidence
+Bulk import discovers Codex sessions from `$CODEX_HOME/sessions/` or `~/.codex/sessions/`. Sessions stored under another Codex home, removed rollout files, and sessions that cannot be matched to a workspace may not appear.
 
-Analysis of a 2.7MB output.log from a Claude session showed:
+Use manual import when you know the session ID, and confirm ATController is using the same `CODEX_HOME` as your terminal.
 
-| Sequence | Count | Purpose |
-|----------|-------|---------|
-| `\r` (CR) | 118,680 | Status bar line redraws |
-| `\n` (LF) | 79,843 | Content line breaks |
-| `\e[1C` (CUF1) | 78,475 | Spacing in status bar (the drift source) |
-| `\e[1B` (CUD1) | 75 | Status bar line transitions |
-| Cursor save/restore | 0 | Not used by the CLI |
+The recent-session sidebar uses the active local Codex session files, excludes archived sessions,
+and assigns nested working directories to the deepest matching registered workspace. It may take
+up to one minute for an external Codex CLI session to appear automatically; reopening the app
+refreshes it immediately.
 
-The high count of `\e[1C` relative to content lines confirms the CLI uses
-CUF1 extensively for status bar layout. Each CUF1 near a wide character
-introduces a sub-cell positioning error.
+## Usage Availability
 
-### Why Manual Resize Fixes It
+ATController displays only the 5-hour and weekly windows returned by the authenticated local Codex
+CLI. Some account types or plans do not return both windows. An unavailable label means Codex did
+not report that window; it is not a zero-usage estimate. Model and speed controls remain available
+when usage cannot be read.
 
-When the user resizes the window:
+## Remote Environment Setup
 
-1. Container pixel dimensions change
-2. `FitAddon.fit()` calculates genuinely different cols/rows
-3. The PTY is resized to the new dimensions
-4. The OS kernel sends **SIGWINCH** to the CLI process
-5. The CLI receives SIGWINCH and **redraws its entire status bar from scratch**
-6. All cursor positions are recalculated relative to the new dimensions
-7. The accumulated drift is reset to zero
+SSH and rdev workspaces depend on the remote machine’s shell startup, Codex installation, authentication, and repository access. ATController cannot repair a remote login or Codex configuration that fails in a normal terminal.
 
-### Why `fitWithReflow` Doesn't Fix It
+Verify the connection command, `codex --version`, and `codex login status` directly on the remote environment before troubleshooting ATController.
 
-The stream repair mechanism calls `fitWithReflow`, which does:
+ATController does not read Codex rollout JSONL from the remote host. Automatic session-ID persistence and durable resume are not guaranteed for SSH or rdev threads.
 
-```
-term.resize(cols + 1, rows)  // xterm.js only
-term.resize(cols, rows)       // xterm.js only
-fitAddon.fit()                // short-circuits (same pixel container)
-```
+## Full Access
 
-This forces xterm.js to reflow its internal line buffer, but it **never
-notifies the PTY** of a size change. The PTY stays at the same cols/rows,
-so the OS never sends SIGWINCH to the CLI. The CLI never redraws.
+Full access launches Codex with `--dangerously-bypass-approvals-and-sandbox`. This disables Codex’s approval and sandbox protections for that thread.
 
-### Current Fix
-
-**SIGWINCH on thread selection** (commit `9192d38`):
-
-When the user switches to a Claude thread, the app sends two PTY resize
-commands before the terminal content loads:
-
-```typescript
-void api.terminalResize(sessionId, cols + 1, rows);  // SIGWINCH #1
-void api.terminalResize(sessionId, cols, rows);       // SIGWINCH #2
-```
-
-This triggers SIGWINCH, forcing the CLI to redraw. The redraw happens during
-the natural React remount of the TerminalPanel (caused by the `key` change
-on thread selection), so it's invisible to the user.
-
-**Tradeoffs:**
-- The fix only applies when switching threads. If a user stays on one thread
-  for 30+ minutes, they may see drift. However, any thread switch (even
-  clicking away and back) clears it instantly.
-- Two extra PTY resize IPC calls per thread switch (~microseconds, negligible).
-- Workspace shells also receive the SIGWINCH, but shells handle it gracefully.
-
-### What Would Truly Fix It
-
-The root cause is a `wcwidth` disagreement between the CLI and xterm.js. A
-true fix would require one of:
-
-1. **CLI change:** Use absolute cursor positioning (`\e[row;colH`) instead of
-   relative moves, or use spaces instead of `\e[1C` for status bar spacing.
-2. **CLI change:** Align the CLI's `wcwidth` with xterm.js's unicode width
-   tables.
-3. **Terminal-side workaround:** Intercept and rewrite the CLI's ANSI output
-   to correct cursor positions based on xterm.js's actual character widths.
-   This is invasive and fragile.
-
-Option 1 or 2 would eliminate the drift entirely. The current SIGWINCH
-workaround is the pragmatic containment strategy until the CLI is updated.
-
-### Related Commits
-
-- `9192d38` - Fix CLI status bar rendering drift via SIGWINCH on thread selection
-- `761f464` - Add idle reflow to fix rendering drift during sparse terminal output
-- `a6ab69a` - Fix terminal flash/scroll-to-top on large output and trim boundaries
+Use Workspace mode unless the repository, instructions, tools, and execution environment are trusted.

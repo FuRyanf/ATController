@@ -89,7 +89,6 @@ const mocks = vi.hoisted(() => {
       return workspaceState.find((workspace) => workspace.id === workspaceId) ?? workspaceOne;
     }),
     getGitInfo: vi.fn(async () => null),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitPullMasterForNewThread: vi.fn(async () => ({
       outcome: 'pulled' as const,
       message: 'Checked out master and pulled latest changes.'
@@ -108,27 +107,40 @@ const mocks = vi.hoisted(() => {
     setThreadFullAccess: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    clearThreadClaudeSession: vi.fn(async () => {
+    clearThreadCodexSession: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    setThreadClaudeSessionId: vi.fn(async () => {
+    setThreadCodexSessionId: vi.fn(async () => {
       throw new Error('not needed');
     }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    setThreadAgent: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    listRecentCodexThreads: vi.fn(async () => []),
+    getCodexRuntimeOverview: vi.fn(async () => ({
+      selectedModel: null,
+      selectedReasoningEffort: null,
+      fastMode: false,
+      configVersion: null,
+      models: [],
+      fiveHourLimit: null,
+      weeklyLimit: null,
+      rateLimitsAvailable: false
+    })),
+    updateCodexRuntimePreferences: vi.fn(async () => ({
+      selectedModel: null,
+      selectedReasoningEffort: null,
+      fastMode: false,
+      configVersion: null,
+      models: [],
+      fiveHourLimit: null,
+      weeklyLimit: null,
+      rateLimitsAvailable: false
+    })),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -143,7 +155,6 @@ const mocks = vi.hoisted(() => {
       thread: {
         id: 'thread-1',
         workspaceId: 'ws-added',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [],
         createdAt: new Date().toISOString(),
@@ -153,7 +164,7 @@ const mocks = vi.hoisted(() => {
         lastRunStatus: 'Idle',
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: null,
+        codexSessionId: null,
         lastResumeAt: null,
         lastNewSessionAt: null
       }
@@ -164,17 +175,17 @@ const mocks = vi.hoisted(() => {
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
-    discoverImportableClaudeSessions: vi.fn(async () => []),
-    getImportableClaudeSession: vi.fn(async () => null),
+    validateImportableCodexSession: vi.fn(async () => true),
+    discoverImportableCodexSessions: vi.fn(async () => []),
+    getImportableCodexSession: vi.fn(async () => null),
+    importCodexSession: vi.fn(async () => {
+      throw new Error('not needed');
+    }),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
   const openDialog = vi.fn(async () => null);
@@ -214,8 +225,6 @@ const mocks = vi.hoisted(() => {
     },
     openDialog,
     confirmDialog,
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
     onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalSshAuthStatus: vi.fn(async () => () => undefined),
@@ -227,8 +236,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,
@@ -682,7 +689,7 @@ describe('Workspace add flow', () => {
   it('sends a test alert from Settings when task completion alerts are enabled', async () => {
     const user = userEvent.setup();
     mocks.api.getSettings.mockResolvedValueOnce({
-      claudeCliPath: '/usr/local/bin/claude',
+      codexCliPath: '/usr/local/bin/codex',
       taskCompletionAlerts: true
     });
 
@@ -705,7 +712,7 @@ describe('Workspace add flow', () => {
     });
   });
 
-  it('imports a Claude session into a new thread from workspace menu', async () => {
+  it('imports a Codex session into a new thread from workspace menu', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -719,7 +726,6 @@ describe('Workspace add flow', () => {
     const createdThread = {
       id: 'thread-import',
       workspaceId: 'ws-added',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -729,36 +735,31 @@ describe('Workspace add flow', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     };
     const importedThread = {
       ...createdThread,
-      claudeSessionId: '123e4567-e89b-12d3-a456-426614174000'
+      codexSessionId: '123e4567-e89b-12d3-a456-426614174000'
     };
 
-    mocks.api.createThread.mockResolvedValueOnce(createdThread);
-    mocks.api.setThreadClaudeSessionId.mockResolvedValueOnce(importedThread);
+    mocks.api.importCodexSession.mockResolvedValueOnce(importedThread);
 
     await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Import session…' }));
+    await user.click(await screen.findByRole('button', { name: 'Import Codex session…' }));
     await user.type(
-      await screen.findByLabelText('Claude session ID'),
+      await screen.findByLabelText('Codex session ID'),
       '123e4567-e89b-12d3-a456-426614174000'
     );
     await user.click(screen.getByRole('button', { name: 'Import' }));
 
     await waitFor(() => {
-      expect(mocks.api.validateImportableClaudeSession).toHaveBeenCalledWith(
-        '/tmp/workspace-added',
-        '123e4567-e89b-12d3-a456-426614174000'
-      );
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code', false);
-      expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
+      expect(mocks.api.importCodexSession).toHaveBeenCalledWith(
         'ws-added',
-        'thread-import',
-        '123e4567-e89b-12d3-a456-426614174000'
+        '123e4567-e89b-12d3-a456-426614174000',
+        null,
+        false
       );
     });
 
@@ -768,19 +769,68 @@ describe('Workspace add flow', () => {
       );
     });
 
-    const setCallOrder = mocks.api.setThreadClaudeSessionId.mock.invocationCallOrder[0] ?? 0;
+    const importCallOrder = mocks.api.importCodexSession.mock.invocationCallOrder[0] ?? 0;
     const startCallOrder = mocks.api.terminalStartSession.mock.invocationCallOrder.find(
       (value: number) => value > 0
     ) ?? 0;
-    const validateCallOrder = mocks.api.validateImportableClaudeSession.mock.invocationCallOrder[0] ?? 0;
-    expect(validateCallOrder).toBeGreaterThan(0);
-    expect(validateCallOrder).toBeLessThan(setCallOrder);
-    expect(setCallOrder).toBeGreaterThan(0);
+    expect(importCallOrder).toBeGreaterThan(0);
     expect(startCallOrder).toBeGreaterThan(0);
-    expect(setCallOrder).toBeLessThan(startCallOrder);
+    expect(importCallOrder).toBeLessThan(startCallOrder);
   });
 
-  it('blocks importing a Claude session that belongs to a different local workspace', async () => {
+  it('opens a recent unimported Codex session directly from the workspace sidebar', async () => {
+    const user = userEvent.setup();
+    const sessionId = '33333333-3333-3333-3333-333333333333';
+    const importedThread = {
+      id: 'thread-recent',
+      workspaceId: 'ws-added',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'Live Codex work',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      codexSessionId: sessionId,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+    let imported = false;
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne]);
+    mocks.api.listThreads.mockImplementation(async () => (imported ? [importedThread] : []));
+    mocks.api.listRecentCodexThreads.mockResolvedValue([
+      {
+        sessionId,
+        workspaceId: 'ws-added',
+        title: 'Live Codex work',
+        createdAt: Math.floor(Date.now() / 1000) - 60,
+        updatedAt: Math.floor(Date.now() / 1000),
+        recencyAt: Math.floor(Date.now() / 1000)
+      }
+    ]);
+    mocks.api.importCodexSession.mockImplementationOnce(async () => {
+      imported = true;
+      return importedThread;
+    });
+
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: /Live Codex work/i }));
+
+    await waitFor(() => {
+      expect(mocks.api.importCodexSession).toHaveBeenCalledWith(
+        'ws-added',
+        sessionId,
+        'Live Codex work',
+        false
+      );
+    });
+    expect(screen.getAllByText('Live Codex work').length).toBeGreaterThan(0);
+  });
+
+  it('blocks importing a Codex session that belongs to a different local workspace', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -791,32 +841,36 @@ describe('Workspace add flow', () => {
     await user.click(screen.getByRole('button', { name: 'Add project' }));
     const workspaceRow = await screen.findByRole('button', { name: /workspace-added/i });
 
-    mocks.api.validateImportableClaudeSession.mockRejectedValueOnce(
-      new Error('This Claude session belongs to a different workspace.')
+    mocks.api.importCodexSession.mockRejectedValueOnce(
+      new Error('This Codex session belongs to a different workspace.')
     );
 
     await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Import session…' }));
+    await user.click(await screen.findByRole('button', { name: 'Import Codex session…' }));
     await user.type(
-      await screen.findByLabelText('Claude session ID'),
+      await screen.findByLabelText('Codex session ID'),
       '123e4567-e89b-12d3-a456-426614174000'
     );
     await user.click(screen.getByRole('button', { name: 'Import' }));
 
     expect(
-      await screen.findByText(/this claude session belongs to a different workspace/i)
+      await screen.findByText(/this codex session belongs to a different workspace/i)
     ).toBeInTheDocument();
-    expect(mocks.api.createThread).not.toHaveBeenCalled();
-    expect(mocks.api.setThreadClaudeSessionId).not.toHaveBeenCalled();
+    expect(mocks.api.importCodexSession).toHaveBeenCalledWith(
+      'ws-added',
+      '123e4567-e89b-12d3-a456-426614174000',
+      null,
+      false
+    );
     expect(mocks.api.terminalStartSession).not.toHaveBeenCalledWith(
       expect.objectContaining({ threadId: 'thread-import' })
     );
   });
 
-  it('bulk imports selected Claude sessions from Add Project and adds missing projects first', async () => {
+  it('bulk imports selected Codex sessions from Add Project and adds missing projects first', async () => {
     const user = userEvent.setup();
     mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne]);
-    mocks.api.discoverImportableClaudeSessions.mockResolvedValueOnce([
+    mocks.api.discoverImportableCodexSessions.mockResolvedValueOnce([
       {
         path: '/tmp/workspace-added',
         name: 'workspace-added',
@@ -864,7 +918,6 @@ describe('Workspace add flow', () => {
     const importedExistingThread = {
       id: 'thread-bulk-existing',
       workspaceId: 'ws-added',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -874,7 +927,7 @@ describe('Workspace add flow', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: '11111111-1111-1111-1111-111111111111',
+      codexSessionId: '11111111-1111-1111-1111-111111111111',
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -882,55 +935,36 @@ describe('Workspace add flow', () => {
       ...importedExistingThread,
       id: 'thread-bulk-new',
       workspaceId: 'ws-second',
-      claudeSessionId: '22222222-2222-2222-2222-222222222222'
+      codexSessionId: '22222222-2222-2222-2222-222222222222'
     };
 
-    mocks.api.createThread
-      .mockResolvedValueOnce({
-        ...importedExistingThread,
-        id: 'thread-bulk-existing',
-        claudeSessionId: null
-      })
-      .mockResolvedValueOnce({
-        ...importedNewProjectThread,
-        id: 'thread-bulk-new',
-        claudeSessionId: null
-      });
-    mocks.api.setThreadClaudeSessionId
+    mocks.api.importCodexSession
       .mockResolvedValueOnce(importedExistingThread)
       .mockResolvedValueOnce(importedNewProjectThread);
 
     render(<App />);
 
     await user.click(await screen.findByRole('button', { name: 'Add new project' }));
-    await user.click(await screen.findByRole('button', { name: 'Import Claude sessions' }));
+    await user.click(await screen.findByRole('button', { name: 'Import Codex sessions' }));
 
-    await screen.findByRole('dialog', { name: 'Bulk Import Claude Sessions' });
+    await screen.findByRole('dialog', { name: 'Bulk Import Codex Sessions' });
     await user.click(screen.getByRole('checkbox', { name: /Existing project session/i }));
     await user.click(screen.getByRole('checkbox', { name: /New project session/i }));
     await user.click(screen.getByRole('button', { name: 'Import selected (2)' }));
 
     await waitFor(() => {
-      expect(mocks.api.validateImportableClaudeSession).toHaveBeenCalledWith(
-        '/tmp/workspace-added',
-        '11111111-1111-1111-1111-111111111111'
-      );
-      expect(mocks.api.validateImportableClaudeSession).toHaveBeenCalledWith(
-        '/tmp/workspace-second',
-        '22222222-2222-2222-2222-222222222222'
-      );
       expect(mocks.api.addWorkspace).toHaveBeenCalledWith('/tmp/workspace-second');
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code', false);
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-second', 'claude-code', false);
-      expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
+      expect(mocks.api.importCodexSession).toHaveBeenCalledWith(
         'ws-added',
-        'thread-bulk-existing',
-        '11111111-1111-1111-1111-111111111111'
+        '11111111-1111-1111-1111-111111111111',
+        'Existing project session',
+        false
       );
-      expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
+      expect(mocks.api.importCodexSession).toHaveBeenCalledWith(
         'ws-second',
-        'thread-bulk-new',
-        '22222222-2222-2222-2222-222222222222'
+        '22222222-2222-2222-2222-222222222222',
+        'New project session',
+        false
       );
     });
 
@@ -941,17 +975,16 @@ describe('Workspace add flow', () => {
       expect.objectContaining({ threadId: 'thread-bulk-new' })
     );
     await waitFor(() => {
-      expect(screen.queryByRole('dialog', { name: 'Bulk Import Claude Sessions' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'Bulk Import Codex Sessions' })).not.toBeInTheDocument();
     });
   });
-  it('reoffers an archived imported Claude session in bulk import so it can be recovered', async () => {
+  it('reoffers an archived imported Codex session in bulk import so it can be recovered', async () => {
     const user = userEvent.setup();
     mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne]);
     mocks.api.listThreads.mockResolvedValueOnce([
       {
         id: 'thread-archived-import',
         workspaceId: 'ws-added',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [],
         createdAt: new Date().toISOString(),
@@ -961,12 +994,12 @@ describe('Workspace add flow', () => {
         lastRunStatus: 'Idle',
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: '11111111-1111-1111-1111-111111111111',
+        codexSessionId: '11111111-1111-1111-1111-111111111111',
         lastResumeAt: null,
         lastNewSessionAt: null
       }
     ]);
-    mocks.api.discoverImportableClaudeSessions.mockResolvedValueOnce([
+    mocks.api.discoverImportableCodexSessions.mockResolvedValueOnce([
       {
         path: '/tmp/workspace-added',
         name: 'workspace-added',
@@ -990,9 +1023,9 @@ describe('Workspace add flow', () => {
     render(<App />);
 
     await user.click(await screen.findByRole('button', { name: 'Add new project' }));
-    await user.click(await screen.findByRole('button', { name: 'Import Claude sessions' }));
+    await user.click(await screen.findByRole('button', { name: 'Import Codex sessions' }));
 
-    await screen.findByRole('dialog', { name: 'Bulk Import Claude Sessions' });
+    await screen.findByRole('dialog', { name: 'Bulk Import Codex Sessions' });
     expect(await screen.findByRole('checkbox', { name: /Recovered session/i })).toBeInTheDocument();
     expect(screen.queryByText(/already imported/i)).not.toBeInTheDocument();
   });

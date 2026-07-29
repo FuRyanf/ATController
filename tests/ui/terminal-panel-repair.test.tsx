@@ -311,31 +311,37 @@ vi.mock('../../src/lib/api', () => ({
   }
 }));
 
-vi.mock('xterm', () => ({
-  Terminal: vi.fn((options: Record<string, unknown> = {}) => {
+vi.mock('@xterm/xterm', () => ({
+  Terminal: vi.fn(function Terminal(options: Record<string, unknown> = {}) {
     const term = mocks.createTerminal();
     term.options = { ...options };
     return term;
   })
 }));
 
-vi.mock('xterm-addon-fit', () => ({
-  FitAddon: vi.fn(() => ({
-    fit: mocks.fit,
-    proposeDimensions: () => {
-      mocks.fit();
-      return mocks.proposedDimensions;
-    },
-    dispose: vi.fn()
-  }))
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: vi.fn(function FitAddon() {
+    return {
+      fit: mocks.fit,
+      proposeDimensions: () => {
+        mocks.fit();
+        return mocks.proposedDimensions;
+      },
+      dispose: vi.fn()
+    };
+  })
 }));
 
-vi.mock('xterm-addon-web-links', () => ({
-  WebLinksAddon: vi.fn(() => ({}))
+vi.mock('@xterm/addon-web-links', () => ({
+  WebLinksAddon: vi.fn(function WebLinksAddon() {
+    return {};
+  })
 }));
 
-vi.mock('xterm-addon-search', () => ({
-  SearchAddon: vi.fn(() => mocks.createSearchAddon())
+vi.mock('@xterm/addon-search', () => ({
+  SearchAddon: vi.fn(function SearchAddon() {
+    return mocks.createSearchAddon();
+  })
 }));
 
 import { TerminalPanel } from '../../src/components/TerminalPanel';
@@ -477,8 +483,8 @@ describe('TerminalPanel live rendering', () => {
     delete (globalThis as { __ATCONTROLLER_ENABLE_XTERM_TESTS__?: boolean }).__ATCONTROLLER_ENABLE_XTERM_TESTS__;
   });
 
-  it('renders completed Claude snapshots in a plain scrollback view when no session is active', () => {
-    const snapshotText = '\u001b[2JClaude Code\r\nframe one\r\nframe two\r\n';
+  it('renders completed Codex snapshots in a plain scrollback view when no session is active', () => {
+    const snapshotText = '\u001b[2JOpenAI Codex\r\nframe one\r\nframe two\r\n';
     const { container } = render(
       <TerminalPanel
         sessionId={null}
@@ -497,7 +503,7 @@ describe('TerminalPanel live rendering', () => {
 
     expect(container.querySelector('.xterm-viewport')).toBeNull();
     const fallback = container.querySelector('.terminal-fallback');
-    expect(fallback?.textContent).toContain('Claude Code');
+    expect(fallback?.textContent).toContain('OpenAI Codex');
     expect(fallback?.textContent).toContain('frame one');
     expect(fallback?.textContent).toContain('frame two');
   });
@@ -528,7 +534,7 @@ describe('TerminalPanel live rendering', () => {
   });
 
   it('immediately replays the latest live snapshot on mount', async () => {
-    const initialContent = '\u001b[?1049hClaude Code v2.1.101\nWhirlpooling...';
+    const initialContent = '\u001b[?1049hOpenAI Codex v2.1.101\nWorking...';
     renderLivePanel(initialContent, {
       props: { preferLiveRedrawOnMount: true }
     });
@@ -542,6 +548,60 @@ describe('TerminalPanel live rendering', () => {
       expect(term.reset).toHaveBeenCalled();
       expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
     });
+  });
+
+  it('batches oversized initial hydration without changing ordinary output', async () => {
+    const initialContent = Array.from(
+      { length: 4_000 },
+      (_, index) => `ordinary output line ${index}\n`
+    ).join('');
+    renderLivePanel(initialContent, {
+      props: { cursorVisible: true }
+    });
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      const writtenChunks = term.write.mock.calls.map(([chunk]) => chunk as string);
+      expect(writtenChunks.join('')).toBe(initialContent);
+    });
+
+    const writtenChunks = term.write.mock.calls.map(([chunk]) => chunk as string);
+    expect(writtenChunks.length).toBeGreaterThan(1);
+    expect(writtenChunks.every((chunk) => chunk.length <= 16 * 1024)).toBe(true);
+  });
+
+  it('coalesces a large imported ANSI redraw burst to the latest Codex frame before batching', async () => {
+    const alternateScreen = '\u001b[?1049h';
+    const clear = '\u001b[2J\u001b[H';
+    const lineRedraw = '\u001b[2K\r';
+    const buildFrame = (index: number) =>
+      `${clear}${lineRedraw}\u001b[32mOpenAI Codex imported frame ${index} ${'x'.repeat(20_000)}\u001b[0m`;
+    const frames = Array.from({ length: 120 }, (_, index) => buildFrame(index));
+    const importedSnapshot = `${alternateScreen}${frames.join('')}`;
+    const expectedReplay = `${alternateScreen}${frames.at(-1)}`;
+    renderLivePanel(importedSnapshot, {
+      props: { cursorVisible: true }
+    });
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      const writtenChunks = term.write.mock.calls.map(([chunk]) => chunk as string);
+      expect(writtenChunks.join('')).toBe(expectedReplay);
+    });
+
+    const writtenChunks = term.write.mock.calls.map(([chunk]) => chunk as string);
+    expect(importedSnapshot.length).toBeGreaterThan(2_000_000);
+    expect(writtenChunks.length).toBeGreaterThan(1);
+    expect(writtenChunks.every((chunk) => chunk.length <= 16 * 1024)).toBe(true);
+    expect(writtenChunks.join('').length).toBeLessThan(importedSnapshot.length / 50);
   });
 
   it('appends streamed chunks without resetting the live xterm buffer', async () => {
@@ -590,7 +650,7 @@ describe('TerminalPanel live rendering', () => {
   });
 
   it('appends stateful live chunks without replaying the whole terminal snapshot', async () => {
-    const initialText = '\u001b[?1049hClaude Code\nframe one';
+    const initialText = '\u001b[?1049hOpenAI Codex\nframe one';
     const nextText = `${initialText}\nframe two`;
     const { rerender } = renderLivePanel(initialText);
 
@@ -693,8 +753,8 @@ describe('TerminalPanel live rendering', () => {
     });
   });
 
-  it('hides the xterm cursor for Claude-style interactive sessions on mount and reset', async () => {
-    const initialContent = '\u001b[?1049hClaude Code\nbypass permissions on';
+  it('hides the xterm cursor for Codex-style interactive sessions on mount and reset', async () => {
+    const initialContent = '\u001b[?1049hOpenAI Codex\nfull access enabled';
     const nextContent = `${initialContent}\nnext`;
     const { rerender } = renderLivePanel(initialContent);
 
@@ -2169,7 +2229,7 @@ describe('TerminalPanel live rendering', () => {
   });
 
   it('keeps a paused stateful screen frozen until follow resumes', async () => {
-    const initialContent = `\u001b[?1049h${Array.from({ length: 48 }, (_, index) => `Claude line ${index + 1}`).join('\n')}`;
+    const initialContent = `\u001b[?1049h${Array.from({ length: 48 }, (_, index) => `Codex line ${index + 1}`).join('\n')}`;
     const nextContent = `${initialContent}\nnext state`;
     const { container, getByRole, rerender } = renderLivePanel(initialContent);
 

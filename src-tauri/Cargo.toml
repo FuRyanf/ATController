@@ -1,30 +1,30 @@
 [package]
 name = "atcontroller"
-version = "0.0.21"
-description = "Native macOS desktop control plane for local Claude Code workflows."
+version = "0.0.22"
+description = "ATController is a native macOS desktop application for local OpenAI Codex CLI workflows."
 authors = ["ATController contributors"]
 license = "MIT"
 repository = "https://github.com/FuRyanf/ATController"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 [build-dependencies]
 cc = "1.2.16"
-tauri-build = { version = "2.0.2", features = [] }
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-anyhow = "1.0.93"
+anyhow = "1.0.103"
 chrono = { version = "0.4.38", features = ["serde"] }
-dirs = "5.0.1"
+dirs = "6.0.0"
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.132"
-tauri = { version = "2.1.1", features = [] }
-tauri-plugin-dialog = "2.6.0"
-arboard = "3"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+tauri = { version = "2.11.5", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.7.2"
+arboard = { version = "3", default-features = false }
 tokio = { version = "1.41.1", features = ["full"] }
-portable-pty = "0.8.1"
+portable-pty = "0.9.0"
 libc = "0.2.182"
+shell-words = "1.1.1"
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 
 [features]

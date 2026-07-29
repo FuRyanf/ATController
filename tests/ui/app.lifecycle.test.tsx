@@ -30,15 +30,18 @@ const mocks = vi.hoisted(() => {
       sequence?: number;
     }
   ) => void) | null = null;
-  let terminalExitHandler: ((event: { sessionId: string; code?: number | null; signal?: string | null }) => void) | null =
-    null;
+  let terminalExitHandler: ((event: {
+    sessionId: string;
+    code?: number | null;
+    signal?: string | null;
+    persistenceError?: string | null;
+  }) => void) | null = null;
   const terminalPositions = new Map<string, number>();
   const terminalSequencePositions = new Map<string, { startPosition: number; endPosition: number }>();
   const baseThreads = [
     {
       id: 'thread-1',
       workspaceId: 'ws-1',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date(now - 2_000).toISOString(),
@@ -48,14 +51,13 @@ const mocks = vi.hoisted(() => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     },
     {
       id: 'thread-2',
       workspaceId: 'ws-1',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date(now - 4_000).toISOString(),
@@ -65,7 +67,7 @@ const mocks = vi.hoisted(() => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     }
@@ -126,10 +128,10 @@ const mocks = vi.hoisted(() => {
     threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
     return updated;
   };
-  const clearThreadClaudeSessionImpl = async (_workspaceId: string, threadId: string) => {
+  const clearThreadCodexSessionImpl = async (_workspaceId: string, threadId: string) => {
     const updated = {
       ...threadState.find((thread) => thread.id === threadId)!,
-      claudeSessionId: null,
+      codexSessionId: null,
       updatedAt: new Date().toISOString()
     };
     threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
@@ -161,7 +163,6 @@ const mocks = vi.hoisted(() => {
       ahead: 0,
       behind: 0
     })),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitListBranches: vi.fn(async () => [
       { name: 'main', isCurrent: true, lastCommitUnix: 1700000000 },
       { name: 'feature/test', isCurrent: false, lastCommitUnix: 1690000000 }
@@ -173,7 +174,6 @@ const mocks = vi.hoisted(() => {
       deletions: 0
     })),
     gitCheckoutBranch: vi.fn(async () => true),
-    gitCreateAndCheckoutBranch: vi.fn(async () => true),
     gitPullMasterForNewThread: vi.fn(gitPullMasterForNewThreadImpl),
     listThreads: vi.fn(listThreadsImpl),
     createThread: vi.fn(createThreadImpl),
@@ -181,22 +181,14 @@ const mocks = vi.hoisted(() => {
     archiveThread: vi.fn(archiveThreadImpl),
     deleteThread: vi.fn(deleteThreadImpl),
     setThreadFullAccess: vi.fn(setThreadFullAccessImpl),
-    clearThreadClaudeSession: vi.fn(clearThreadClaudeSessionImpl),
+    clearThreadCodexSession: vi.fn(clearThreadCodexSessionImpl),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    setThreadAgent: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -211,14 +203,11 @@ const mocks = vi.hoisted(() => {
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(terminalReadOutputImpl),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
+    validateImportableCodexSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
@@ -244,8 +233,8 @@ const mocks = vi.hoisted(() => {
     api.deleteThread.mockImplementation(deleteThreadImpl);
     api.setThreadFullAccess.mockReset();
     api.setThreadFullAccess.mockImplementation(setThreadFullAccessImpl);
-    api.clearThreadClaudeSession.mockReset();
-    api.clearThreadClaudeSession.mockImplementation(clearThreadClaudeSessionImpl);
+    api.clearThreadCodexSession.mockReset();
+    api.clearThreadCodexSession.mockImplementation(clearThreadCodexSessionImpl);
     api.terminalStartSession.mockReset();
     api.terminalStartSession.mockImplementation(terminalStartSessionImpl);
     api.terminalReadOutput.mockReset();
@@ -266,8 +255,6 @@ const mocks = vi.hoisted(() => {
     reset,
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     emitTerminalData: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => {
       const sequenceKey =
         typeof event.sequence === 'number' ? `${event.sessionId}:${event.sequence}` : null;
@@ -306,11 +293,21 @@ const mocks = vi.hoisted(() => {
     onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalSshAuthStatus: vi.fn(async () => () => undefined),
     onTerminalTurnCompleted: vi.fn(async () => () => undefined),
-    emitTerminalExit: (event: { sessionId: string; code?: number | null; signal?: string | null }) => {
+    emitTerminalExit: (event: {
+      sessionId: string;
+      code?: number | null;
+      signal?: string | null;
+      persistenceError?: string | null;
+    }) => {
       terminalExitHandler?.(event);
     },
     onTerminalExit: vi.fn(
-      async (handler: (event: { sessionId: string; code?: number | null; signal?: string | null }) => void) => {
+      async (handler: (event: {
+        sessionId: string;
+        code?: number | null;
+        signal?: string | null;
+        persistenceError?: string | null;
+      }) => void) => {
         terminalExitHandler = handler;
         return () => {
           if (terminalExitHandler === handler) {
@@ -325,8 +322,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,
@@ -363,9 +358,34 @@ describe('Thread lifecycle integration', () => {
     });
   });
 
+  it('surfaces terminal persistence failures even when Codex exits successfully', async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-1' })
+      );
+    });
+
+    act(() => {
+      mocks.emitTerminalExit({
+        sessionId: 'session-thread-1',
+        code: 0,
+        signal: null,
+        persistenceError: 'Unable to sync terminal output'
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        'ATController could not save complete terminal history: Unable to sync terminal output'
+      )
+    ).toBeInTheDocument();
+  });
+
   it('sends the alerts-enabled confirmation when settings load with task completion alerts on', async () => {
     mocks.api.getSettings.mockResolvedValueOnce({
-      claudeCliPath: '/usr/local/bin/claude',
+      codexCliPath: '/usr/local/bin/codex',
       taskCompletionAlerts: true
     });
 
@@ -374,7 +394,7 @@ describe('Thread lifecycle integration', () => {
     await waitFor(() => {
       expect(coreMocks.invoke).toHaveBeenCalledWith('send_desktop_notification', {
         title: 'ATController alerts enabled',
-        body: 'You will now get a notification when Claude finishes a task.'
+        body: 'You will now get a notification when Codex finishes a task.'
       });
     });
   });
@@ -414,7 +434,6 @@ describe('Thread lifecycle integration', () => {
     const remoteThread = {
       id: 'thread-ssh',
       workspaceId: 'ws-ssh',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -424,7 +443,7 @@ describe('Thread lifecycle integration', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -463,7 +482,6 @@ describe('Thread lifecycle integration', () => {
     const remoteThread = {
       id: 'thread-rdev',
       workspaceId: 'ws-rdev',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -473,7 +491,7 @@ describe('Thread lifecycle integration', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -561,7 +579,6 @@ describe('Thread lifecycle integration', () => {
     const remoteThread = {
       id: 'thread-ssh-recover',
       workspaceId: 'ws-ssh-recover',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -571,7 +588,7 @@ describe('Thread lifecycle integration', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -634,7 +651,6 @@ describe('Thread lifecycle integration', () => {
     const remoteThread = {
       id: 'thread-rdev-recover',
       workspaceId: 'ws-rdev-recover',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -644,7 +660,7 @@ describe('Thread lifecycle integration', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -735,7 +751,6 @@ describe('Thread lifecycle integration', () => {
     const remoteThread = {
       id: 'thread-ssh-loop',
       workspaceId: remoteWorkspace.id,
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -745,7 +760,7 @@ describe('Thread lifecycle integration', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -857,7 +872,6 @@ describe('Thread lifecycle integration', () => {
     const threadOne = {
       id: 'thread-1',
       workspaceId: 'ws-1',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -867,7 +881,7 @@ describe('Thread lifecycle integration', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: '11111111-1111-4111-8111-111111111111',
+      codexSessionId: '11111111-1111-4111-8111-111111111111',
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -887,7 +901,7 @@ describe('Thread lifecycle integration', () => {
     mocks.api.terminalStartSession.mockResolvedValueOnce({
       sessionId: 'session-thread-1',
       sessionMode: 'resumed' as const,
-      resumeSessionId: threadOne.claudeSessionId,
+      resumeSessionId: threadOne.codexSessionId,
       thread: threadOne
     });
 
@@ -907,7 +921,7 @@ describe('Thread lifecycle integration', () => {
       expect(mocks.api.gitCheckoutBranch).toHaveBeenNthCalledWith(1, '/tmp/workspace', 'feature/test');
       expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
     });
-    expect(mocks.api.clearThreadClaudeSession).not.toHaveBeenCalled();
+    expect(mocks.api.clearThreadCodexSession).not.toHaveBeenCalled();
     expect(screen.queryByText(/Failed to resume session\. Start fresh\?/i)).not.toBeInTheDocument();
     expect(mocks.api.gitCheckoutBranch).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('button', { name: /^feature\/test$/i })).toBeInTheDocument();
@@ -919,7 +933,6 @@ describe('Thread lifecycle integration', () => {
     const threadOne = {
       id: 'thread-1',
       workspaceId: 'ws-1',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date().toISOString(),
@@ -929,7 +942,7 @@ describe('Thread lifecycle integration', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: '11111111-1111-4111-8111-111111111111',
+      codexSessionId: '11111111-1111-4111-8111-111111111111',
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -950,25 +963,25 @@ describe('Thread lifecycle integration', () => {
       .mockResolvedValueOnce({
         sessionId: 'session-thread-1',
         sessionMode: 'resumed' as const,
-        resumeSessionId: threadOne.claudeSessionId,
+        resumeSessionId: threadOne.codexSessionId,
         thread: threadOne
       })
       .mockResolvedValueOnce({
         sessionId: 'session-thread-1-r2',
         sessionMode: 'resumed' as const,
-        resumeSessionId: threadOne.claudeSessionId,
+        resumeSessionId: threadOne.codexSessionId,
         thread: threadOne
       })
       .mockResolvedValueOnce({
         sessionId: 'session-thread-1-r3',
         sessionMode: 'resumed' as const,
-        resumeSessionId: threadOne.claudeSessionId,
+        resumeSessionId: threadOne.codexSessionId,
         thread: threadOne
       })
       .mockResolvedValueOnce({
         sessionId: 'session-thread-1-r4',
         sessionMode: 'resumed' as const,
-        resumeSessionId: threadOne.claudeSessionId,
+        resumeSessionId: threadOne.codexSessionId,
         thread: threadOne
       });
 
@@ -1010,7 +1023,7 @@ describe('Thread lifecycle integration', () => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(4);
     });
 
-    expect(mocks.api.clearThreadClaudeSession).not.toHaveBeenCalled();
+    expect(mocks.api.clearThreadCodexSession).not.toHaveBeenCalled();
     expect(screen.queryByText(/Failed to resume session\. Start fresh\?/i)).not.toBeInTheDocument();
     expect(mocks.api.gitCheckoutBranch).toHaveBeenCalledTimes(1);
   });
@@ -1038,7 +1051,7 @@ describe('Thread lifecycle integration', () => {
     await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
 
     await waitFor(() => {
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1');
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
         expect.objectContaining({ threadId: 'thread-3' })
       );
@@ -1069,7 +1082,6 @@ describe('Thread lifecycle integration', () => {
     resolveCreateThread?.({
       id: 'thread-3',
       workspaceId: 'ws-1',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [],
       createdAt: new Date().toISOString(),
@@ -1079,7 +1091,7 @@ describe('Thread lifecycle integration', () => {
       lastRunStatus: 'Idle',
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     });
@@ -1112,7 +1124,7 @@ describe('Thread lifecycle integration', () => {
     await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
     await waitFor(() => {
       expect(mocks.api.gitPullMasterForNewThread).toHaveBeenCalledWith('/tmp/workspace');
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1');
     });
 
     const pullInvocation = (mocks.api.gitPullMasterForNewThread as { mock: { invocationCallOrder: number[] } }).mock
@@ -1174,7 +1186,7 @@ describe('Thread lifecycle integration', () => {
     resolveSettingUpdate?.();
 
     await waitFor(() => {
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1');
     });
   });
 
@@ -1197,7 +1209,7 @@ describe('Thread lifecycle integration', () => {
 
     await waitFor(() => {
       expect(mocks.api.gitPullMasterForNewThread).toHaveBeenCalledWith('/tmp/workspace');
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1');
     });
     expect(await screen.findByText('Skipped git pull: working tree is dirty. Commit or stash changes first.')).toBeInTheDocument();
   });

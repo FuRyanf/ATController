@@ -18,7 +18,6 @@ const mocks = vi.hoisted(() => {
   const baseThread = {
     id: 'thread-1',
     workspaceId: 'ws-1',
-    agentId: 'claude-code',
     fullAccess: false,
     enabledSkills: [] as string[],
     createdAt: new Date().toISOString(),
@@ -28,7 +27,7 @@ const mocks = vi.hoisted(() => {
     lastRunStatus: 'Idle' as const,
     lastRunStartedAt: null,
     lastRunEndedAt: null,
-    claudeSessionId: null,
+    codexSessionId: null,
     lastResumeAt: null,
     lastNewSessionAt: null
   };
@@ -50,7 +49,6 @@ const mocks = vi.hoisted(() => {
       ahead: 0,
       behind: 0
     })),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitListBranches: vi.fn(async () => [{ name: 'main', isCurrent: true, lastCommitUnix: 1700000000 }]),
     gitWorkspaceStatus: vi.fn(async () => ({
       isDirty: false,
@@ -59,7 +57,6 @@ const mocks = vi.hoisted(() => {
       deletions: 0
     })),
     gitCheckoutBranch: vi.fn(async () => true),
-    gitCreateAndCheckoutBranch: vi.fn(async () => true),
     gitPullMasterForNewThread: vi.fn(async () => ({
       outcome: 'pulled' as const,
       message: 'Checked out master and pulled latest changes.'
@@ -82,18 +79,12 @@ const mocks = vi.hoisted(() => {
     }),
     deleteThread: vi.fn(async () => true),
     setThreadFullAccess: vi.fn(async () => threadState[0]),
-    clearThreadClaudeSession: vi.fn(async () => threadState[0]),
+    clearThreadCodexSession: vi.fn(async () => threadState[0]),
     setThreadSkills: vi.fn(async () => threadState[0]),
-    setThreadAgent: vi.fn(async () => threadState[0]),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude', appearanceMode: 'dark' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex', appearanceMode: 'dark' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -118,16 +109,13 @@ const mocks = vi.hoisted(() => {
       endPosition: '? for shortcuts'.length,
       truncated: false
     })),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openExternalUrl: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
+    validateImportableCodexSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
@@ -145,8 +133,6 @@ const mocks = vi.hoisted(() => {
     reset,
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
     onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalSshAuthStatus: vi.fn(async () => () => undefined),
@@ -158,8 +144,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,

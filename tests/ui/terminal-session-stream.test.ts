@@ -269,7 +269,7 @@ describe('terminalSessionStream', () => {
       state,
       'session-1',
       {
-        text: 'Claude Code banner\n',
+        text: 'OpenAI Codex banner\n',
         startPosition: 0,
         endPosition: 19,
         truncated: false
@@ -277,13 +277,13 @@ describe('terminalSessionStream', () => {
       1_000
     );
 
-    expect(hydrated.text).toBe('Claude Code banner\n\n> Try "create a test"\n');
+    expect(hydrated.text).toBe('OpenAI Codex banner\n\n> Try "create a test"\n');
     expect(hydrated.rawEndPosition).toBe(42);
   });
 
   it('rewinds to the repaint boundary when hydration lands inside a fullscreen repaint chunk', () => {
     const clear = '\u001b[2J\u001b[H';
-    const frame = `${clear}Claude Code\nfresh frame\n`;
+    const frame = `${clear}OpenAI Codex\nfresh frame\n`;
     let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
     state = appendTerminalStreamChunk(
       state,
@@ -318,8 +318,8 @@ describe('terminalSessionStream', () => {
 
   it('replaces the snapshot with a later buffered repaint chunk during hydration', () => {
     const clear = '\u001b[2J\u001b[H';
-    const frame1 = `${clear}Claude Code\nframe one\n`;
-    const frame2 = `${clear}Claude Code\nframe two\n`;
+    const frame1 = `${clear}OpenAI Codex\nframe one\n`;
+    const frame2 = `${clear}OpenAI Codex\nframe two\n`;
     let state = bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1');
     state = appendTerminalStreamChunk(
       state,
@@ -354,8 +354,8 @@ describe('terminalSessionStream', () => {
 
   it('keeps ready-stream scrollback when a repaint chunk arrives after hydration', () => {
     const clear = '\u001b[2J\u001b[H';
-    const frame1 = `${clear}Claude Code\nframe one\n`;
-    const frame2 = `${clear}Claude Code\nframe two\n`;
+    const frame1 = `${clear}OpenAI Codex\nframe one\n`;
+    const frame2 = `${clear}OpenAI Codex\nframe two\n`;
     let state = presentTerminalSnapshot(
       bindLiveTerminalSessionStream(createTerminalSessionStreamState(), 'session-1'),
       {
@@ -514,7 +514,7 @@ describe('terminalSessionStream', () => {
 
   it('preserves a nonzero snapshot start position when presenting a ready stream', () => {
     const clear = '\u001b[2J\u001b[H';
-    const snapshotText = `${clear}Claude Code\nframe two\n`;
+    const snapshotText = `${clear}OpenAI Codex\nframe two\n`;
     const next = presentTerminalSnapshot(
       bindTerminalSessionStream(createTerminalSessionStreamState(), 'session-1'),
       {

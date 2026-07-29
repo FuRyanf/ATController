@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { LeftRail } from '../../src/components/LeftRail';
-import type { ThreadMetadata, Workspace } from '../../src/types';
+import type { RecentCodexThread, ThreadMetadata, Workspace } from '../../src/types';
 
 const createdAt = new Date('2026-01-01T00:00:00.000Z').toISOString();
 
@@ -23,18 +23,16 @@ function thread(overrides: Partial<ThreadMetadata> = {}): ThreadMetadata {
   return {
     id: 'thread-1',
     workspaceId: 'ws-1',
-    title: 'Copilot thread',
+    title: 'Codex thread',
     createdAt,
     updatedAt: createdAt,
     isArchived: false,
     lastRunStatus: 'Idle',
     lastRunStartedAt: null,
     lastRunEndedAt: null,
-    agentId: 'github-copilot',
     fullAccess: false,
     enabledSkills: [],
-    claudeSessionId: null,
-    copilotSessionId: null,
+    codexSessionId: null,
     ...overrides
   };
 }
@@ -47,9 +45,6 @@ function renderLeftRail(overrides: Partial<ComponentProps<typeof LeftRail>> = {}
     selectedWorkspaceId: 'ws-1',
     selectedThreadId: 'thread-1',
     threadSearch: '',
-    agentLabel: 'Copilot',
-    elevatedAccessLabel: 'Autopilot',
-    showImportSession: false,
     getThreadDisplayTimestampMs: () => Date.parse(createdAt),
     onOpenWorkspacePicker: vi.fn(),
     onOpenSettings: vi.fn(),
@@ -73,13 +68,13 @@ function renderLeftRail(overrides: Partial<ComponentProps<typeof LeftRail>> = {}
   return props;
 }
 
-describe('LeftRail provider labels', () => {
-  it('shows Copilot new-thread labels and hides Claude import actions', async () => {
+describe('LeftRail Codex actions', () => {
+  it('shows Codex new-thread labels and Codex import actions', async () => {
     const user = userEvent.setup();
     const props = renderLeftRail();
 
     const newThreadButton = screen.getByTestId('workspace-new-thread-ws-1');
-    expect(newThreadButton).toHaveTextContent('New Copilot thread');
+    expect(newThreadButton).toHaveTextContent('New Codex thread');
 
     await user.click(newThreadButton);
     await waitFor(() => {
@@ -87,30 +82,82 @@ describe('LeftRail provider labels', () => {
     });
 
     await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
-    expect(await screen.findByRole('button', { name: 'Copilot thread' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Copilot autopilot thread' }));
+    expect(await screen.findByRole('button', { name: 'Codex thread' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Codex full access thread' }));
 
     await waitFor(() => {
       expect(props.onNewThreadInWorkspace).toHaveBeenCalledWith('ws-1', { fullAccess: true });
     });
 
     await user.click(screen.getByRole('button', { name: 'Workspace actions' }));
-    expect(screen.queryByRole('button', { name: /Import session/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import Codex session…' })).toBeInTheDocument();
   });
 
-  it('enables resume actions from Copilot session IDs', async () => {
+  it('enables resume actions from Codex session IDs', async () => {
     const user = userEvent.setup();
-    const copilotThread = thread({ copilotSessionId: 'copilot-session-1' });
+    const codexThread = thread({ codexSessionId: 'codex-session-1' });
     const props = renderLeftRail({
-      threadsByWorkspace: { 'ws-1': [copilotThread] }
+      threadsByWorkspace: { 'ws-1': [codexThread] }
     });
 
-    const row = screen.getByText('Copilot thread').closest('[data-thread-id="thread-1"]');
+    const row = screen.getByText('Codex thread').closest('[data-thread-id="thread-1"]');
     expect(row).not.toBeNull();
 
     fireEvent.contextMenu(row as Element, { clientX: 100, clientY: 100 });
     await user.click(await screen.findByRole('button', { name: 'Copy resume command' }));
 
-    expect(props.onCopyResumeCommand).toHaveBeenCalledWith(copilotThread);
+    expect(props.onCopyResumeCommand).toHaveBeenCalledWith(codexThread);
+  });
+
+  it('orders recent Codex history with live threads and excludes archived storage', async () => {
+    const user = userEvent.setup();
+    const olderThread = thread({
+      id: 'older-thread',
+      title: 'Older stored thread',
+      codexSessionId: 'stored-session',
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    });
+    const archivedThread = thread({
+      id: 'archived-thread',
+      title: 'Archived stored thread',
+      codexSessionId: 'archived-session',
+      isArchived: true,
+      updatedAt: '2026-01-04T00:00:00.000Z'
+    });
+    const recentThread: RecentCodexThread = {
+      sessionId: 'unimported-recent-session',
+      workspaceId: workspace.id,
+      title: 'Recent Codex session',
+      createdAt: Date.parse('2026-01-02T00:00:00.000Z') / 1000,
+      updatedAt: Date.parse('2026-01-03T00:00:00.000Z') / 1000,
+      recencyAt: Date.parse('2026-01-03T12:00:00.000Z') / 1000
+    };
+    const onOpenRecentCodexThread = vi.fn(async () => undefined);
+    renderLeftRail({
+      threadsByWorkspace: {
+        'ws-1': [archivedThread, olderThread]
+      },
+      recentCodexThreadsByWorkspace: {
+        'ws-1': [recentThread]
+      },
+      getThreadDisplayTimestampMs: (candidate) => Date.parse(candidate.updatedAt),
+      onOpenRecentCodexThread
+    });
+
+    const recentRow = screen
+      .getByText('Recent Codex session')
+      .closest('[data-codex-session-id="unimported-recent-session"]');
+    const olderRow = screen
+      .getByText('Older stored thread')
+      .closest('[data-thread-id="older-thread"]');
+    expect(recentRow).not.toBeNull();
+    expect(olderRow).not.toBeNull();
+    expect(recentRow?.nextElementSibling).toBe(olderRow);
+    expect(screen.queryByText('Archived stored thread')).not.toBeInTheDocument();
+
+    await user.click(screen.getByTitle('Open Codex thread: Recent Codex session'));
+
+    expect(onOpenRecentCodexThread).toHaveBeenCalledTimes(1);
+    expect(onOpenRecentCodexThread).toHaveBeenCalledWith(workspace, recentThread);
   });
 });

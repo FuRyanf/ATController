@@ -42,7 +42,6 @@ const mocks = vi.hoisted(() => {
       {
         id: 'thread-a',
         workspaceId: 'ws-1',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [] as string[],
         createdAt: new Date(Date.now() - 10_000).toISOString(),
@@ -52,7 +51,7 @@ const mocks = vi.hoisted(() => {
         lastRunStatus: 'Idle' as const,
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: null,
+        codexSessionId: null,
         lastResumeAt: null,
         lastNewSessionAt: null
       }
@@ -61,7 +60,6 @@ const mocks = vi.hoisted(() => {
       {
         id: 'thread-b',
         workspaceId: 'ws-2',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [] as string[],
         createdAt: new Date(Date.now() - 5_000).toISOString(),
@@ -71,7 +69,7 @@ const mocks = vi.hoisted(() => {
         lastRunStatus: 'Idle' as const,
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: null,
+        codexSessionId: null,
         lastResumeAt: null,
         lastNewSessionAt: null
       }
@@ -80,7 +78,6 @@ const mocks = vi.hoisted(() => {
       {
         id: 'thread-ssh',
         workspaceId: 'ws-ssh',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [] as string[],
         createdAt: new Date(Date.now() - 2_000).toISOString(),
@@ -90,7 +87,7 @@ const mocks = vi.hoisted(() => {
         lastRunStatus: 'Idle' as const,
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: null,
+        codexSessionId: null,
         lastResumeAt: null,
         lastNewSessionAt: null
       }
@@ -151,7 +148,6 @@ const mocks = vi.hoisted(() => {
       };
     }),
     getGitInfo: vi.fn(getGitInfoImpl),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitListBranches: vi.fn(gitListBranchesImpl),
     gitWorkspaceStatus: vi.fn(async () => ({
       isDirty: false,
@@ -160,7 +156,6 @@ const mocks = vi.hoisted(() => {
       deletions: 0
     })),
     gitCheckoutBranch: vi.fn(async () => true),
-    gitCreateAndCheckoutBranch: vi.fn(async () => true),
     gitPullMasterForNewThread: vi.fn(async () => ({
       outcome: 'pulled' as const,
       message: 'Checked out master and pulled latest changes.'
@@ -179,24 +174,16 @@ const mocks = vi.hoisted(() => {
     setThreadFullAccess: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    clearThreadClaudeSession: vi.fn(async () => {
+    clearThreadCodexSession: vi.fn(async () => {
       throw new Error('not needed');
     }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    setThreadAgent: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -217,15 +204,12 @@ const mocks = vi.hoisted(() => {
       truncated: false
     })),
     terminalReadOutput: vi.fn(terminalReadOutputImpl),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
+    validateImportableCodexSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
@@ -259,8 +243,6 @@ const mocks = vi.hoisted(() => {
     reset,
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
     onTerminalReady: vi.fn(async () => () => undefined),
     emitTerminalSshAuthStatus: (event: {
@@ -308,8 +290,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,
@@ -677,7 +657,6 @@ describe('Workspace shell lifecycle', () => {
     const selectedThread = {
       id: 'thread-a',
       workspaceId: 'ws-1',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date(Date.now() - 10_000).toISOString(),
@@ -687,7 +666,7 @@ describe('Workspace shell lifecycle', () => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: '11111111-1111-4111-8111-111111111111',
+      codexSessionId: '11111111-1111-4111-8111-111111111111',
       lastResumeAt: null,
       lastNewSessionAt: null
     };
@@ -742,7 +721,7 @@ describe('Workspace shell lifecycle', () => {
       expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledTimes(1);
     });
     expect(mocks.api.gitCheckoutBranch).toHaveBeenCalledTimes(1);
-    expect(mocks.api.clearThreadClaudeSession).not.toHaveBeenCalled();
+    expect(mocks.api.clearThreadCodexSession).not.toHaveBeenCalled();
     expect(screen.queryByText(/Failed to resume session\. Start fresh\?/i)).not.toBeInTheDocument();
     expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws1');
     expect(screen.getByRole('button', { name: /^feature\/test$/i })).toBeInTheDocument();

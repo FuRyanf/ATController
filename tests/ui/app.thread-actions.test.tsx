@@ -16,7 +16,6 @@ const mocks = vi.hoisted(() => {
   const baseThread = {
     id: 'thread-1',
     workspaceId: 'ws-1',
-    agentId: 'claude-code',
     fullAccess: false,
     enabledSkills: [] as string[],
     createdAt: new Date().toISOString(),
@@ -26,9 +25,9 @@ const mocks = vi.hoisted(() => {
     lastRunStatus: 'Idle' as const,
     lastRunStartedAt: null,
     lastRunEndedAt: null,
-    claudeSessionId: '123e4567-e89b-12d3-a456-426614174000',
-    forkedFromClaudeSessionId: null,
-    pendingForkSourceClaudeSessionId: null,
+    codexSessionId: '123e4567-e89b-12d3-a456-426614174000',
+    forkedFromCodexSessionId: null,
+    pendingForkSourceCodexSessionId: null,
     pendingForkKnownChildSessionIds: [] as string[],
     pendingForkRequestedAt: null,
     pendingForkLaunchConsumed: false,
@@ -51,7 +50,6 @@ const mocks = vi.hoisted(() => {
       ahead: 0,
       behind: 0
     })),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitListBranches: vi.fn(async () => [{ name: 'main', isCurrent: true, lastCommitUnix: 1700000000 }]),
     gitWorkspaceStatus: vi.fn(async () => ({
       isDirty: false,
@@ -60,7 +58,6 @@ const mocks = vi.hoisted(() => {
       deletions: 0
     })),
     gitCheckoutBranch: vi.fn(async () => true),
-    gitCreateAndCheckoutBranch: vi.fn(async () => true),
     gitPullMasterForNewThread: vi.fn(async () => ({
       outcome: 'pulled' as const,
       message: 'Checked out master and pulled latest changes.'
@@ -68,54 +65,6 @@ const mocks = vi.hoisted(() => {
     listThreads: vi.fn(async () => threadState),
     createThread: vi.fn(async () => {
       throw new Error('not needed');
-    }),
-    createForkedThread: vi.fn(async (_workspaceId: string, sourceThreadId: string) => {
-      const source = threadState.find((thread) => thread.id === sourceThreadId) ?? threadState[0];
-      const forked = {
-        ...source,
-        id: `thread-${threadState.length + 1}`,
-        title: `${source.title} (Fork)`,
-        claudeSessionId: null,
-        forkedFromClaudeSessionId: source.claudeSessionId,
-        pendingForkSourceClaudeSessionId: source.claudeSessionId,
-        pendingForkKnownChildSessionIds: [],
-        pendingForkRequestedAt: new Date().toISOString(),
-        pendingForkLaunchConsumed: false,
-        lastResumeAt: null,
-        lastNewSessionAt: null,
-        updatedAt: new Date().toISOString(),
-        createdAt: new Date().toISOString()
-      };
-      threadState = [forked, ...threadState];
-      return forked;
-    }),
-    forkThreadFromUi: vi.fn(async (_workspaceId: string, sourceThreadId: string, sourceTitle: string, forkedTitle: string) => {
-      const source = threadState.find((thread) => thread.id === sourceThreadId) ?? threadState[0];
-      const updatedSource = {
-        ...source,
-        title: sourceTitle,
-        updatedAt: new Date().toISOString()
-      };
-      const forked = {
-        ...source,
-        id: `thread-${threadState.length + 1}`,
-        title: forkedTitle,
-        claudeSessionId: null,
-        forkedFromClaudeSessionId: source.claudeSessionId,
-        pendingForkSourceClaudeSessionId: source.claudeSessionId,
-        pendingForkKnownChildSessionIds: [],
-        pendingForkRequestedAt: new Date().toISOString(),
-        pendingForkLaunchConsumed: false,
-        lastResumeAt: null,
-        lastNewSessionAt: null,
-        updatedAt: new Date().toISOString(),
-        createdAt: new Date().toISOString()
-      };
-      threadState = [forked, updatedSource, ...threadState.filter((thread) => thread.id !== sourceThreadId)];
-      return {
-        sourceThread: updatedSource,
-        forkedThread: forked
-      };
     }),
     renameThread: vi.fn(async (_workspaceId: string, threadId: string, title: string) => {
       const updated = {
@@ -148,10 +97,10 @@ const mocks = vi.hoisted(() => {
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
       return updated;
     }),
-    clearThreadClaudeSession: vi.fn(async (_workspaceId: string, threadId: string) => {
+    clearThreadCodexSession: vi.fn(async (_workspaceId: string, threadId: string) => {
       const updated = {
         ...threadState.find((thread) => thread.id === threadId)!,
-        claudeSessionId: null,
+        codexSessionId: null,
         updatedAt: new Date().toISOString()
       };
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
@@ -160,7 +109,7 @@ const mocks = vi.hoisted(() => {
     clearThreadPendingFork: vi.fn(async (_workspaceId: string, threadId: string) => {
       const updated = {
         ...threadState.find((thread) => thread.id === threadId)!,
-        pendingForkSourceClaudeSessionId: null,
+        pendingForkSourceCodexSessionId: null,
         pendingForkKnownChildSessionIds: [] as string[],
         pendingForkRequestedAt: null,
         pendingForkLaunchConsumed: false,
@@ -170,10 +119,10 @@ const mocks = vi.hoisted(() => {
       return updated;
     }),
     commitPreparedThreadPendingFork: vi.fn(
-      async (_workspaceId: string, threadId: string, prepared: { sourceClaudeSessionId: string; knownChildSessionIds: string[]; requestedAt: string }) => {
+      async (_workspaceId: string, threadId: string, prepared: { sourceCodexSessionId: string; knownChildSessionIds: string[]; requestedAt: string }) => {
         const updated = {
           ...threadState.find((thread) => thread.id === threadId)!,
-          pendingForkSourceClaudeSessionId: prepared.sourceClaudeSessionId,
+          pendingForkSourceCodexSessionId: prepared.sourceCodexSessionId,
           pendingForkKnownChildSessionIds: prepared.knownChildSessionIds,
           pendingForkRequestedAt: prepared.requestedAt,
           pendingForkLaunchConsumed: true,
@@ -183,35 +132,20 @@ const mocks = vi.hoisted(() => {
         return updated;
       }
     ),
-    markThreadPendingForkConsumed: vi.fn(async (_workspaceId: string, threadId: string) => {
-      const updated = {
-        ...threadState.find((thread) => thread.id === threadId)!,
-        pendingForkLaunchConsumed: true,
-        updatedAt: new Date().toISOString()
-      };
-      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
-      return updated;
-    }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
     prepareThreadNativeFork: vi.fn(async () => ({
-      sourceClaudeSessionId: '123e4567-e89b-12d3-a456-426614174000',
+      sourceCodexSessionId: '123e4567-e89b-12d3-a456-426614174000',
       knownChildSessionIds: [],
       requestedAt: new Date().toISOString()
     })),
     resolveThreadForkCandidate: vi.fn(async () => 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'),
-    finalizeThreadNativeFork: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    setThreadAgent: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    setThreadClaudeSessionId: vi.fn(async (_workspaceId: string, threadId: string, claudeSessionId: string) => {
+    setThreadCodexSessionId: vi.fn(async (_workspaceId: string, threadId: string, codexSessionId: string) => {
       const updated = {
         ...threadState.find((thread) => thread.id === threadId)!,
-        claudeSessionId,
-        pendingForkSourceClaudeSessionId: null,
+        codexSessionId,
+        pendingForkSourceCodexSessionId: null,
         pendingForkKnownChildSessionIds: [],
         pendingForkRequestedAt: null,
         pendingForkLaunchConsumed: false,
@@ -220,16 +154,11 @@ const mocks = vi.hoisted(() => {
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
       return updated;
     }),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
-    latestClaudeSessionCwd: vi.fn(async () => null),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
+    latestCodexSessionCwd: vi.fn(async () => null),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -240,7 +169,7 @@ const mocks = vi.hoisted(() => {
     terminalStartSession: vi.fn(async (params: { threadId: string }) => {
       const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0] ?? { ...baseThread };
       const responseThread =
-        thread.pendingForkSourceClaudeSessionId
+        thread.pendingForkSourceCodexSessionId
           ? {
               ...thread,
               pendingForkLaunchConsumed: true
@@ -249,27 +178,24 @@ const mocks = vi.hoisted(() => {
       threadState = threadState.map((item) => (item.id === responseThread.id ? responseThread : item));
       return {
         sessionId: `session-${params.threadId}`,
-        sessionMode: thread.pendingForkSourceClaudeSessionId ? 'forked' : thread.claudeSessionId ? 'resumed' : 'new',
-        resumeSessionId: thread.pendingForkSourceClaudeSessionId ? null : thread.claudeSessionId,
+        sessionMode: thread.pendingForkSourceCodexSessionId ? 'forked' : thread.codexSessionId ? 'resumed' : 'new',
+        resumeSessionId: thread.pendingForkSourceCodexSessionId ? null : thread.codexSessionId,
         thread: responseThread
       };
     }),
     terminalWrite: vi.fn(async () => true),
-    terminalRebindClaudeSession: vi.fn(async () => true),
+    terminalRebindCodexSession: vi.fn(async () => true),
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
+    validateImportableCodexSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
@@ -280,8 +206,8 @@ const mocks = vi.hoisted(() => {
         (fn as { mockClear: () => void }).mockClear();
       }
     });
-    api.latestClaudeSessionCwd.mockReset();
-    api.latestClaudeSessionCwd.mockImplementation(async () => null);
+    api.latestCodexSessionCwd.mockReset();
+    api.latestCodexSessionCwd.mockImplementation(async () => null);
   };
 
   return {
@@ -289,8 +215,6 @@ const mocks = vi.hoisted(() => {
     reset,
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
     onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalSshAuthStatus: vi.fn(async () => () => undefined),
@@ -302,8 +226,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,
@@ -355,7 +277,7 @@ describe('Thread actions', () => {
     expect(screen.queryByRole('button', { name: 'Fork thread' })).toBeNull();
   });
 
-  it('copies normal resume commands without skip-permissions flag', async () => {
+  it('copies normal resume commands with workspace sandbox and on-request approvals', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -365,17 +287,17 @@ describe('Thread actions', () => {
 
     await waitFor(() => {
       expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith(
-        "claude --resume '123e4567-e89b-12d3-a456-426614174000'"
+        "codex resume '123e4567-e89b-12d3-a456-426614174000' --sandbox workspace-write --ask-for-approval on-request"
       );
     });
     expect(mocks.api.writeTextToClipboard).not.toHaveBeenCalledWith(
-      expect.stringContaining('--dangerously-skip-permissions')
+      expect.stringContaining('--dangerously-bypass-approvals-and-sandbox')
     );
   });
 
   it('opens normal resume commands in Terminal from the workspace folder', async () => {
     const user = userEvent.setup();
-    mocks.api.latestClaudeSessionCwd.mockResolvedValue('/tmp/workspace/subdir');
+    mocks.api.latestCodexSessionCwd.mockResolvedValue('/tmp/workspace/subdir');
     render(<App />);
 
     const row = await screen.findByRole('button', { name: /Rename me/i });
@@ -384,7 +306,7 @@ describe('Thread actions', () => {
 
     await waitFor(() => {
       expect(mocks.api.openTerminalCommand).toHaveBeenCalledWith(
-        "cd '/tmp/workspace/subdir' && claude --resume '123e4567-e89b-12d3-a456-426614174000'"
+        "cd '/tmp/workspace/subdir' && codex resume '123e4567-e89b-12d3-a456-426614174000' --sandbox workspace-write --ask-for-approval on-request"
       );
     });
   });
@@ -403,6 +325,27 @@ describe('Thread actions', () => {
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: /Rename me/i })).not.toBeInTheDocument();
     });
+  });
+
+  it('keeps a thread when its ATController deletion warning is canceled', async () => {
+    const user = userEvent.setup();
+    mocks.confirmDialog.mockResolvedValueOnce(false);
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Rename me/i });
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+
+    expect(mocks.confirmDialog).toHaveBeenCalledWith(
+      expect.stringContaining('The source Codex session history remains in Codex.'),
+      expect.objectContaining({
+        title: 'ATController',
+        kind: 'warning',
+        okLabel: 'Delete'
+      })
+    );
+    expect(mocks.api.deleteThread).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Rename me/i })).toBeInTheDocument();
   });
 
   it('does not resurrect a deleted thread while the follow-up refresh is still pending', async () => {
@@ -502,7 +445,6 @@ describe('Thread actions', () => {
       thread: {
         id: 'thread-1',
         workspaceId: 'ws-1',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [],
         createdAt: new Date().toISOString(),
@@ -512,7 +454,7 @@ describe('Thread actions', () => {
         lastRunStatus: 'Idle',
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: null,
+        codexSessionId: null,
         lastResumeAt: null,
         lastNewSessionAt: null
       }

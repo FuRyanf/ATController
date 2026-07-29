@@ -10,6 +10,11 @@ const e2eDir = path.join(artifactsDir, 'e2e');
 
 const steps = [
   {
+    id: 'branding-audit',
+    cmd: 'yarn',
+    args: ['audit:branding']
+  },
+  {
     id: 'frontend-build',
     cmd: 'yarn',
     args: ['build']
@@ -22,12 +27,12 @@ const steps = [
   {
     id: 'rust-tests',
     cmd: 'cargo',
-    args: ['test', '--manifest-path', 'src-tauri/Cargo.toml']
+    args: ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml']
   },
   {
-    id: 'claude-pty-smoke',
+    id: 'codex-pty-smoke',
     cmd: 'python3',
-    args: ['scripts/claude_pty_smoke.py']
+    args: ['scripts/codex_pty_smoke.py']
   }
 ];
 
@@ -157,9 +162,9 @@ function summarizeRootCause(stepId) {
       '- Check `/Users/you/project-root/src-tauri/src/storage.rs`, `/Users/you/project-root/src-tauri/src/git_tools.rs`, and `/Users/you/project-root/src-tauri/src/skills.rs`.'
     ];
   }
-  if (stepId.includes('claude-pty-smoke')) {
+  if (stepId.includes('codex-pty-smoke')) {
     return [
-      '- Claude interactive PTY behavior regressed.',
+      '- Codex interactive PTY behavior regressed.',
       '- Check `/Users/you/project-root/src-tauri/src/runner.rs` and `/Users/you/project-root/src/components/TerminalPanel.tsx` for key forwarding or streaming issues.'
     ];
   }

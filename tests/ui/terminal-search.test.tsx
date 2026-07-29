@@ -142,24 +142,32 @@ vi.mock('../../src/lib/api', () => ({
   }
 }));
 
-vi.mock('xterm', () => ({
-  Terminal: vi.fn((options: Record<string, unknown>) => mocks.createTerminal(options))
+vi.mock('@xterm/xterm', () => ({
+  Terminal: vi.fn(function Terminal(options: Record<string, unknown>) {
+    return mocks.createTerminal(options);
+  })
 }));
 
-vi.mock('xterm-addon-fit', () => ({
-  FitAddon: vi.fn(() => ({
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: vi.fn(function FitAddon() {
+    return {
     fit: mocks.fit,
     proposeDimensions: () => ({ cols: 120, rows: 32 }),
     dispose: vi.fn()
-  }))
+    };
+  })
 }));
 
-vi.mock('xterm-addon-web-links', () => ({
-  WebLinksAddon: vi.fn(() => ({}))
+vi.mock('@xterm/addon-web-links', () => ({
+  WebLinksAddon: vi.fn(function WebLinksAddon() {
+    return {};
+  })
 }));
 
-vi.mock('xterm-addon-search', () => ({
-  SearchAddon: vi.fn(() => mocks.createSearchAddon())
+vi.mock('@xterm/addon-search', () => ({
+  SearchAddon: vi.fn(function SearchAddon() {
+    return mocks.createSearchAddon();
+  })
 }));
 
 import { TerminalPanel } from '../../src/components/TerminalPanel';

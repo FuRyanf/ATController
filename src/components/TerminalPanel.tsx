@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState, type FocusEvent as ReactFocusEvent } from 'react';
 
-import 'xterm/css/xterm.css';
-import { FitAddon } from 'xterm-addon-fit';
-import { SearchAddon, type ISearchOptions } from 'xterm-addon-search';
-import { WebLinksAddon } from 'xterm-addon-web-links';
-import { Terminal } from 'xterm';
+import '@xterm/xterm/css/xterm.css';
+import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Terminal } from '@xterm/xterm';
 import { api } from '../lib/api';
 import { LiveTerminalPanel } from './LiveTerminalPanel';
 import {
@@ -668,7 +668,7 @@ function TerminalPanelComponent({
       try {
         newWindow.opener = null;
       } catch {
-        // no-op: some runtimes disallow setting opener
+        // no-op: some terminal environments disallow setting an opener
       }
     });
   }, []);
@@ -1552,7 +1552,7 @@ function TerminalPanelComponent({
       //
       // On a blank terminal we can safely force a one-column reflow nudge to
       // refresh xterm's internal measurements after fonts/container dimensions
-      // settle. Once a live Claude session has already painted content,
+      // settle. Once a live Codex session has already painted content,
       // however, synthetic local-only resizes can desynchronize a stateful TUI
       // from the PTY and smear/redraw the screen. In that case we only do an
       // exact fit and wait for real PTY-driven output to repaint.
@@ -1684,7 +1684,7 @@ function TerminalPanelComponent({
       // Synchronous best-effort fit (renderer may not have dims yet — that's OK).
       fitAndNotify();
       // Live stateful reattach prefers one authoritative redraw path over a burst
-      // of mount-time fit/reflow passes that can provoke multiple Claude repaints.
+      // of mount-time fit/reflow passes that can provoke multiple Codex repaints.
       if (!deferInitialReplay) {
         // Deferred fits use fitWithReflow to force correct metrics.
         window.requestAnimationFrame(() => {

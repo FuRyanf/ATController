@@ -20,7 +20,7 @@ Key pieces:
 - Single xterm writer:
   - `src/components/TerminalPanel.tsx`
 
-Exit durability is enforced in the backend: the wait thread now blocks on reader completion, syncs the output file, and persists `endPosition` into run `metadata.json` before emitting `terminal:exit`.
+Exit durability is enforced in the backend: the wait thread blocks on reader completion, attempts to sync the output file, and persists `endPosition` into run `metadata.json` before emitting `terminal:exit`. A read, write, sync, metadata, or thread-state persistence failure marks the run failed and is included in the exit event so the UI cannot report false success.
 
 ## 2. Enforced invariants
 
@@ -29,7 +29,7 @@ Exit durability is enforced in the backend: the wait thread now blocks on reader
 - Hydration and live replay are phase-separated: live chunks buffer during hydration and only apply after the snapshot boundary is known.
 - Chunks at or behind the session's known raw end are dropped before they can mutate attention state, working state, or terminal UI.
 - Stale sessions cannot mutate the selected thread terminal.
-- Exit is emitted only after reader completion and durable output sync.
+- Exit is emitted only after reader completion and the output-sync attempt; any persistence failure is explicit in run state and the exit event.
 - App-level unread/attention logic no longer treats replayed already-seen stream positions as fresh output.
 - Follow state remains explicit in the terminal UI; manual scroll pause exposes `Jump to latest` instead of relying on repair heuristics.
 
@@ -50,8 +50,7 @@ The remaining compatibility path in `TerminalPanel` is limited to static `conten
 
 ## 4. Remaining risks
 
-- Local turn-completion semantics still depend on Claude JSONL shape when semantic completion events are needed. Output durability is protected even if the JSONL watcher stops recognizing completion entries, but completion labeling could regress.
-- Some UI suites still emit React `act(...)` warnings. They are not failing, but they do indicate async test harness noise around state propagation.
+- Local turn-completion semantics depend on the Codex rollout JSONL shape when semantic completion events are needed. Output durability is protected even if the rollout watcher stops recognizing completion entries, but completion labeling could regress.
 - The production frontend bundle still triggers Vite's chunk-size warning; this is unrelated to terminal correctness.
 
 ## 5. Instructions for future maintainers
@@ -59,10 +58,10 @@ The remaining compatibility path in `TerminalPanel` is limited to static `conten
 - Do not add a second terminal content source in `App.tsx`. If terminal output changes, change the stream reducer and keep `TerminalPanel` as the only xterm writer.
 - Treat `startPosition` / `endPosition` as the source of truth for replay, dedupe, hydration boundaries, and unread suppression. Do not reintroduce text-diff heuristics.
 - If you change hydration behavior, preserve this order: bind session -> buffer live chunks -> read snapshot -> replay only chunks beyond snapshot `endPosition`.
-- If you change backend reader/exit behavior, preserve the guarantee that `terminal:exit` happens only after output sync and persisted `endPosition`.
+- If you change backend reader/exit behavior, preserve the guarantee that `terminal:exit` happens only after reader completion and persistence attempts, with any failure surfaced instead of silently reporting success.
 - Validate changes with both automated and live checks:
-  - `cargo test`
+  - `cargo test --locked`
   - `yarn build`
   - `yarn test:ui`
   - real app scenarios: long stream, thread switching during output, resize during stream, scroll-up follow pause + resume, refresh-display repair, delayed bursts, and immediate exit after final output
-- For live validation, a disposable `ATCONTROLLER_APP_SUPPORT_ROOT` plus a fake Claude CLI is the fastest way to stress the actual Tauri app without touching real user data.
+- For live validation, debug and test builds can use a disposable `ATCONTROLLER_APP_SUPPORT_ROOT` plus a fake Codex CLI to stress the actual Tauri app without touching real user data. Production builds ignore this override and always use the stable ATController application-support directory.

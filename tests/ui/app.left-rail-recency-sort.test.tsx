@@ -34,7 +34,6 @@ const mocks = vi.hoisted(() => {
     {
       id: 'thread-older',
       workspaceId: 'ws-1',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date(baseNow - 7_200_000).toISOString(),
@@ -44,14 +43,13 @@ const mocks = vi.hoisted(() => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     },
     {
       id: 'thread-newer',
       workspaceId: 'ws-1',
-      agentId: 'claude-code',
       fullAccess: false,
       enabledSkills: [] as string[],
       createdAt: new Date(baseNow - 3_600_000).toISOString(),
@@ -61,7 +59,7 @@ const mocks = vi.hoisted(() => {
       lastRunStatus: 'Idle' as const,
       lastRunStartedAt: null,
       lastRunEndedAt: null,
-      claudeSessionId: null,
+      codexSessionId: null,
       lastResumeAt: null,
       lastNewSessionAt: null
     }
@@ -94,7 +92,6 @@ const mocks = vi.hoisted(() => {
       ahead: 0,
       behind: 0
     })),
-    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
     gitListBranches: vi.fn(async () => [{ name: 'main', isCurrent: true, lastCommitUnix: 1700000000 }]),
     gitWorkspaceStatus: vi.fn(async () => ({
       isDirty: false,
@@ -103,7 +100,6 @@ const mocks = vi.hoisted(() => {
       deletions: 0
     })),
     gitCheckoutBranch: vi.fn(async () => true),
-    gitCreateAndCheckoutBranch: vi.fn(async () => true),
     gitPullMasterForNewThread: vi.fn(async () => ({
       outcome: 'pulled' as const,
       message: 'Checked out master and pulled latest changes.'
@@ -129,24 +125,16 @@ const mocks = vi.hoisted(() => {
     setThreadFullAccess: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    clearThreadClaudeSession: vi.fn(async () => {
+    clearThreadCodexSession: vi.fn(async () => {
       throw new Error('not needed');
     }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    setThreadAgent: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    appendUserMessage: vi.fn(async () => {
-      throw new Error('not needed');
-    }),
-    loadTranscript: vi.fn(async () => []),
     listSkills: vi.fn(async () => []),
-    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
-    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
-    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
-    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    getSettings: vi.fn(async () => ({ codexCliPath: '/usr/local/bin/codex' })),
+    saveSettings: vi.fn(async (settings: { codexCliPath: string | null }) => settings),
+    detectCodexCliPath: vi.fn(async () => '/usr/local/bin/codex'),
     checkForUpdate: vi.fn(async () => ({
       currentVersion: '0.1.12',
       latestVersion: '0.1.12',
@@ -166,15 +154,12 @@ const mocks = vi.hoisted(() => {
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
-    latestClaudeTurnCompletion: vi.fn(async () => null),
-    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
-    cancelRun: vi.fn(async () => true),
-    generateCommitMessage: vi.fn(async () => 'chore: update'),
+    latestCodexTurnCompletion: vi.fn(async () => null),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     setAppBadgeCount: vi.fn(async () => true),
-    validateImportableClaudeSession: vi.fn(async () => true),
+    validateImportableCodexSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
@@ -196,7 +181,7 @@ const mocks = vi.hoisted(() => {
     helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockClear();
     helperMocks.sendTaskCompletionAlertsTestNotification.mockClear();
     helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockResolvedValue(true);
-    api.latestClaudeTurnCompletion.mockResolvedValue(null);
+    api.latestCodexTurnCompletion.mockResolvedValue(null);
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -241,8 +226,6 @@ const mocks = vi.hoisted(() => {
     },
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
-    onRunStream: vi.fn(async () => () => undefined),
-    onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async (handler: (event: {
       sessionId: string;
       data: string;
@@ -300,8 +283,6 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../../src/lib/api', () => ({
   api: mocks.api,
-  onRunStream: mocks.onRunStream,
-  onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
   onTerminalSshAuthStatus: mocks.onTerminalSshAuthStatus,
@@ -373,7 +354,6 @@ describe('Left rail recency and sorting semantics', () => {
         {
           id: 'thread-older',
           workspaceId: 'ws-1',
-          agentId: 'claude-code',
           fullAccess: false,
           enabledSkills: [] as string[],
           createdAt: new Date(baseMs - 3_600_000).toISOString(),
@@ -383,14 +363,13 @@ describe('Left rail recency and sorting semantics', () => {
           lastRunStatus: 'Idle',
           lastRunStartedAt: null,
           lastRunEndedAt: new Date(baseMs - 3_600_000).toISOString(),
-          claudeSessionId: null,
+          codexSessionId: null,
           lastResumeAt: null,
           lastNewSessionAt: null
         },
         {
           id: 'thread-newer',
           workspaceId: 'ws-1',
-          agentId: 'claude-code',
           fullAccess: false,
           enabledSkills: [] as string[],
           createdAt: new Date(baseMs - 30_000).toISOString(),
@@ -400,7 +379,7 @@ describe('Left rail recency and sorting semantics', () => {
           lastRunStatus: 'Idle',
           lastRunStartedAt: null,
           lastRunEndedAt: new Date(baseMs - 30_000).toISOString(),
-          claudeSessionId: null,
+          codexSessionId: null,
           lastResumeAt: null,
           lastNewSessionAt: null
         }
@@ -524,7 +503,6 @@ describe('Left rail recency and sorting semantics', () => {
       const next = {
         id: 'thread-new',
         workspaceId: 'ws-1',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [] as string[],
         title: 'Newest thread',
@@ -532,7 +510,7 @@ describe('Left rail recency and sorting semantics', () => {
         lastRunStatus: 'Idle' as const,
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: null,
+        codexSessionId: null,
         lastResumeAt: null,
         lastNewSessionAt: null,
         createdAt: new Date().toISOString(),
@@ -556,7 +534,7 @@ describe('Left rail recency and sorting semantics', () => {
     await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
 
     await waitFor(() => {
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1');
       expect(getThreadOrder()).toEqual(['Newest thread', 'Older thread', 'Newer thread']);
     });
   });
@@ -620,8 +598,8 @@ describe('Left rail recency and sorting semantics', () => {
 
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
-      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce({
-        claudeSessionId: 'resume-thread-newer',
+      mocks.api.latestCodexTurnCompletion.mockResolvedValueOnce({
+        codexSessionId: 'resume-thread-newer',
         completionIndex: 1,
         completedAtMs: 3_000,
         status: 'Succeeded',
@@ -634,7 +612,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'resume-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'resume-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -645,7 +623,7 @@ describe('Left rail recency and sorting semantics', () => {
         expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
       });
       await waitFor(() => {
-        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
+        expect(mocks.api.latestCodexTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
       });
 
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
@@ -699,7 +677,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'resume-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'resume-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -710,7 +688,7 @@ describe('Left rail recency and sorting semantics', () => {
         expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
       });
       await waitFor(() => {
-        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
+        expect(mocks.api.latestCodexTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
       });
 
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
@@ -734,7 +712,7 @@ describe('Left rail recency and sorting semantics', () => {
         reattachTurnCompletion: null,
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'resume-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'resume-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -752,7 +730,7 @@ describe('Left rail recency and sorting semantics', () => {
       const [firstCall] = mocks.api.terminalStartSession.mock.calls;
       expect(firstCall?.[0]).not.toHaveProperty('reattachCompletionAfterMs');
       await waitFor(() => {
-        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
+        expect(mocks.api.latestCodexTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-thread-newer');
       });
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     } finally {
@@ -773,7 +751,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'jsonl-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -829,7 +807,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('clears a structured working dot when the terminal redraws an idle Claude prompt without a completion event', async () => {
+  it('clears a structured working dot when the terminal redraws an idle Codex prompt without a completion event', async () => {
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
       mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
@@ -839,7 +817,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'jsonl-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -882,7 +860,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'jsonl-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -952,7 +930,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'jsonl-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -1069,7 +1047,7 @@ describe('Left rail recency and sorting semantics', () => {
       }
     });
     mocks.api.getSettings.mockResolvedValueOnce({
-      claudeCliPath: '/usr/local/bin/claude',
+      codexCliPath: '/usr/local/bin/codex',
       taskCompletionAlerts: true
     });
 
@@ -1092,8 +1070,8 @@ describe('Left rail recency and sorting semantics', () => {
 
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
-      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce({
-        claudeSessionId: 'resume-thread-newer',
+      mocks.api.latestCodexTurnCompletion.mockResolvedValueOnce({
+        codexSessionId: 'resume-thread-newer',
         completionIndex: 1,
         completedAtMs: 3_000,
         status: 'Succeeded',
@@ -1110,7 +1088,7 @@ describe('Left rail recency and sorting semantics', () => {
           turnCompletionMode: 'idle' as const,
           thread:
             params.threadId === 'thread-newer'
-              ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+              ? { ...mocks.getThread(params.threadId), codexSessionId: 'jsonl-thread-newer' }
               : mocks.getThread(params.threadId)
         });
       });
@@ -1189,7 +1167,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'jsonl-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -1236,7 +1214,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('resets JSONL unread attention when a thread binds to a different Claude session id', async () => {
+  it('resets JSONL unread attention when a thread binds to a different Codex session id', async () => {
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
     try {
       mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
@@ -1246,7 +1224,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread: {
           ...mocks.getThread(params.threadId),
-          claudeSessionId: params.threadId === 'thread-newer' ? 'resume-old' : null
+          codexSessionId: params.threadId === 'thread-newer' ? 'resume-old' : null
         }
       }));
 
@@ -1275,17 +1253,17 @@ describe('Left rail recency and sorting semantics', () => {
         expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
       });
 
-      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce(null);
+      mocks.api.latestCodexTurnCompletion.mockResolvedValueOnce(null);
 
       act(() => {
         mocks.emitThreadUpdated({
           ...mocks.getThread('thread-newer'),
-          claudeSessionId: 'resume-new'
+          codexSessionId: 'resume-new'
         });
       });
 
       await waitFor(() => {
-        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-new');
+        expect(mocks.api.latestCodexTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'resume-new');
         expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
       });
     } finally {
@@ -1295,7 +1273,7 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('reconciles unread JSONL attention for existing local Claude threads after reload without startup spam', async () => {
+  it('reconciles unread JSONL attention for existing local Codex threads after reload without startup spam', async () => {
     window.localStorage.setItem('atcontroller:selected-thread:ws-1', 'thread-older');
     const originalListThreads = mocks.api.listThreads.getMockImplementation();
     try {
@@ -1303,11 +1281,11 @@ describe('Left rail recency and sorting semantics', () => {
         mocks.getThread('thread-older'),
         {
           ...mocks.getThread('thread-newer'),
-          claudeSessionId: 'persisted-jsonl-newer'
+          codexSessionId: 'persisted-jsonl-newer'
         }
       ]);
-      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce({
-        claudeSessionId: 'persisted-jsonl-newer',
+      mocks.api.latestCodexTurnCompletion.mockResolvedValueOnce({
+        codexSessionId: 'persisted-jsonl-newer',
         completionIndex: 1,
         completedAtMs: 3_000,
         status: 'Succeeded',
@@ -1318,7 +1296,7 @@ describe('Left rail recency and sorting semantics', () => {
 
       await screen.findByRole('button', { name: /Older thread/i });
       await waitFor(() => {
-        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'persisted-jsonl-newer');
+        expect(mocks.api.latestCodexTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'persisted-jsonl-newer');
       });
       await waitFor(() => {
         expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
@@ -1363,11 +1341,11 @@ describe('Left rail recency and sorting semantics', () => {
         mocks.getThread('thread-older'),
         {
           ...mocks.getThread('thread-newer'),
-          claudeSessionId: 'persisted-jsonl-newer'
+          codexSessionId: 'persisted-jsonl-newer'
         }
       ]);
-      mocks.api.latestClaudeTurnCompletion.mockResolvedValueOnce({
-        claudeSessionId: 'persisted-jsonl-newer',
+      mocks.api.latestCodexTurnCompletion.mockResolvedValueOnce({
+        codexSessionId: 'persisted-jsonl-newer',
         completionIndex: 1,
         completedAtMs: 3_000,
         status: 'Succeeded',
@@ -1378,7 +1356,7 @@ describe('Left rail recency and sorting semantics', () => {
 
       await screen.findByRole('button', { name: /Older thread/i });
       await waitFor(() => {
-        expect(mocks.api.latestClaudeTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'persisted-jsonl-newer');
+        expect(mocks.api.latestCodexTurnCompletion).toHaveBeenCalledWith('/tmp/workspace', 'persisted-jsonl-newer');
       });
       await waitFor(() => {
         expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
@@ -1391,7 +1369,7 @@ describe('Left rail recency and sorting semantics', () => {
 
       expect(JSON.parse(window.localStorage.getItem(THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY) ?? '{}')).toMatchObject({
         'thread-newer': {
-          claudeSessionId: 'persisted-jsonl-newer',
+          codexSessionId: 'persisted-jsonl-newer',
           latestCompletionIndex: 1,
           lastSeenCompletionIndex: 1,
           lastNotifiedCompletionIndex: 1,
@@ -1407,10 +1385,10 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
-  it('clears stale persisted JSONL unread attention when a thread no longer has a Claude session id', async () => {
+  it('clears stale persisted JSONL unread attention when a thread no longer has a Codex session id', async () => {
     seedThreadJsonlCompletionAttentionState({
       'thread-newer': {
-        claudeSessionId: 'stale-jsonl-session',
+        codexSessionId: 'stale-jsonl-session',
         latestCompletionIndex: 1,
         lastSeenCompletionIndex: 0,
         lastNotifiedCompletionIndex: 0,
@@ -1434,9 +1412,9 @@ describe('Left rail recency and sorting semantics', () => {
     expect(window.localStorage.getItem(THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY)).toBeNull();
   });
 
-  it('treats local Claude completions as JSONL attention even if turnCompletionMode metadata is missing', async () => {
+  it('treats local Codex completions as JSONL attention even if turnCompletionMode metadata is missing', async () => {
     mocks.api.getSettings.mockResolvedValueOnce({
-      claudeCliPath: '/usr/local/bin/claude',
+      codexCliPath: '/usr/local/bin/codex',
       taskCompletionAlerts: true
     });
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
@@ -1447,7 +1425,7 @@ describe('Left rail recency and sorting semantics', () => {
         resumeSessionId: null,
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'jsonl-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -1571,7 +1549,7 @@ describe('Left rail recency and sorting semantics', () => {
         turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
         thread:
           params.threadId === 'thread-newer'
-            ? { ...mocks.getThread(params.threadId), claudeSessionId: 'jsonl-thread-newer' }
+            ? { ...mocks.getThread(params.threadId), codexSessionId: 'jsonl-thread-newer' }
             : mocks.getThread(params.threadId)
       }));
 
@@ -1841,7 +1819,7 @@ describe('Left rail recency and sorting semantics', () => {
     try {
       window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
       mocks.api.getSettings.mockResolvedValueOnce({
-        claudeCliPath: '/usr/local/bin/claude',
+        codexCliPath: '/usr/local/bin/codex',
         taskCompletionAlerts: true
       });
 
@@ -1918,7 +1896,6 @@ describe('Left rail recency and sorting semantics', () => {
       mocks.prependThread({
         id: 'thread-oldest',
         workspaceId: 'ws-1',
-        agentId: 'claude-code',
         fullAccess: false,
         enabledSkills: [],
         createdAt: new Date(baseMs - 10_800_000).toISOString(),
@@ -1928,7 +1905,7 @@ describe('Left rail recency and sorting semantics', () => {
         lastRunStatus: 'Idle',
         lastRunStartedAt: null,
         lastRunEndedAt: null,
-        claudeSessionId: null,
+        codexSessionId: null,
         lastResumeAt: null,
         lastNewSessionAt: null
       });
@@ -1977,7 +1954,7 @@ describe('Left rail recency and sorting semantics', () => {
     try {
       window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
       mocks.api.getSettings.mockResolvedValueOnce({
-        claudeCliPath: '/usr/local/bin/claude',
+        codexCliPath: '/usr/local/bin/codex',
         taskCompletionAlerts: true
       });
 
@@ -2114,7 +2091,7 @@ describe('Left rail recency and sorting semantics', () => {
     try {
       window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
       mocks.api.getSettings.mockResolvedValueOnce({
-        claudeCliPath: '/usr/local/bin/claude',
+        codexCliPath: '/usr/local/bin/codex',
         taskCompletionAlerts: true
       });
 
@@ -2151,7 +2128,7 @@ describe('Left rail recency and sorting semantics', () => {
     try {
       window.localStorage.setItem('atcontroller:task-completion-alerts-bootstrap-v1', '1');
       mocks.api.getSettings.mockResolvedValueOnce({
-        claudeCliPath: '/usr/local/bin/claude',
+        codexCliPath: '/usr/local/bin/codex',
         taskCompletionAlerts: true
       });
 
