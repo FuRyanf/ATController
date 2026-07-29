@@ -1,4 +1,7 @@
 import type {
+  BrowserAction,
+  BrowserDiagnostics,
+  BrowserSessionMetadata,
   CodexApprovalRequest,
   CodexThread,
   CodexThreadSession,
@@ -8,6 +11,7 @@ import type {
   Workspace
 } from '../types';
 import { AppIcon } from './AppIcon';
+import { BrowserMenu } from './BrowserMenu';
 
 interface ThreadHeaderProps {
   thread: CodexThread;
@@ -18,11 +22,19 @@ interface ThreadHeaderProps {
   approvals: CodexApprovalRequest[];
   disconnected: boolean;
   inspectorOpen: boolean;
+  browserSession?: BrowserSessionMetadata;
+  browserDiagnostics: BrowserDiagnostics | null;
+  browserBusy: boolean;
   onRename: () => void;
   onSelectProject: () => void;
   onOpenMenu: (x: number, y: number) => void;
   onToggleInspector: () => void;
   onOpenTerminal: () => void;
+  onBrowserAction: (action: BrowserAction) => void;
+  onOpenBrowserPage: () => void;
+  onCopyBrowserUrl: () => void;
+  onOpenBrowserSetup: () => void;
+  onOpenBrowserDiagnostics: () => void;
 }
 
 function permissionLabel(value?: PermissionMode): string {
@@ -46,11 +58,19 @@ export function ThreadHeader({
   approvals,
   disconnected,
   inspectorOpen,
+  browserSession,
+  browserDiagnostics,
+  browserBusy,
   onRename,
   onSelectProject,
   onOpenMenu,
   onToggleInspector,
-  onOpenTerminal
+  onOpenTerminal,
+  onBrowserAction,
+  onOpenBrowserPage,
+  onCopyBrowserUrl,
+  onOpenBrowserSetup,
+  onOpenBrowserDiagnostics
 }: ThreadHeaderProps) {
   const lastTurn = thread.turns.length ? thread.turns[thread.turns.length - 1] : undefined;
   const status = thread.archived
@@ -110,6 +130,16 @@ export function ThreadHeader({
         </span>
       </div>
       <div className="thread-header-actions">
+        <BrowserMenu
+          session={browserSession}
+          diagnostics={browserDiagnostics}
+          busy={browserBusy}
+          onAction={onBrowserAction}
+          onOpenCurrentPage={onOpenBrowserPage}
+          onCopyCurrentUrl={onCopyBrowserUrl}
+          onOpenSetup={onOpenBrowserSetup}
+          onOpenDiagnostics={onOpenBrowserDiagnostics}
+        />
         <button
           type="button"
           className="icon-button"

@@ -1,6 +1,6 @@
 pub mod diagnostics;
-mod process;
-mod protocol;
+pub(crate) mod process;
+pub(crate) mod protocol;
 mod resume;
 mod rpc;
 mod threads;
@@ -15,6 +15,8 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
+
+use crate::browser::BrowserRuntime;
 
 pub use diagnostics::{CodexDiagnostics, ConnectionState};
 pub use protocol::{
@@ -32,6 +34,7 @@ pub const EVENT_RUNTIME_STATE: &str = "codex:runtime-state";
 
 pub struct CodexRuntime {
     app: OnceLock<AppHandle>,
+    browser: OnceLock<BrowserRuntime>,
     connection: Mutex<Option<Arc<RpcConnection>>>,
     start_lock: Mutex<()>,
     diagnostics: Arc<diagnostics::DiagnosticsState>,
@@ -45,6 +48,7 @@ impl Default for CodexRuntime {
     fn default() -> Self {
         Self {
             app: OnceLock::new(),
+            browser: OnceLock::new(),
             connection: Mutex::new(None),
             start_lock: Mutex::new(()),
             diagnostics: Arc::new(diagnostics::DiagnosticsState::default()),
@@ -59,6 +63,10 @@ impl Default for CodexRuntime {
 impl CodexRuntime {
     pub fn attach(&self, app: AppHandle) {
         let _ = self.app.set(app);
+    }
+
+    pub fn attach_browser(&self, browser: BrowserRuntime) {
+        let _ = self.browser.set(browser);
     }
 
     pub fn diagnostics(&self) -> CodexDiagnostics {
@@ -216,6 +224,9 @@ impl CodexRuntime {
 
     pub async fn restart(self: &Arc<Self>) -> Result<CodexDiagnostics> {
         self.set_state(ConnectionState::Restarting);
+        if let Some(browser) = self.browser.get() {
+            browser.mark_disconnected();
+        }
         self.generation.fetch_add(1, Ordering::AcqRel);
         if let Some(connection) = self.connection.lock().await.take() {
             connection.shutdown().await;
@@ -230,6 +241,9 @@ impl CodexRuntime {
             return;
         }
         self.set_state(ConnectionState::Stopping);
+        if let Some(browser) = self.browser.get() {
+            browser.mark_disconnected();
+        }
         self.generation.fetch_add(1, Ordering::AcqRel);
         if let Some(connection) = self.connection.lock().await.take() {
             connection.shutdown().await;
@@ -262,6 +276,68 @@ impl CodexRuntime {
             "modelCount": models.get("data").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
             "signedIn": account.get("account").is_some_and(|value| !value.is_null())
         }))
+    }
+
+    pub async fn reload_mcp_servers(self: &Arc<Self>) -> Result<()> {
+        self.request(
+            "config/mcpServer/reload",
+            Value::Null,
+            RequestOptions::idempotent(Duration::from_secs(30)),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mcp_server_status(self: &Arc<Self>, thread_id: Option<String>) -> Result<Value> {
+        self.request(
+            "mcpServerStatus/list",
+            json!({
+                "limit": 100,
+                "detail": "full",
+                "threadId": thread_id
+            }),
+            RequestOptions::idempotent(Duration::from_secs(90)),
+        )
+        .await
+    }
+
+    pub async fn call_mcp_tool(
+        self: &Arc<Self>,
+        thread_id: &str,
+        server: &str,
+        tool: &str,
+        arguments: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let response = self
+            .request(
+                "mcpServer/tool/call",
+                json!({
+                    "threadId": thread_id,
+                    "server": server,
+                    "tool": tool,
+                    "arguments": arguments
+                }),
+                RequestOptions {
+                    timeout,
+                    idempotent: false,
+                },
+            )
+            .await?;
+        if response
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            let redacted = protocol::redact_browser_value(
+                response.get("content").unwrap_or(&Value::Null),
+                None,
+            )
+            .to_string();
+            let summary = redacted.chars().take(1_200).collect::<String>();
+            return Err(anyhow!("MCP tool {server}/{tool} failed: {summary}"));
+        }
+        Ok(response)
     }
 
     pub async fn regenerate_protocol_snapshot(self: &Arc<Self>) -> Result<String> {
@@ -384,6 +460,9 @@ impl CodexRuntime {
                 event
             }
         };
+        if let Some(browser) = self.browser.get() {
+            browser.observe_codex_event(&event);
+        }
         if let Some(app) = self.app.get() {
             if let Err(error) = app.emit(EVENT_CODEX, &event) {
                 self.diagnostics
@@ -438,6 +517,9 @@ impl CodexRuntime {
             return;
         }
         self.diagnostics.note_exit(exit.clone());
+        if let Some(browser) = self.browser.get() {
+            browser.mark_disconnected();
+        }
         self.connection.lock().await.take();
         if self.shutting_down.load(Ordering::Acquire) {
             self.set_state(ConnectionState::Stopped);
@@ -476,15 +558,59 @@ fn rpc_error(error: RpcError) -> anyhow::Error {
 
 #[cfg(test)]
 mod contract_tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
 
     use serde_json::{json, Value};
 
+    use crate::browser::{
+        screenshot_reference_from_result, LocalTestServer, PLAYWRIGHT_SERVER_NAME,
+    };
+    use crate::storage;
+
     use super::diagnostics::DiagnosticsState;
-    use super::protocol::ServerRequestResponse;
+    use super::protocol::{normalize_notification, ServerRequestResponse};
     use super::rpc::{RequestOptions, RpcConnection, WireEvent};
     use super::{process, ConnectionState};
+
+    struct ContractDirectory(PathBuf);
+
+    impl Drop for ContractDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn contract_mcp_call(
+        connection: &Arc<RpcConnection>,
+        thread_id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Value {
+        let response = connection
+            .request(
+                "mcpServer/tool/call",
+                json!({
+                    "threadId": thread_id,
+                    "server": PLAYWRIGHT_SERVER_NAME,
+                    "tool": tool,
+                    "arguments": arguments
+                }),
+                RequestOptions {
+                    timeout: Duration::from_secs(150),
+                    idempotent: false,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{tool} RPC failed: {error:?}"));
+        assert_ne!(
+            response.get("isError").and_then(Value::as_bool),
+            Some(true),
+            "{tool} returned an MCP error: {response}"
+        );
+        response
+    }
 
     #[tokio::test]
     #[ignore = "requires the locally installed, authenticated Codex app-server"]
@@ -721,6 +847,452 @@ mod contract_tests {
         assert!(
             !process::signal_process_group(pid, 0),
             "app-server process group must not remain after shutdown"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires configured Playwright MCP and a headed browser"]
+    async fn real_playwright_browser_contract() {
+        if std::env::var_os("ATCONTROLLER_RUN_BROWSER_CONTRACT").is_none() {
+            eprintln!("skipped: set ATCONTROLLER_RUN_BROWSER_CONTRACT=1");
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ATController browser contract with spaces {}",
+            uuid::Uuid::new_v4()
+        ));
+        let _root_cleanup = ContractDirectory(root.clone());
+        std::fs::create_dir_all(&root).expect("temporary browser workspace should exist");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&root)
+                .status()
+                .is_ok_and(|status| status.success()),
+            "temporary browser Git repository should initialize"
+        );
+        let Ok(spec) = process::discover().await else {
+            eprintln!("skipped: an app-server-capable Codex CLI is unavailable");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        };
+        let diagnostics = Arc::new(DiagnosticsState::default());
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<WireEvent>(512);
+        let connection = RpcConnection::spawn(
+            &spec,
+            diagnostics,
+            Arc::new(move |event| {
+                let _ = events_tx.try_send(event);
+            }),
+            Arc::new(|exit| eprintln!("browser contract app-server exit: {}", exit.summary)),
+        )
+        .await
+        .expect("browser contract app-server should initialize");
+        let pid = connection.pid();
+        let idempotent = RequestOptions::idempotent(Duration::from_secs(150));
+        let account = connection
+            .request("account/read", json!({"refreshToken":false}), idempotent)
+            .await
+            .expect("account/read should succeed");
+        if account.get("account").is_none_or(Value::is_null) {
+            eprintln!("skipped: Codex authentication is required");
+            connection.shutdown().await;
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        let mut thread_ids = Vec::new();
+        for suffix in ["one", "two"] {
+            let started = connection
+                .request(
+                    "thread/start",
+                    json!({
+                        "cwd": root.to_string_lossy(),
+                        "approvalPolicy": "never",
+                        "sandbox": "danger-full-access",
+                        "serviceName": format!("ATController-browser-contract-{suffix}"),
+                        "threadSource": "atcontroller"
+                    }),
+                    RequestOptions {
+                        timeout: Duration::from_secs(90),
+                        idempotent: false,
+                    },
+                )
+                .await
+                .expect("temporary browser thread should start");
+            thread_ids.push(
+                started["thread"]["id"]
+                    .as_str()
+                    .expect("thread id")
+                    .to_string(),
+            );
+        }
+
+        let status = connection
+            .request(
+                "mcpServerStatus/list",
+                json!({
+                    "limit": 100,
+                    "detail": "full",
+                    "threadId": thread_ids[0]
+                }),
+                idempotent,
+            )
+            .await
+            .expect("MCP server status should load");
+        let playwright = status["data"].as_array().and_then(|servers| {
+            servers
+                .iter()
+                .find(|server| server["name"] == PLAYWRIGHT_SERVER_NAME)
+        });
+        let Some(playwright) = playwright else {
+            eprintln!("skipped: {PLAYWRIGHT_SERVER_NAME} is not configured");
+            connection.shutdown().await;
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        };
+        let tools = playwright["tools"]
+            .as_object()
+            .expect("Playwright tool inventory should be available");
+        for required in [
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+            "browser_select_option",
+            "browser_take_screenshot",
+            "browser_console_messages",
+            "browser_network_requests",
+            "browser_close",
+        ] {
+            assert!(
+                tools.contains_key(required),
+                "missing Playwright tool {required}"
+            );
+        }
+
+        let first_server = LocalTestServer::start()
+            .await
+            .expect("first browser fixture should start");
+        let second_server = LocalTestServer::start()
+            .await
+            .expect("second browser fixture should start");
+        contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_navigate",
+            json!({"url": first_server.url.clone()}),
+        )
+        .await;
+        contract_mcp_call(
+            &connection,
+            &thread_ids[1],
+            "browser_navigate",
+            json!({"url": second_server.url.clone()}),
+        )
+        .await;
+
+        let first_snapshot = contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_snapshot",
+            json!({"depth": 6}),
+        )
+        .await
+        .to_string();
+        let second_snapshot = contract_mcp_call(
+            &connection,
+            &thread_ids[1],
+            "browser_snapshot",
+            json!({"depth": 6}),
+        )
+        .await
+        .to_string();
+        assert!(first_snapshot.contains(&first_server.url));
+        assert!(!first_snapshot.contains(&second_server.url));
+        assert!(second_snapshot.contains(&second_server.url));
+        assert!(!second_snapshot.contains(&first_server.url));
+
+        contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_type",
+            json!({
+                "element": "Project name",
+                "target": "#project-name",
+                "text": "ATController",
+                "slowly": false
+            }),
+        )
+        .await;
+        contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_select_option",
+            json!({
+                "element": "Environment",
+                "target": "#environment",
+                "values": ["staging"]
+            }),
+        )
+        .await;
+        contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_click",
+            json!({"element": "Ready", "target": "#ready"}),
+        )
+        .await;
+        contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_wait_for",
+            json!({"time": 0.5}),
+        )
+        .await;
+
+        let console = contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_console_messages",
+            json!({"level": "error", "all": true}),
+        )
+        .await
+        .to_string();
+        assert!(console.contains("intentional browser test error"));
+        let network = contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_network_requests",
+            json!({"static": false}),
+        )
+        .await
+        .to_string();
+        assert!(network.contains("500"));
+
+        let screenshot_result = contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_take_screenshot",
+            json!({
+                "type": "png",
+                "fullPage": false,
+                "scale": "css"
+            }),
+        )
+        .await;
+        let screenshot_reference = screenshot_reference_from_result(&screenshot_result)
+            .expect("screenshot result should identify the managed cache file");
+        let screenshot = storage::ensure_base_dirs()
+            .expect("ATController data root")
+            .join("browser-cache/playwright")
+            .join(&screenshot_reference);
+        assert!(
+            screenshot.is_file(),
+            "Playwright screenshot should be persisted"
+        );
+
+        while events_rx.try_recv().is_ok() {}
+        let browser_turn = connection
+            .request(
+                "turn/start",
+                json!({
+                    "threadId": thread_ids[0],
+                    "input": [{
+                        "type": "text",
+                        "text": format!(
+                            "Use the configured {PLAYWRIGHT_SERVER_NAME} MCP browser tools for \
+                             every browser operation in this task. Do not use shell commands, \
+                             curl, or assistant prose as a substitute. Navigate to {}, inspect \
+                             the page, enter `Codex structured browser turn` in Project name, \
+                             select `staging` for Environment, click Ready, inspect console \
+                             errors, inspect network requests, and take a PNG screenshot without \
+                             specifying a filename. Then briefly report what you observed.",
+                            first_server.url
+                        ),
+                        "text_elements": []
+                    }],
+                    "cwd": root.to_string_lossy(),
+                    "approvalPolicy": "never",
+                    "sandboxPolicy": {"type": "dangerFullAccess"}
+                }),
+                RequestOptions {
+                    timeout: Duration::from_secs(45),
+                    idempotent: false,
+                },
+            )
+            .await
+            .expect("Codex browser turn should start");
+        let browser_turn_id = browser_turn["turn"]["id"]
+            .as_str()
+            .expect("browser turn identifier")
+            .to_string();
+        let mut browser_tools = Vec::new();
+        let mut normalized_activities = Vec::new();
+        let completed = tokio::time::timeout(Duration::from_secs(300), async {
+            let mut sequence = 0_u64;
+            while let Some(event) = events_rx.recv().await {
+                let WireEvent::Notification { method, params } = event else {
+                    continue;
+                };
+                if params["threadId"] != thread_ids[0] {
+                    continue;
+                }
+                sequence += 1;
+                let normalized = normalize_notification(sequence, &method, &params);
+                if let Some(item) = normalized.item {
+                    if item.tool_server.as_deref() == Some(PLAYWRIGHT_SERVER_NAME) {
+                        if let Some(tool) = item.tool_name {
+                            if !browser_tools.contains(&tool) {
+                                browser_tools.push(tool);
+                            }
+                        }
+                        if let Some(activity) = item.browser_activity {
+                            normalized_activities.push(activity);
+                        }
+                    }
+                }
+                if method == "turn/completed" && params["turn"]["id"] == browser_turn_id {
+                    return params;
+                }
+            }
+            panic!("Codex event channel closed before the browser turn completed");
+        })
+        .await
+        .expect("real Codex browser turn should complete");
+        assert_eq!(
+            completed["turn"]["status"], "completed",
+            "browser turn failed: {completed}"
+        );
+        for required in [
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_console_messages",
+            "browser_network_requests",
+            "browser_take_screenshot",
+        ] {
+            assert!(
+                browser_tools.iter().any(|tool| tool == required),
+                "real Codex turn did not emit structured {required}; observed {browser_tools:?}"
+            );
+        }
+        assert!(
+            browser_tools
+                .iter()
+                .any(|tool| tool == "browser_type" || tool == "browser_fill_form"),
+            "real Codex turn did not emit a structured form input call: {browser_tools:?}"
+        );
+        assert!(
+            browser_tools.iter().any(|tool| tool == "browser_click"),
+            "real Codex turn did not emit a structured click call: {browser_tools:?}"
+        );
+        assert!(
+            normalized_activities.iter().all(|activity| {
+                activity.thread_id.as_deref() == Some(thread_ids[0].as_str())
+                    && activity.turn_id.as_deref() == Some(browser_turn_id.as_str())
+            }),
+            "browser activities must remain associated with the originating thread and turn"
+        );
+        assert!(
+            normalized_activities
+                .iter()
+                .any(|activity| activity.activity_type == "screenshot"),
+            "screenshot MCP result should normalize into a browser activity card"
+        );
+
+        contract_mcp_call(&connection, &thread_ids[0], "browser_close", json!({})).await;
+        contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_navigate",
+            json!({"url": first_server.url.clone()}),
+        )
+        .await;
+        let restarted_snapshot = contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_snapshot",
+            json!({"depth": 4}),
+        )
+        .await
+        .to_string();
+        assert!(
+            restarted_snapshot.contains(&first_server.url),
+            "the thread should continue after its browser session is restarted"
+        );
+
+        connection
+            .request(
+                "config/mcpServer/reload",
+                Value::Null,
+                RequestOptions::idempotent(Duration::from_secs(45)),
+            )
+            .await
+            .expect("Codex should reload its MCP configuration");
+        let reloaded_status = connection
+            .request(
+                "mcpServerStatus/list",
+                json!({
+                    "limit": 100,
+                    "detail": "full",
+                    "threadId": thread_ids[0]
+                }),
+                idempotent,
+            )
+            .await
+            .expect("Playwright MCP should reconnect after configuration reload");
+        assert!(
+            reloaded_status["data"].as_array().is_some_and(|servers| {
+                servers.iter().any(|server| {
+                    server["name"] == PLAYWRIGHT_SERVER_NAME
+                        && server["tools"]
+                            .as_object()
+                            .is_some_and(|tools| tools.contains_key("browser_navigate"))
+                })
+            }),
+            "Playwright tools should return after MCP reload"
+        );
+        contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_navigate",
+            json!({"url": first_server.url.clone()}),
+        )
+        .await;
+        let recovered_snapshot = contract_mcp_call(
+            &connection,
+            &thread_ids[0],
+            "browser_snapshot",
+            json!({"depth": 4}),
+        )
+        .await
+        .to_string();
+        assert!(
+            recovered_snapshot.contains(&first_server.url),
+            "the thread should continue after Playwright MCP reconnects"
+        );
+
+        for thread_id in &thread_ids {
+            contract_mcp_call(&connection, thread_id, "browser_close", json!({})).await;
+            let _ = connection
+                .request(
+                    "thread/delete",
+                    json!({"threadId":thread_id}),
+                    RequestOptions::default(),
+                )
+                .await;
+        }
+        first_server.stop().await;
+        second_server.stop().await;
+        let _ = std::fs::remove_file(&screenshot);
+        connection.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        #[cfg(unix)]
+        assert!(
+            !process::signal_process_group(pid, 0),
+            "app-server/MCP process group must not remain after shutdown"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

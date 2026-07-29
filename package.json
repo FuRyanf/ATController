@@ -24,6 +24,7 @@
     "test": "yarn test:ui",
     "test:ui": "NODE_OPTIONS=\"--require ./tests/polyfills.cjs\" vitest run",
     "test:contract": "ATCONTROLLER_RUN_CODEX_CONTRACT=1 cargo test --manifest-path src-tauri/Cargo.toml real_app_server_contract -- --ignored --nocapture",
+    "test:browser-contract": "ATCONTROLLER_RUN_BROWSER_CONTRACT=1 cargo test --manifest-path src-tauri/Cargo.toml real_playwright_browser_contract -- --ignored --nocapture",
     "test:e2e": "ATCONTROLLER_RUN_CODEX_E2E=1 cargo test --manifest-path src-tauri/Cargo.toml real_app_server_e2e -- --ignored --nocapture",
     "verify": "node scripts/verify.mjs"
   },

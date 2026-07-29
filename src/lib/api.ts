@@ -1,6 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  BrowserActionRequest,
+  BrowserDiagnostics,
+  BrowserScreenshot,
+  BrowserSelfTestResult,
+  BrowserSessionMetadata,
+  BrowserSetupPlan,
   CodexDiscoveredProject,
   CodexDiagnostics,
   CodexEvent,
@@ -30,6 +36,7 @@ import type {
 } from '../types';
 
 export const events = {
+  browserState: 'browser:state',
   codexEvent: 'codex:event',
   codexRuntimeState: 'codex:runtime-state',
   projectTerminalOutput: 'atcontroller://project-terminal-output',
@@ -37,6 +44,32 @@ export const events = {
 } as const;
 
 export const api = {
+  getBrowserDiagnostics: (threadId?: string | null) =>
+    invoke<BrowserDiagnostics>('browser_get_diagnostics', {
+      threadId: threadId ?? null
+    }),
+  getBrowserSetupPlan: () =>
+    invoke<BrowserSetupPlan>('browser_get_setup_plan'),
+  configureBrowser: () =>
+    invoke<BrowserDiagnostics>('browser_configure'),
+  getBrowserSession: (threadId: string) =>
+    invoke<BrowserSessionMetadata>('browser_get_session', { threadId }),
+  listBrowserSessions: () =>
+    invoke<BrowserSessionMetadata[]>('browser_list_sessions'),
+  performBrowserAction: (request: BrowserActionRequest) =>
+    invoke<BrowserSessionMetadata>('browser_perform_action', { request }),
+  runBrowserSelfTest: (threadId: string, workspacePath: string) =>
+    invoke<BrowserSelfTestResult>('browser_run_self_test', {
+      threadId,
+      workspacePath
+    }),
+  readBrowserScreenshot: (threadId: string, reference: string) =>
+    invoke<BrowserScreenshot>('browser_read_screenshot', { threadId, reference }),
+  revealBrowserScreenshot: (threadId: string, reference: string) =>
+    invoke<void>('browser_reveal_screenshot', { threadId, reference }),
+  deleteBrowserScreenshot: (threadId: string, reference: string) =>
+    invoke<void>('browser_delete_screenshot', { threadId, reference }),
+  openBrowserCache: () => invoke<void>('browser_open_cache'),
   reportFrontendError: (message: string) =>
     invoke<void>('report_frontend_error', { message }),
   getAppStorageRoot: () => invoke<string>('get_app_storage_root'),
@@ -211,6 +244,13 @@ export const api = {
   stopProjectTerminal: (sessionId: string) =>
     invoke<void>('project_terminal_stop', { sessionId }),
 };
+
+export const onBrowserState = async (
+  handler: (session: BrowserSessionMetadata) => void
+): Promise<UnlistenFn> =>
+  listen<BrowserSessionMetadata>(events.browserState, (event) => {
+    handler(event.payload);
+  });
 
 export const onCodexEvent = async (
   handler: (event: CodexEvent) => void

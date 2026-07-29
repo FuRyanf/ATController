@@ -5,6 +5,8 @@ export type AppIconName =
   | 'archive'
   | 'arrowDown'
   | 'attachment'
+  | 'browser'
+  | 'camera'
   | 'check'
   | 'chevronDown'
   | 'chevronRight'
@@ -56,6 +58,20 @@ export function AppIcon({ name, size = 16, ...props }: AppIconProps) {
         return <path d="m7 10 5 5 5-5" {...common} />;
       case 'attachment':
         return <path d="m9.5 12.5 5.7-5.7a3 3 0 1 1 4.2 4.2l-7.8 7.8a5 5 0 0 1-7.1-7.1l8-8" {...common} />;
+      case 'browser':
+        return (
+          <>
+            <rect x="3.5" y="4.5" width="17" height="15" rx="2" {...common} />
+            <path d="M3.5 8.5h17M7 6.5h.01m3 0h.01" {...common} />
+          </>
+        );
+      case 'camera':
+        return (
+          <>
+            <path d="M4 8h3l1.4-2h7.2L17 8h3v10H4z" {...common} />
+            <circle cx="12" cy="13" r="3" {...common} />
+          </>
+        );
       case 'check':
         return <path d="m5 12.5 4.2 4.2L19 7" {...common} />;
       case 'chevronDown':

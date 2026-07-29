@@ -167,6 +167,44 @@ export interface CodexFileChange {
   diff: string;
 }
 
+export type BrowserSessionState =
+  | 'unavailable'
+  | 'notConfigured'
+  | 'stopped'
+  | 'starting'
+  | 'ready'
+  | 'codexActive'
+  | 'userActive'
+  | 'disconnected'
+  | 'failed'
+  | 'stopping';
+
+export type BrowserControlOwner = 'codex' | 'user';
+
+export interface BrowserActivity {
+  id: string;
+  activityType: string;
+  label: string;
+  status: string;
+  server: string;
+  tool: string;
+  threadId?: string | null;
+  turnId?: string | null;
+  browserSessionId?: string | null;
+  pageId?: string | null;
+  pageTitle?: string | null;
+  url?: string | null;
+  target?: string | null;
+  durationMs?: number | null;
+  screenshotReference?: string | null;
+  consoleErrorCount: number;
+  failedRequestCount: number;
+  summaryLines: string[];
+  details?: unknown;
+  error?: string | null;
+  timestamp: string;
+}
+
 export interface CodexInputPart {
   kind: string;
   text?: string | null;
@@ -201,6 +239,7 @@ export interface CodexItem {
   toolServer?: string | null;
   toolArguments?: unknown;
   toolResult?: unknown;
+  browserActivity?: BrowserActivity | null;
   error?: string | null;
   details?: unknown;
 }
@@ -441,4 +480,111 @@ export interface CodexResumeCommand {
   arguments: string[];
   workingDirectory: string;
   fullAccess: boolean;
+}
+
+export interface BrowserDependency {
+  available: boolean;
+  path?: string | null;
+  version?: string | null;
+  detail?: string | null;
+}
+
+export interface BrowserMcpConfiguration {
+  serverName: string;
+  configured: boolean;
+  managedByAtcontroller: boolean;
+  command?: string | null;
+  arguments: string[];
+  package: string;
+  packageVersion: string;
+  isolated: boolean;
+  headed: boolean;
+  outputDirectory: string;
+}
+
+export interface BrowserDiagnostics {
+  node: BrowserDependency;
+  npx: BrowserDependency;
+  browser: BrowserDependency;
+  playwrightBrowsersAvailable: boolean;
+  configuration: BrowserMcpConfiguration;
+  codexCanSeeServer: boolean;
+  codexCanSeeBrowserTools: boolean;
+  toolNames: string[];
+  mcpServerVersion?: string | null;
+  mcpProcessId?: number | null;
+  browserProcessId?: number | null;
+  screenshotCachePath: string;
+  connectionState: string;
+  lastError?: string | null;
+}
+
+export interface BrowserSetupPlan {
+  ready: boolean;
+  canConfigure: boolean;
+  requiresReplacement: boolean;
+  command: string;
+  serverName: string;
+  package: string;
+  packageVersion: string;
+  effects: string[];
+  blockers: string[];
+  existingConfiguration?: BrowserMcpConfiguration | null;
+}
+
+export interface BrowserSessionMetadata {
+  threadId: string;
+  workspacePath: string;
+  browserSessionId: string;
+  pageId?: string | null;
+  state: BrowserSessionState;
+  lastUrl?: string | null;
+  lastPageTitle?: string | null;
+  panelVisible: boolean;
+  windowVisible: boolean;
+  lastScreenshotReference?: string | null;
+  controlOwner: BrowserControlOwner;
+  lastActivityAt: string;
+  failure?: string | null;
+  consoleErrorCount: number;
+  failedRequestCount: number;
+  recentActivities: BrowserActivity[];
+}
+
+export type BrowserAction =
+  | 'open'
+  | 'takeScreenshot'
+  | 'refreshState'
+  | 'inspectConsole'
+  | 'inspectNetwork'
+  | 'takeControl'
+  | 'returnToCodex'
+  | 'restart'
+  | 'stop';
+
+export interface BrowserActionRequest {
+  threadId: string;
+  workspacePath: string;
+  action: BrowserAction;
+  url?: string | null;
+}
+
+export interface BrowserSelfTestResult {
+  ok: boolean;
+  serverName: string;
+  packageVersion: string;
+  pageTitle: string;
+  pageUrl: string;
+  screenshotReference: string;
+  toolsSeen: number;
+  browserClosed: boolean;
+  durationMs: number;
+}
+
+export interface BrowserScreenshot {
+  reference: string;
+  path: string;
+  mimeType: string;
+  byteLength: number;
+  dataUrl: string;
 }

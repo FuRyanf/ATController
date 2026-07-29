@@ -29,6 +29,22 @@ Official Codex runtime and Codex-owned thread history
 
 React never owns the Codex child process. Rust never sends terminal keystrokes to operate a conversation. Standard session workflows use app-server methods and structured notifications.
 
+Browser automation remains inside the structured Codex path:
+
+```text
+React browser menu, inspector, and timeline cards
+        ↕ typed Tauri commands and `browser:state` events
+Rust browser domain and cache manager
+        ↕ stable app-server MCP requests and item notifications
+codex app-server
+        ↕ MCP transport owned by Codex
+@playwright/mcp@0.0.77
+        ↕
+isolated headed Chrome/Chromium context
+```
+
+ATController does not spawn a browser from an arbitrary frontend command. Codex owns MCP process startup, routing, and tool execution. Rust validates the requested thread, workspace, URL, screenshot reference, and action before calling a fixed Playwright tool through app-server.
+
 The optional Project Terminal follows a separate path:
 
 ```text
@@ -50,6 +66,7 @@ This PTY is an explicit project utility. Its bytes never enter the Codex protoco
 - `src/components/CodexSidebar.tsx` renders persistent, reorderable project shelves and nested running, recent, and archived thread groups.
 - `src/components/ProjectContextMenu.tsx`, `ProjectImportDialog.tsx`, `CloneRepositoryDialog.tsx`, `ManageProjectsDialog.tsx`, and `ProjectIconDialog.tsx` implement project lifecycle surfaces.
 - `src/components/ConversationTimeline.tsx` renders typed Codex items with progressive disclosure, safe GitHub-flavored Markdown, and preserved-scroll history paging.
+- `src/components/BrowserMenu.tsx` exposes state-valid browser setup, lifecycle, screenshot, control-handoff, and diagnostics actions.
 - `src/components/ProjectTerminalShelf.tsx` lazily loads xterm and renders the resizable built-in project utility terminal.
 - `src/components/MessageComposer.tsx` serializes structured text, image, file, and skill input.
 - `src/components/InspectorPanel.tsx` reconciles Codex activity with Git and runtime state.
@@ -70,6 +87,7 @@ This PTY is an explicit project utility. Its bytes never enter the Codex protoco
 - `src-tauri/src/storage.rs` persists project and UI metadata and performs the app-server migration.
 - `src-tauri/src/git_tools.rs` provides bounded Git inspection and safe mutations.
 - `src-tauri/src/project_terminal.rs` validates project-scoped directories and owns native PTY process, input, resize, output, and shutdown lifecycles.
+- `src-tauri/src/browser.rs` detects browser dependencies, manages the explicit MCP setup flow, routes fixed Playwright calls, owns per-thread browser metadata, bounds screenshots, and performs real browser self-tests.
 - `src-tauri/src/main.rs` exposes the narrow Tauri command surface and native lifecycle hooks.
 
 ## Codex discovery and protocol generation
@@ -210,6 +228,9 @@ account/read
 account/rateLimits/read
 account/login/start
 skills/list
+config/mcpServer/reload
+mcpServerStatus/list
+mcpServer/tool/call
 
 thread/list
 thread/start
@@ -270,6 +291,7 @@ item/reasoning/summaryPartAdded
 item/reasoning/summaryTextDelta
 item/reasoning/textDelta
 item/plan/delta
+item/mcpToolCall/progress
 
 thread/tokenUsage/updated
 account/updated
@@ -279,6 +301,17 @@ serverRequest/resolved
 ```
 
 Unknown methods become generic structured events containing bounded details. They do not terminate the session.
+
+Completed and in-progress `mcpToolCall` items are recognized as browser activity only when the actual structured server/tool metadata identifies the managed `atcontroller-playwright` server and a `browser_*` tool. The normalizer maps those calls into navigation, click, type, select, hover, scroll, upload, screenshot, page inspection, console, network, tab, and browser-error activities. It never scans agent prose for browser intent.
+
+Before browser tool inputs or results cross into React, ATController:
+
+- removes typed form values and other sensitive input fields;
+- redacts credential-bearing keys and authorization/cookie lines;
+- strips sensitive URL query values;
+- bounds developer-detail JSON;
+- derives compact console-error and failed-request summaries;
+- accepts screenshot references only when they resolve beneath the managed cache.
 
 ## Domain model and state reduction
 
@@ -374,6 +407,10 @@ codex-thread-ui.json
 
 Each `workspaces.json` project contains an ID, display name, canonical path, workspace type, creation and last-opened timestamps, pinned/custom-order/expanded state, icon preference, availability, and bounded Git preferences. Thread UI metadata points to exactly one project ID.
 
+`browser-sessions.json` contains browser UI metadata only: thread/workspace association, ATController session identifier, last URL/title/page reference, panel/window visibility, control owner, last screenshot reference, counts, bounded recent activities, timestamps, and failure state. Browser cookies, credentials, passwords, headers, form contents, and profile data are not serialized.
+
+Screenshots and Playwright text artifacts live under `browser-cache/playwright/`. Screenshot reads, reveal, and deletion require a safe relative path that resolves inside that directory. Startup cleanup bounds the cache to 256 MiB and 160 entries; individual screenshot reads are limited to 24 MiB.
+
 The app-server v3 migration writes a backup before importing compatible metadata. Records without a canonical Codex identifier or with an incompatible runtime identity are reported and left untouched. The project-shelves v1 migration separately backs up flat workspace/UI state, canonicalizes paths, enriches project records, and preserves malformed or unavailable entries in its report. Migration writes use temporary files, fsync, and atomic rename.
 
 Official unscoped `thread/list` discovery groups active and archived Codex threads by canonical `cwd`. Importing a discovered project persists only the workspace and UI association; transcripts are neither copied nor rewritten.
@@ -401,6 +438,11 @@ The application does provide integration hardening:
 - no prompt text in copied diagnostics;
 - separate diagnostic stderr;
 - exact external URL scheme validation.
+- a pinned Playwright MCP package and explicit setup preview before Codex configuration is modified;
+- isolated browser profiles and no connection to a personal Chrome profile by default;
+- thread-scoped MCP routing and browser-session association;
+- no global Chrome, Chromium, Node, or `npx` process matching or termination;
+- browser shutdown through the exact thread-scoped Playwright MCP connection, followed by normal app-server process-group supervision.
 
 ## Sequence
 
@@ -411,6 +453,8 @@ sequenceDiagram
     participant Rust as ATController Rust
     participant Server as codex app-server
     participant Runtime as Official Codex runtime
+    participant MCP as Playwright MCP
+    participant Browser as Isolated browser
 
     User->>UI: Launch ATController
     UI->>Rust: Load projects and UI metadata
@@ -437,6 +481,17 @@ sequenceDiagram
     Rust-->>UI: Ordered normalized events
     UI-->>User: Stream timeline and changes
 
+    opt Browser validation is useful
+        Runtime->>Server: Select structured Playwright MCP tool
+        Server->>MCP: Invoke browser tool for this thread
+        MCP->>Browser: Navigate, inspect, or interact
+        Browser-->>MCP: Structured result or screenshot reference
+        MCP-->>Server: MCP tool result
+        Server-->>Rust: mcpToolCall item and progress
+        Rust-->>UI: Redacted browser activity card and session state
+        UI-->>User: Browser activity, screenshot, errors, and controls
+    end
+
     opt Approval required
         Server->>Rust: Server-initiated approval request
         Rust-->>UI: Inline approval card
@@ -460,8 +515,10 @@ sequenceDiagram
 ## Test layers
 
 - Rust unit tests cover framing, oversized recovery, redaction, permission mapping, protocol normalization, workspace validation, Git safety, Project Terminal constraints, migration, resume argument construction, and process behavior.
-- Frontend tests cover event reduction, ordering, deduplication, sidebar sections, approvals, safe Markdown and structured timeline cards, attachments, prompt history, controls, diagnostics, inspector actions, appearance, context menus, and keyboard behavior.
+- Browser unit tests cover dependency/config parsing, setup safety, URL and screenshot validation, state transitions, activity association, sensitive-value redaction, console/network summaries, cache bounds, and thread isolation.
+- Frontend tests cover event reduction, ordering, deduplication, sidebar sections, approvals, safe Markdown and structured timeline/browser cards, native and WebKit file drops, prompt history, browser setup/diagnostics/inspector controls, appearance, context menus, and keyboard behavior.
 - Contract tests start the real installed app-server in a temporary Git repository and exercise initialization, account/model reads, thread lifecycle, a real streamed turn, archive/restore, and cleanup.
+- The opt-in browser contract uses the real installed app-server and `@playwright/mcp@0.0.77`: it starts two temporary thread/browser sessions and local pages, proves isolation, fills and submits a form, observes a console error and HTTP 500, stores a managed screenshot, runs a real Codex browser turn, verifies typed `mcpToolCall` normalization, closes both sessions, and asserts that the app-server/MCP process group exited.
 - End-to-end runtime tests create and modify a real temporary file, verify structured activity and Git state, restart the process, resume the same thread, interrupt a turn, exercise Standard approval denial and Full Access, handle invalid IDs, and verify no orphan process remains.
 
 ## Release architecture

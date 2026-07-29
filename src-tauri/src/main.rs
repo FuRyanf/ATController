@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser;
 mod codex;
 mod git_tools;
 mod macos_notifications;
@@ -12,6 +13,10 @@ use std::sync::Arc;
 
 use tauri::{Manager, State};
 
+use crate::browser::{
+    BrowserActionRequest, BrowserDiagnostics, BrowserRuntime, BrowserScreenshot,
+    BrowserSelfTestResult, BrowserSessionMetadata, BrowserSetupPlan,
+};
 use crate::codex::{
     CodexDiagnostics, CodexDiscoveredProject, CodexLoginSession, CodexResumeCommand, CodexRuntime,
     CodexRuntimeCatalog, CodexSkill, CodexThread, CodexThreadPage, CodexThreadSession, CodexTurn,
@@ -24,8 +29,127 @@ use crate::models::{
 use crate::project_terminal::{ProjectTerminalManager, ProjectTerminalSessionInfo};
 
 struct AppState {
+    browser: BrowserRuntime,
     codex: Arc<CodexRuntime>,
     project_terminal: ProjectTerminalManager,
+}
+
+#[tauri::command]
+async fn browser_get_diagnostics(
+    state: State<'_, AppState>,
+    thread_id: Option<String>,
+) -> Result<BrowserDiagnostics, String> {
+    state
+        .browser
+        .diagnostics(state.codex.clone(), thread_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn browser_get_setup_plan(state: State<'_, AppState>) -> Result<BrowserSetupPlan, String> {
+    state
+        .browser
+        .setup_plan()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn browser_configure(state: State<'_, AppState>) -> Result<BrowserDiagnostics, String> {
+    state
+        .browser
+        .configure(state.codex.clone())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn browser_get_session(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<BrowserSessionMetadata, String> {
+    state
+        .browser
+        .session(&thread_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn browser_list_sessions(
+    state: State<'_, AppState>,
+) -> Result<Vec<BrowserSessionMetadata>, String> {
+    state.browser.sessions().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn browser_perform_action(
+    state: State<'_, AppState>,
+    request: BrowserActionRequest,
+) -> Result<BrowserSessionMetadata, String> {
+    state
+        .browser
+        .perform_action(state.codex.clone(), request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn browser_run_self_test(
+    state: State<'_, AppState>,
+    thread_id: String,
+    workspace_path: String,
+) -> Result<BrowserSelfTestResult, String> {
+    state
+        .browser
+        .self_test(state.codex.clone(), thread_id, workspace_path)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn browser_read_screenshot(
+    state: State<'_, AppState>,
+    thread_id: String,
+    reference: String,
+) -> Result<BrowserScreenshot, String> {
+    let browser = state.browser.clone();
+    tokio::task::spawn_blocking(move || browser.read_screenshot(&thread_id, &reference))
+        .await
+        .map_err(|error| format!("Screenshot reader task failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn browser_reveal_screenshot(
+    state: State<'_, AppState>,
+    thread_id: String,
+    reference: String,
+) -> Result<(), String> {
+    state
+        .browser
+        .reveal_screenshot(&thread_id, &reference)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn browser_delete_screenshot(
+    state: State<'_, AppState>,
+    thread_id: String,
+    reference: String,
+) -> Result<(), String> {
+    state
+        .browser
+        .delete_screenshot(&thread_id, &reference)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn browser_open_cache(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .browser
+        .open_cache()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -748,8 +872,11 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let runtime = app.state::<AppState>().codex.clone();
+            let browser = app.state::<AppState>().browser.clone();
             let project_terminal = app.state::<AppState>().project_terminal.clone();
             runtime.attach(app.handle().clone());
+            runtime.attach_browser(browser.clone());
+            browser.attach(app.handle().clone());
             CodexRuntime::start_in_background(runtime.clone());
             #[cfg(unix)]
             {
@@ -761,6 +888,7 @@ fn main() {
                         return;
                     };
                     if terminate.recv().await.is_some() {
+                        browser.shutdown_all(runtime.clone()).await;
                         runtime.shutdown().await;
                         project_terminal.shutdown_all().await;
                         app_handle.exit(143);
@@ -792,10 +920,22 @@ fn main() {
             Ok(())
         })
         .manage(AppState {
+            browser: BrowserRuntime::default(),
             codex: Arc::new(CodexRuntime::default()),
             project_terminal: ProjectTerminalManager::default(),
         })
         .invoke_handler(tauri::generate_handler![
+            browser_get_diagnostics,
+            browser_get_setup_plan,
+            browser_configure,
+            browser_get_session,
+            browser_list_sessions,
+            browser_perform_action,
+            browser_run_self_test,
+            browser_read_screenshot,
+            browser_reveal_screenshot,
+            browser_delete_screenshot,
+            browser_open_cache,
             codex_get_diagnostics,
             report_frontend_error,
             codex_restart_runtime,
@@ -862,6 +1002,7 @@ fn main() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 let state = app.state::<AppState>();
+                tauri::async_runtime::block_on(state.browser.shutdown_all(state.codex.clone()));
                 tauri::async_runtime::block_on(state.codex.shutdown());
                 tauri::async_runtime::block_on(state.project_terminal.shutdown_all());
             }

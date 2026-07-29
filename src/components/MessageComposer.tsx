@@ -57,12 +57,26 @@ const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', '
 export function physicalPointInsideRect(
   position: { x: number; y: number },
   rect: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>,
-  scaleFactor: number
+  scaleFactor: number,
+  viewportHeight = window.innerHeight
 ): boolean {
   const scale = Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1;
-  const x = position.x / scale;
-  const y = position.y / scale;
-  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  const points = [
+    { x: position.x / scale, y: position.y / scale },
+    // Some WebKit/Tauri combinations already report logical coordinates even
+    // though the API type is PhysicalPosition.
+    { x: position.x, y: position.y }
+  ];
+  if (Number.isFinite(viewportHeight) && viewportHeight > 0) {
+    points.push(
+      { x: position.x / scale, y: viewportHeight - position.y / scale },
+      { x: position.x, y: viewportHeight - position.y }
+    );
+  }
+  return points.some(
+    ({ x, y }) =>
+      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+  );
 }
 
 function pathInsideWorkspace(path: string, workspacePath: string): boolean {
@@ -73,6 +87,24 @@ function pathInsideWorkspace(path: string, workspacePath: string): boolean {
 function filePath(file: File): string | null {
   const candidate = (file as File & { path?: string }).path;
   return typeof candidate === 'string' && candidate.startsWith('/') ? candidate : null;
+}
+
+export function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
+  const paths = Array.from(dataTransfer.files)
+    .map(filePath)
+    .filter((path): path is string => Boolean(path));
+  const uriList = dataTransfer.getData('text/uri-list');
+  for (const line of uriList.split(/\r?\n/)) {
+    const value = line.trim();
+    if (!value || value.startsWith('#')) continue;
+    try {
+      const url = new URL(value);
+      if (url.protocol === 'file:') paths.push(decodeURIComponent(url.pathname));
+    } catch {
+      // Native Tauri events remain the authoritative path source.
+    }
+  }
+  return [...new Set(paths.filter((path) => path.startsWith('/')))];
 }
 
 async function imageAttachment(file: File, workspacePath: string): Promise<ComposerAttachment> {
@@ -177,6 +209,8 @@ export function MessageComposer({
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dropTargetRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+  const nativeFileDragRef = useRef(false);
   const [dragging, setDragging] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [historyCursor, setHistoryCursor] = useState<number | null>(null);
@@ -193,6 +227,10 @@ export function MessageComposer({
     !recovering &&
     !submitting &&
     Boolean(value.trim() || attachments.length || selectedSkills.length);
+  const setDropActive = (active: boolean) => {
+    draggingRef.current = active;
+    setDragging(active);
+  };
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -221,8 +259,12 @@ export function MessageComposer({
         if (disposed) return;
         const payload = event.payload;
         if (payload.type === 'leave') {
-          setDragging(false);
+          nativeFileDragRef.current = false;
+          setDropActive(false);
           return;
+        }
+        if (payload.type === 'enter') {
+          nativeFileDragRef.current = payload.paths.length > 0;
         }
         const target = dropTargetRef.current;
         const inside = Boolean(
@@ -230,15 +272,22 @@ export function MessageComposer({
             physicalPointInsideRect(
               payload.position,
               target.getBoundingClientRect(),
-              window.devicePixelRatio
+              window.devicePixelRatio,
+              window.innerHeight
             )
         );
         if (payload.type !== 'drop') {
-          setDragging(inside);
+          setDropActive(inside);
           return;
         }
-        setDragging(false);
-        if (!inside || payload.paths.length === 0) return;
+        // Finder's native drop event is authoritative. On some macOS/WebKit
+        // combinations its final point uses a different coordinate origin
+        // from the preceding event, despite the system showing the green plus.
+        const acceptDrop =
+          inside || draggingRef.current || nativeFileDragRef.current;
+        nativeFileDragRef.current = false;
+        setDropActive(false);
+        if (!acceptDrop || payload.paths.length === 0) return;
         void (async () => {
           try {
             setAttachmentError(null);
@@ -257,6 +306,7 @@ export function MessageComposer({
       .catch(() => undefined);
     return () => {
       disposed = true;
+      nativeFileDragRef.current = false;
       stop?.();
     };
   }, [archived, onDropPaths]);
@@ -364,7 +414,16 @@ export function MessageComposer({
 
   const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    setDragging(false);
+    setDropActive(false);
+    const paths = pathsFromDataTransfer(event.dataTransfer);
+    if (paths.length) {
+      await onDropPaths(paths);
+      return;
+    }
+    // Tauri supplies real macOS paths through onDragDropEvent. WebKit File
+    // objects intentionally omit them, so wait for the native event instead
+    // of displaying a misleading local-path error.
+    if (isTauri()) return;
     await addFiles(Array.from(event.dataTransfer.files));
   };
 
@@ -390,11 +449,13 @@ export function MessageComposer({
       className={`composer-wrap ${dragging ? 'dragging' : ''}`}
       onDragEnter={(event) => {
         event.preventDefault();
-        setDragging(true);
+        setDropActive(true);
       }}
       onDragOver={(event) => event.preventDefault()}
       onDragLeave={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setDropActive(false);
+        }
       }}
       onDrop={handleDrop}
     >

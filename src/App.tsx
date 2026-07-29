@@ -21,9 +21,6 @@ import {
 } from './components/CodexSidebar';
 import { CloneRepositoryDialog } from './components/CloneRepositoryDialog';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
-import { ControlCenterDialog } from './components/ControlCenterDialog';
-import { ConversationTimeline } from './components/ConversationTimeline';
-import { InspectorPanel } from './components/InspectorPanel';
 import { ManageProjectsDialog } from './components/ManageProjectsDialog';
 import {
   MessageComposer,
@@ -52,6 +49,11 @@ import {
 } from './lib/runtimeBootstrap';
 import { codexStore, useCodexStore } from './stores/codexStore';
 import type {
+  BrowserAction,
+  BrowserDiagnostics,
+  BrowserSelfTestResult,
+  BrowserSessionMetadata,
+  BrowserSetupPlan,
   CodexApprovalRequest,
   CodexDiscoveredProject,
   CodexEvent,
@@ -73,6 +75,15 @@ import type {
 } from './types';
 
 const api = apiModule.api;
+const ControlCenterDialog = lazy(async () => ({
+  default: (await import('./components/ControlCenterDialog')).ControlCenterDialog
+}));
+const ConversationTimeline = lazy(async () => ({
+  default: (await import('./components/ConversationTimeline')).ConversationTimeline
+}));
+const InspectorPanel = lazy(async () => ({
+  default: (await import('./components/InspectorPanel')).InspectorPanel
+}));
 const ProjectTerminalShelf = lazy(async () => ({
   default: (await import('./components/ProjectTerminalShelf')).ProjectTerminalShelf
 }));
@@ -294,10 +305,20 @@ export default function App() {
       : 'custom';
   });
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [controlCenter, setControlCenter] = useState<'settings' | 'diagnostics' | null>(null);
+  const [controlCenter, setControlCenter] =
+    useState<'settings' | 'diagnostics' | 'browser' | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
   const [selfTestResult, setSelfTestResult] = useState<Record<string, unknown> | null>(null);
+  const [browserDiagnostics, setBrowserDiagnostics] =
+    useState<BrowserDiagnostics | null>(null);
+  const [browserSetupPlan, setBrowserSetupPlan] =
+    useState<BrowserSetupPlan | null>(null);
+  const [browserSelfTestResult, setBrowserSelfTestResult] =
+    useState<BrowserSelfTestResult | Record<string, unknown> | null>(null);
+  const [browserSessions, setBrowserSessions] =
+    useState<Record<string, BrowserSessionMetadata>>({});
+  const [browserBusy, setBrowserBusy] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
@@ -329,6 +350,9 @@ export default function App() {
     (approval) => approval.threadId === selectedThreadId
   );
   const selectedRunningTurn = lastRunningTurn(selectedThread);
+  const selectedBrowserSession = selectedThreadId
+    ? browserSessions[selectedThreadId]
+    : undefined;
   const threadsByWorkspace = useMemo(() => {
     const result: Record<string, CodexThread[]> = Object.fromEntries(
       workspaces.map((workspace) => [workspace.id, []])
@@ -965,6 +989,81 @@ export default function App() {
 
   useEffect(() => {
     let disposed = false;
+    let stopListener: (() => void) | null = null;
+    void api
+      .listBrowserSessions()
+      .then((sessions) => {
+        if (disposed) return;
+        setBrowserSessions(
+          Object.fromEntries(sessions.map((session) => [session.threadId, session]))
+        );
+      })
+      .catch(() => undefined);
+    void apiModule.onBrowserState((session) => {
+      if (disposed) return;
+      setBrowserSessions((current) => ({
+        ...current,
+        [session.threadId]: session
+      }));
+    }).then((stop) => {
+      if (disposed) {
+        releaseTauriListener(stop);
+      } else {
+        stopListener = stop;
+      }
+    });
+    return () => {
+      disposed = true;
+      if (stopListener) releaseTauriListener(stopListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    void api
+      .getBrowserDiagnostics(selectedThreadId)
+      .then((next) => {
+        if (!cancelled) setBrowserDiagnostics(next);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setBrowserDiagnostics((current) =>
+            current
+              ? { ...current, connectionState: 'failed', lastError: String(error) }
+              : null
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connected, selectedThreadId]);
+
+  useEffect(() => {
+    if (controlCenter !== 'browser') return;
+    let cancelled = false;
+    void Promise.allSettled([
+      api.getBrowserSetupPlan(),
+      api.getBrowserDiagnostics(selectedThreadId)
+    ]).then(([planResult, diagnosticsResult]) => {
+      if (cancelled) return;
+      if (planResult.status === 'fulfilled') setBrowserSetupPlan(planResult.value);
+      else {
+        setBrowserSetupPlan(null);
+        showToast(`Could not inspect browser setup: ${String(planResult.reason)}`, 'error');
+      }
+      if (diagnosticsResult.status === 'fulfilled') {
+        setBrowserDiagnostics(diagnosticsResult.value);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [controlCenter, selectedThreadId, showToast]);
+
+  useEffect(() => {
+    let disposed = false;
     const unlisten: Array<() => void> = [];
     void apiModule.onCodexEvent((event: CodexEvent) => {
       const threadWasDeleted = event.kind === 'threadDeleted' && Boolean(event.threadId);
@@ -1242,6 +1341,122 @@ export default function App() {
       showToast(`Could not interrupt the turn: ${String(error)}`, 'error');
     }
   }, [selectedRunningTurn, selectedThread, showToast]);
+
+  const runBrowserAction = useCallback(
+    async (action: BrowserAction, requestedUrl?: string) => {
+      if (!selectedThread || !selectedWorkspace) {
+        showToast('Select a Codex thread before opening a browser', 'error');
+        return;
+      }
+      setBrowserBusy(true);
+      try {
+        if (action === 'takeControl' && selectedRunningTurn) {
+          await api.interruptCodexTurn(selectedThread.id, selectedRunningTurn.id);
+        }
+        const session = await api.performBrowserAction({
+          threadId: selectedThread.id,
+          workspacePath: selectedWorkspace.path,
+          action,
+          url:
+            action === 'open' && requestedUrl
+              ? requestedUrl
+              : action === 'restart'
+              ? selectedBrowserSession?.lastUrl ?? null
+              : null
+        });
+        setBrowserSessions((current) => ({
+          ...current,
+          [session.threadId]: session
+        }));
+        if (action === 'open') {
+          setInspectorOpen(true);
+          showToast('Isolated browser opened', 'success');
+        } else if (action === 'takeScreenshot') {
+          showToast('Browser screenshot captured', 'success');
+        } else if (action === 'takeControl') {
+          showToast('Browser control transferred to you');
+        } else if (action === 'returnToCodex') {
+          showToast('Browser control returned to Codex', 'success');
+        } else if (action === 'restart') {
+          showToast('Browser session restarted', 'success');
+        } else if (action === 'stop') {
+          showToast('Browser session stopped');
+        }
+        setBrowserDiagnostics(
+          await api.getBrowserDiagnostics(selectedThread.id)
+        );
+      } catch (error) {
+        showToast(`Browser action failed: ${String(error)}`, 'error');
+        try {
+          setBrowserDiagnostics(
+            await api.getBrowserDiagnostics(selectedThread.id)
+          );
+        } catch {
+          // Preserve the last useful dependency diagnostics.
+        }
+      } finally {
+        setBrowserBusy(false);
+      }
+    },
+    [
+      selectedBrowserSession?.lastUrl,
+      selectedRunningTurn,
+      selectedThread,
+      selectedWorkspace,
+      showToast
+    ]
+  );
+
+  const configureBrowser = useCallback(async () => {
+    setControlBusy(true);
+    setBrowserSelfTestResult(null);
+    try {
+      const next = await api.configureBrowser();
+      setBrowserDiagnostics(next);
+      setBrowserSetupPlan(await api.getBrowserSetupPlan());
+      showToast('Playwright MCP configured for Codex', 'success');
+    } catch (error) {
+      setBrowserSelfTestResult({ ok: false, error: String(error) });
+      showToast(`Browser setup failed: ${String(error)}`, 'error');
+    } finally {
+      setControlBusy(false);
+    }
+  }, [showToast]);
+
+  const runBrowserSelfTest = useCallback(async () => {
+    if (!selectedThread || !selectedWorkspace) {
+      setBrowserSelfTestResult({
+        ok: false,
+        error: 'Select a Codex thread before running the browser self test.'
+      });
+      return;
+    }
+    setControlBusy(true);
+    setBrowserBusy(true);
+    setBrowserSelfTestResult(null);
+    try {
+      const result = await api.runBrowserSelfTest(
+        selectedThread.id,
+        selectedWorkspace.path
+      );
+      setBrowserSelfTestResult(result);
+      const session = await api.getBrowserSession(selectedThread.id);
+      setBrowserSessions((current) => ({
+        ...current,
+        [session.threadId]: session
+      }));
+      setBrowserDiagnostics(
+        await api.getBrowserDiagnostics(selectedThread.id)
+      );
+      showToast('Browser self test passed', 'success');
+    } catch (error) {
+      setBrowserSelfTestResult({ ok: false, error: String(error) });
+      showToast(`Browser self test failed: ${String(error)}`, 'error');
+    } finally {
+      setBrowserBusy(false);
+      setControlBusy(false);
+    }
+  }, [selectedThread, selectedWorkspace, showToast]);
 
   const revertGitFile = useCallback(
     async (path: string) => {
@@ -2352,6 +2567,36 @@ export default function App() {
         run: toggleProjectTerminal
       },
       {
+        id: 'open-browser',
+        label: selectedBrowserSession &&
+          !['stopped', 'notConfigured', 'unavailable'].includes(
+            selectedBrowserSession.state
+          )
+          ? 'Take Control of Browser'
+          : 'Open Browser',
+        description: 'Open an isolated headed Playwright session',
+        icon: 'browser',
+        disabled:
+          !selectedThread ||
+          browserDiagnostics?.configuration.configured !== true,
+        run: () =>
+          void runBrowserAction(
+            selectedBrowserSession &&
+              !['stopped', 'notConfigured', 'unavailable'].includes(
+                selectedBrowserSession.state
+              )
+              ? 'takeControl'
+              : 'open'
+          )
+      },
+      {
+        id: 'browser-setup',
+        label: 'Browser Setup and Diagnostics',
+        description: 'Inspect Playwright MCP and browser availability',
+        icon: 'browser',
+        run: () => setControlCenter('browser')
+      },
+      {
         id: 'restart-runtime',
         label: 'Restart Codex Runtime',
         icon: 'refresh',
@@ -2441,6 +2686,7 @@ export default function App() {
   }, [
     createThread,
     allSidebarThreads,
+    browserDiagnostics?.configuration.configured,
     catalog,
     handleProjectsMenuAction,
     metadata,
@@ -2450,10 +2696,12 @@ export default function App() {
     pickProject,
     renameThread,
     restartRuntime,
+    runBrowserAction,
     runThreadAction,
     projectTerminalOpen,
     selectedThread,
     selectedPreferences,
+    selectedBrowserSession,
     selectedWorkspace,
     toggleProjectTerminal,
     updatePreferences,
@@ -2652,6 +2900,9 @@ export default function App() {
               approvals={selectedApprovals}
               disconnected={!connected}
               inspectorOpen={inspectorOpen}
+              browserSession={selectedBrowserSession}
+              browserDiagnostics={browserDiagnostics}
+              browserBusy={browserBusy}
               onRename={() => renameThread(selectedThread.id)}
               onSelectProject={() => {
                 selectProject(selectedWorkspace.id);
@@ -2666,6 +2917,23 @@ export default function App() {
               onOpenMenu={(x, y) => setContextMenu({ threadId: selectedThread.id, x, y })}
               onToggleInspector={() => setInspectorOpen((value) => !value)}
               onOpenTerminal={toggleProjectTerminal}
+              onBrowserAction={(action) => void runBrowserAction(action)}
+              onOpenBrowserPage={() => {
+                if (selectedBrowserSession?.lastUrl) {
+                  void api
+                    .openExternalUrl(selectedBrowserSession.lastUrl)
+                    .catch((error) =>
+                      showToast(`Could not open browser page: ${String(error)}`, 'error')
+                    );
+                }
+              }}
+              onCopyBrowserUrl={() => {
+                if (selectedBrowserSession?.lastUrl) {
+                  void copyText(selectedBrowserSession.lastUrl, 'Browser URL');
+                }
+              }}
+              onOpenBrowserSetup={() => setControlCenter('browser')}
+              onOpenBrowserDiagnostics={() => setControlCenter('browser')}
             />
             {threadError ? (
               <div className="thread-error-banner">
@@ -2682,19 +2950,38 @@ export default function App() {
             ) : null}
             <div className="session-workspace">
               <section className="conversation-region">
-                <ConversationTimeline
-                  thread={selectedThread}
-                  approvals={selectedApprovals}
-                  usage={codex.usage[selectedThread.id]}
-                  recovering={recoveringThread}
-                  onRespondToApproval={(approval, decision) => void respondToApproval(approval, decision)}
-                  onRespondToUserInput={(approval, answers) => void respondToUserInput(approval, answers)}
-                  onCopy={(value, label) => void copyText(value, label)}
-                  onOpenFile={(path) => void api.openProjectFile(selectedWorkspace.path, path)}
-                  onRevealPath={(path) => void api.revealProjectFile(selectedWorkspace.path, path)}
-                  onRevertFile={(path) => void revertGitFile(path)}
-                  onOpenTerminal={(path) => openProjectTerminal(path, selectedWorkspace)}
-                />
+                <Suspense
+                  fallback={
+                    <div className="timeline-loading" role="status">
+                      Loading structured thread…
+                    </div>
+                  }
+                >
+                  <ConversationTimeline
+                    thread={selectedThread}
+                    approvals={selectedApprovals}
+                    usage={codex.usage[selectedThread.id]}
+                    recovering={recoveringThread}
+                    onRespondToApproval={(approval, decision) => void respondToApproval(approval, decision)}
+                    onRespondToUserInput={(approval, answers) => void respondToUserInput(approval, answers)}
+                    onCopy={(value, label) => void copyText(value, label)}
+                    onOpenFile={(path) => void api.openProjectFile(selectedWorkspace.path, path)}
+                    onRevealPath={(path) => void api.revealProjectFile(selectedWorkspace.path, path)}
+                    onRevertFile={(path) => void revertGitFile(path)}
+                    onOpenTerminal={(path) => openProjectTerminal(path, selectedWorkspace)}
+                    onOpenBrowser={(url) => {
+                      if (browserDiagnostics?.configuration.configured !== true) {
+                        setControlCenter('browser');
+                        showToast(
+                          'Configure Playwright MCP before opening a development server',
+                          'error'
+                        );
+                        return;
+                      }
+                      void runBrowserAction('open', url);
+                    }}
+                  />
+                </Suspense>
                 <MessageComposer
                   threadId={selectedThread.id}
                   workspacePath={selectedWorkspace.path}
@@ -2735,35 +3022,52 @@ export default function App() {
                 />
               </section>
               {inspectorOpen ? (
-                <InspectorPanel
-                  thread={selectedThread}
-                  session={selectedSession}
-                  metadata={selectedMetadata}
-                  diagnostics={codex.diagnostics}
-                  gitInfo={gitInfo}
-                  gitStatus={gitStatus}
-                  gitBranches={gitBranches}
-                  onClose={() => setInspectorOpen(false)}
-                  onCopy={(value, label) => void copyText(value, label)}
-                  onOpenFile={(path) => void api.openProjectFile(selectedWorkspace.path, path)}
-                  onRevealFile={(path) => void api.revealProjectFile(selectedWorkspace.path, path)}
-                  onLoadDiff={(path) => api.gitWorkspaceDiff(selectedWorkspace.path, path)}
-                  onRevertFile={(path) => void revertGitFile(path)}
-                  onSwitchBranch={(branch) => void switchGitBranch(branch)}
-                  onCreateBranch={(branch) => void createGitBranch(branch)}
-                  onCopyPatch={() => void copyWorkingTreePatch()}
-                  onCopyResume={(fullAccess) =>
-                    void runThreadAction(
-                      selectedThread,
-                      fullAccess ? 'copyFullAccessResume' : 'copyResume'
-                    )
-                  }
-                  onOpenResumeInTerminal={() =>
-                    void runThreadAction(selectedThread, 'openResumeInTerminal')
-                  }
-                  onOpenTerminal={(path) => openProjectTerminal(path, selectedWorkspace)}
-                  onRestartRuntime={() => void restartRuntime()}
-                />
+                <Suspense fallback={null}>
+                  <InspectorPanel
+                    thread={selectedThread}
+                    session={selectedSession}
+                    metadata={selectedMetadata}
+                    diagnostics={codex.diagnostics}
+                    browserSession={selectedBrowserSession}
+                    browserDiagnostics={browserDiagnostics}
+                    browserBusy={browserBusy}
+                    gitInfo={gitInfo}
+                    gitStatus={gitStatus}
+                    gitBranches={gitBranches}
+                    onClose={() => setInspectorOpen(false)}
+                    onCopy={(value, label) => void copyText(value, label)}
+                    onOpenFile={(path) => void api.openProjectFile(selectedWorkspace.path, path)}
+                    onRevealFile={(path) => void api.revealProjectFile(selectedWorkspace.path, path)}
+                    onLoadDiff={(path) => api.gitWorkspaceDiff(selectedWorkspace.path, path)}
+                    onRevertFile={(path) => void revertGitFile(path)}
+                    onSwitchBranch={(branch) => void switchGitBranch(branch)}
+                    onCreateBranch={(branch) => void createGitBranch(branch)}
+                    onCopyPatch={() => void copyWorkingTreePatch()}
+                    onCopyResume={(fullAccess) =>
+                      void runThreadAction(
+                        selectedThread,
+                        fullAccess ? 'copyFullAccessResume' : 'copyResume'
+                      )
+                    }
+                    onOpenResumeInTerminal={() =>
+                      void runThreadAction(selectedThread, 'openResumeInTerminal')
+                    }
+                    onOpenTerminal={(path) => openProjectTerminal(path, selectedWorkspace)}
+                    onRestartRuntime={() => void restartRuntime()}
+                    onBrowserAction={(action) => void runBrowserAction(action)}
+                    onBrowserSetup={() => setControlCenter('browser')}
+                    onBrowserDiagnostics={() => setControlCenter('browser')}
+                    onOpenBrowserPage={() => {
+                      if (selectedBrowserSession?.lastUrl) {
+                        void api
+                          .openExternalUrl(selectedBrowserSession.lastUrl)
+                          .catch((error) =>
+                            showToast(`Could not open browser page: ${String(error)}`, 'error')
+                          );
+                      }
+                    }}
+                  />
+                </Suspense>
               ) : null}
             </div>
           </>
@@ -2963,45 +3267,67 @@ export default function App() {
       />
 
       <CommandPalette open={paletteOpen} actions={paletteActions} onClose={() => setPaletteOpen(false)} />
-      <ControlCenterDialog
-        open={controlCenter != null}
-        initialTab={controlCenter ?? 'settings'}
-        settings={settings}
-        catalog={catalog}
-        diagnostics={codex.diagnostics}
-        dataRoot={dataRoot}
-        selfTestResult={selfTestResult}
-        busy={controlBusy}
-        onClose={() => setControlCenter(null)}
-        onSaveSettings={(next) => void saveSettings(next)}
-        onRestartRuntime={() => void restartRuntime()}
-        onRunSelfTest={() => {
-          setControlBusy(true);
-          void api
-            .runCodexSelfTest()
-            .then(setSelfTestResult)
-            .catch((error) => setSelfTestResult({ ok: false, error: String(error) }))
-            .finally(() => setControlBusy(false));
-        }}
-        onRegenerateProtocol={() => {
-          setControlBusy(true);
-          void api
-            .regenerateCodexProtocolSnapshot()
-            .then((path) => {
-              setSelfTestResult({ ok: true, generatedProtocolSnapshot: path });
-              showToast('Protocol bindings regenerated', 'success');
-            })
-            .catch((error) => setSelfTestResult({ ok: false, error: String(error) }))
-            .finally(() => setControlBusy(false));
-        }}
-        onCopyDiagnostics={() => void copyText(JSON.stringify(codex.diagnostics, null, 2), 'Diagnostics')}
-        onOpenDataRoot={() => void api.openInFinder(dataRoot)}
-        onOpenCodexConfiguration={() =>
-          void api
-            .openCodexConfiguration()
-            .catch((error) => showToast(`Could not open Codex configuration: ${String(error)}`, 'error'))
-        }
-      />
+      {controlCenter ? (
+        <Suspense fallback={null}>
+          <ControlCenterDialog
+            open
+            initialTab={controlCenter}
+            settings={settings}
+            catalog={catalog}
+            diagnostics={codex.diagnostics}
+            browserDiagnostics={browserDiagnostics}
+            browserSetupPlan={browserSetupPlan}
+            browserSelfTestResult={browserSelfTestResult}
+            dataRoot={dataRoot}
+            selfTestResult={selfTestResult}
+            busy={controlBusy}
+            onClose={() => setControlCenter(null)}
+            onSaveSettings={(next) => void saveSettings(next)}
+            onRestartRuntime={() => void restartRuntime()}
+            onRunSelfTest={() => {
+              setControlBusy(true);
+              void api
+                .runCodexSelfTest()
+                .then(setSelfTestResult)
+                .catch((error) => setSelfTestResult({ ok: false, error: String(error) }))
+                .finally(() => setControlBusy(false));
+            }}
+            onRegenerateProtocol={() => {
+              setControlBusy(true);
+              void api
+                .regenerateCodexProtocolSnapshot()
+                .then((path) => {
+                  setSelfTestResult({ ok: true, generatedProtocolSnapshot: path });
+                  showToast('Protocol bindings regenerated', 'success');
+                })
+                .catch((error) => setSelfTestResult({ ok: false, error: String(error) }))
+                .finally(() => setControlBusy(false));
+            }}
+            onCopyDiagnostics={() => void copyText(JSON.stringify(codex.diagnostics, null, 2), 'Diagnostics')}
+            onOpenDataRoot={() => void api.openInFinder(dataRoot)}
+            onOpenCodexConfiguration={() =>
+              void api
+                .openCodexConfiguration()
+                .catch((error) => showToast(`Could not open Codex configuration: ${String(error)}`, 'error'))
+            }
+            onConfigureBrowser={() => void configureBrowser()}
+            onRunBrowserSelfTest={() => void runBrowserSelfTest()}
+            onCopyBrowserDiagnostics={() =>
+              void copyText(
+                JSON.stringify(browserDiagnostics, null, 2),
+                'Browser diagnostics'
+              )
+            }
+            onOpenBrowserCache={() =>
+              void api
+                .openBrowserCache()
+                .catch((error) =>
+                  showToast(`Could not open screenshot cache: ${String(error)}`, 'error')
+                )
+            }
+          />
+        </Suspense>
+      ) : null}
 
       <div className="toast-region" aria-live="polite">
         {toasts.map((toast) => (

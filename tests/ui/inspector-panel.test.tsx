@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { InspectorPanel } from '../../src/components/InspectorPanel';
 import type {
+  BrowserDiagnostics,
+  BrowserSessionMetadata,
   CodexDiagnostics,
   CodexThread,
   GitInfo,
@@ -100,10 +102,52 @@ const diagnostics: CodexDiagnostics = {
   restartAttempts: 0
 };
 
+const browserDiagnostics: BrowserDiagnostics = {
+  node: { available: true, path: '/opt/node', version: 'v22.22.0' },
+  npx: { available: true, path: '/opt/npx', version: '10.9.4' },
+  browser: { available: true, path: '/opt/chrome', version: 'Chrome 150' },
+  playwrightBrowsersAvailable: true,
+  configuration: {
+    serverName: 'atcontroller-playwright',
+    configured: true,
+    managedByAtcontroller: true,
+    command: '/opt/npx',
+    arguments: ['-y', '@playwright/mcp@0.0.77', '--isolated'],
+    package: '@playwright/mcp',
+    packageVersion: '0.0.77',
+    isolated: true,
+    headed: true,
+    outputDirectory: '/tmp/browser-cache'
+  },
+  codexCanSeeServer: true,
+  codexCanSeeBrowserTools: true,
+  toolNames: ['browser_navigate', 'browser_take_screenshot'],
+  screenshotCachePath: '/tmp/browser-cache',
+  connectionState: 'ready'
+};
+
+const browserSession: BrowserSessionMetadata = {
+  threadId: 'thread-1',
+  workspacePath: '/tmp/project',
+  browserSessionId: 'browser-session-1',
+  state: 'ready',
+  lastUrl: 'http://127.0.0.1:3000/',
+  lastPageTitle: 'Local application',
+  panelVisible: true,
+  windowVisible: true,
+  controlOwner: 'codex',
+  lastActivityAt: '2026-07-29T12:00:00Z',
+  consoleErrorCount: 2,
+  failedRequestCount: 1,
+  recentActivities: []
+};
+
 function props() {
   return {
     thread,
     diagnostics,
+    browserDiagnostics: null,
+    browserBusy: false,
     gitInfo,
     gitStatus,
     gitBranches: [
@@ -122,7 +166,11 @@ function props() {
     onCopyResume: vi.fn(),
     onOpenResumeInTerminal: vi.fn(),
     onOpenTerminal: vi.fn(),
-    onRestartRuntime: vi.fn()
+    onRestartRuntime: vi.fn(),
+    onBrowserAction: vi.fn(),
+    onBrowserSetup: vi.fn(),
+    onBrowserDiagnostics: vi.fn(),
+    onOpenBrowserPage: vi.fn()
   };
 }
 
@@ -171,5 +219,50 @@ describe('structured session inspector', () => {
       screen.getByRole('button', { name: /Restart Codex runtime/ })
     );
     expect(control.onRestartRuntime).toHaveBeenCalledOnce();
+  });
+
+  it('shows browser state and routes browser lifecycle actions', async () => {
+    const user = userEvent.setup();
+    const control = {
+      ...props(),
+      browserDiagnostics,
+      browserSession
+    };
+    render(<InspectorPanel {...control} />);
+
+    await user.click(screen.getByRole('button', { name: /^browser/i }));
+    expect(screen.getByText('Local application')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Take Control' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Inspect console errors' })
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Inspect failed requests' })
+    );
+    expect(control.onBrowserAction).toHaveBeenNthCalledWith(1, 'takeControl');
+    expect(control.onBrowserAction).toHaveBeenNthCalledWith(2, 'inspectConsole');
+    expect(control.onBrowserAction).toHaveBeenNthCalledWith(3, 'inspectNetwork');
+  });
+
+  it('offers explicit browser recovery after an app-server disconnect', async () => {
+    const user = userEvent.setup();
+    const control = {
+      ...props(),
+      browserDiagnostics,
+      browserSession: {
+        ...browserSession,
+        state: 'disconnected' as const,
+        windowVisible: false
+      }
+    };
+    render(<InspectorPanel {...control} />);
+
+    await user.click(screen.getByRole('button', { name: /^browser/i }));
+    expect(screen.getByText('Browser disconnected')).toBeInTheDocument();
+    await user.click(
+      screen.getByRole('button', { name: 'Recover Browser Session' })
+    );
+    expect(control.onBrowserAction).toHaveBeenCalledWith('restart');
   });
 });

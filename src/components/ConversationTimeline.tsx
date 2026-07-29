@@ -13,6 +13,7 @@ import remarkGfm from 'remark-gfm';
 
 import { api } from '../lib/api';
 import type {
+  BrowserActivity,
   CodexApprovalRequest,
   CodexFileChange,
   CodexItem,
@@ -40,6 +41,7 @@ interface ConversationTimelineProps {
   onRevealPath: (path: string) => void;
   onRevertFile: (path: string) => void;
   onOpenTerminal: (path: string) => void;
+  onOpenBrowser?: (url: string) => void;
 }
 
 const INITIAL_VISIBLE_TURNS = 24;
@@ -47,6 +49,22 @@ const EARLIER_TURN_PAGE_SIZE = 24;
 const THREAD_FIND_HIGHLIGHT = 'atcontroller-thread-find';
 const THREAD_FIND_ACTIVE_HIGHLIGHT = 'atcontroller-thread-find-active';
 const MAX_THREAD_FIND_MATCHES = 2_000;
+const LOCAL_DEVELOPMENT_URL =
+  /https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(?::\d{1,5})?(?:\/[^\s"'<>]*)?/gi;
+
+export function findLocalDevelopmentUrl(text: string): string | null {
+  for (const match of text.matchAll(LOCAL_DEVELOPMENT_URL)) {
+    const candidate = match[0].replace(/[),.;:\]}]+$/g, '');
+    try {
+      const url = new URL(candidate);
+      if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
+      return url.toString();
+    } catch {
+      // Keep scanning bounded command output for another valid local URL.
+    }
+  }
+  return null;
+}
 
 interface WritableHighlightRegistry {
   set: (name: string, highlight: Highlight) => void;
@@ -339,11 +357,13 @@ function PlanItem({ item }: { item: CodexItem }) {
 function CommandItem({
   item,
   onCopy,
-  onOpenTerminal
+  onOpenTerminal,
+  onOpenBrowser
 }: {
   item: CodexItem;
   onCopy: ConversationTimelineProps['onCopy'];
   onOpenTerminal: ConversationTimelineProps['onOpenTerminal'];
+  onOpenBrowser: ConversationTimelineProps['onOpenBrowser'];
 }) {
   const [expanded, setExpanded] = useState(false);
   const [fullCommand, setFullCommand] = useState(false);
@@ -355,6 +375,7 @@ function CommandItem({
       : output;
   const command = item.command || 'Command details unavailable';
   const commandIsLong = command.length > 160 || command.includes('\n');
+  const localDevelopmentUrl = findLocalDevelopmentUrl(`${output}\n${command}`);
   return (
     <article className={`activity-card command-card ${running ? 'running' : ''}`} data-item-id={item.id}>
       <header>
@@ -388,6 +409,11 @@ function CommandItem({
             ) : null}
             <button type="button" onClick={() => onCopy(item.command ?? '', 'Command')}>Copy command</button>
             <button type="button" onClick={() => onCopy(output, 'Command output')}>Copy output</button>
+            {localDevelopmentUrl && onOpenBrowser ? (
+              <button type="button" onClick={() => onOpenBrowser(localDevelopmentUrl)}>
+                Open in Browser
+              </button>
+            ) : null}
             {item.cwd ? <button type="button" onClick={() => onOpenTerminal(item.cwd!)}>Open in Project Terminal</button> : null}
           </footer>
         </>
@@ -399,6 +425,11 @@ function CommandItem({
             </button>
           ) : null}
           <button type="button" onClick={() => onCopy(item.command ?? '', 'Command')}>Copy command</button>
+          {localDevelopmentUrl && onOpenBrowser ? (
+            <button type="button" onClick={() => onOpenBrowser(localDevelopmentUrl)}>
+              Open in Browser
+            </button>
+          ) : null}
           {item.cwd ? <button type="button" onClick={() => onOpenTerminal(item.cwd!)}>Open in Project Terminal</button> : null}
         </footer>
       )}
@@ -521,6 +552,125 @@ function ToolItem({ item }: { item: CodexItem }) {
         <pre>{JSON.stringify(item.toolResult ?? item.details ?? item.toolArguments, null, 2)}</pre>
       ) : null}
     </details>
+  );
+}
+
+function BrowserActivityCard({
+  activity,
+  onCopy
+}: {
+  activity: BrowserActivity;
+  onCopy: ConversationTimelineProps['onCopy'];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [screenshot, setScreenshot] = useState<string | null>(null);
+  const [screenshotError, setScreenshotError] = useState('');
+  const failed = activity.status === 'failed' || Boolean(activity.error);
+  const running = activity.status === 'inProgress';
+
+  useEffect(() => {
+    if (
+      !expanded ||
+      !activity.screenshotReference ||
+      !activity.threadId ||
+      screenshot ||
+      screenshotError
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void api
+      .readBrowserScreenshot(activity.threadId, activity.screenshotReference)
+      .then((result) => {
+        if (!cancelled) setScreenshot(result.dataUrl);
+      })
+      .catch((error) => {
+        if (!cancelled) setScreenshotError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activity.screenshotReference,
+    activity.threadId,
+    expanded,
+    screenshot,
+    screenshotError
+  ]);
+
+  return (
+    <article
+      className={`activity-card browser-activity-card ${failed ? 'failed' : running ? 'running' : 'completed'}`}
+      data-item-id={activity.id}
+      data-browser-activity={activity.activityType}
+    >
+      <header>
+        <span className="activity-icon"><AppIcon name={activity.activityType === 'screenshot' ? 'camera' : 'browser'} /></span>
+        <div className="activity-heading">
+          <strong>{activity.label}</strong>
+          <span>
+            {activity.pageTitle || activity.url || (running ? 'Codex is using the browser…' : 'Playwright')}
+          </span>
+        </div>
+        <span className={`browser-activity-state ${failed ? 'failed' : running ? 'running' : 'completed'}`}>
+          {failed ? 'Failed' : running ? 'Running' : 'Completed'}
+        </span>
+      </header>
+      {activity.url && activity.pageTitle ? (
+        <p className="browser-activity-url" title={activity.url}>{activity.url}</p>
+      ) : null}
+      {activity.summaryLines.length ? (
+        <div className="browser-activity-summary">
+          {activity.summaryLines.map((line) => <span key={line}>{line}</span>)}
+        </div>
+      ) : null}
+      {activity.consoleErrorCount > 0 || activity.failedRequestCount > 0 ? (
+        <div className="browser-activity-counts">
+          {activity.consoleErrorCount > 0 ? <span>{activity.consoleErrorCount} console errors</span> : null}
+          {activity.failedRequestCount > 0 ? <span>{activity.failedRequestCount} failed requests</span> : null}
+        </div>
+      ) : null}
+      {activity.error ? <p className="browser-activity-error">{activity.error}</p> : null}
+      {expanded && activity.screenshotReference ? (
+        <div className="browser-screenshot-preview">
+          {screenshot ? (
+            <img src={screenshot} alt={`Screenshot from ${activity.pageTitle || 'browser page'}`} />
+          ) : screenshotError ? (
+            <p>{screenshotError}</p>
+          ) : (
+            <span>Loading screenshot…</span>
+          )}
+        </div>
+      ) : null}
+      <footer className="activity-actions">
+        {activity.durationMs != null ? <time>{formatDuration(activity.durationMs)}</time> : null}
+        {activity.url ? <button type="button" onClick={() => onCopy(activity.url!, 'Browser URL')}>Copy URL</button> : null}
+        {activity.screenshotReference ? (
+          <button type="button" onClick={() => setExpanded((value) => !value)}>
+            {expanded ? 'Hide screenshot' : 'View screenshot'}
+          </button>
+        ) : null}
+        {activity.screenshotReference && activity.threadId ? (
+          <button
+            type="button"
+            onClick={() =>
+              void api.revealBrowserScreenshot(
+                activity.threadId!,
+                activity.screenshotReference!
+              )
+            }
+          >
+            Reveal
+          </button>
+        ) : null}
+      </footer>
+      {activity.details ? (
+        <details className="browser-developer-details">
+          <summary>Developer details</summary>
+          <pre>{JSON.stringify(activity.details, null, 2)}</pre>
+        </details>
+      ) : null}
+    </article>
   );
 }
 
@@ -740,10 +890,16 @@ function TimelineItem({
   onOpenFile,
   onRevealPath,
   onRevertFile,
-  onOpenTerminal
+  onOpenTerminal,
+  onOpenBrowser
 }: Pick<
   ConversationTimelineProps,
-  'onCopy' | 'onOpenFile' | 'onRevealPath' | 'onRevertFile' | 'onOpenTerminal'
+  | 'onCopy'
+  | 'onOpenFile'
+  | 'onRevealPath'
+  | 'onRevertFile'
+  | 'onOpenTerminal'
+  | 'onOpenBrowser'
 > & { item: CodexItem }) {
   switch (item.kind) {
     case 'userMessage':
@@ -759,7 +915,14 @@ function TimelineItem({
     case 'plan':
       return <PlanItem item={item} />;
     case 'commandExecution':
-      return <CommandItem item={item} onCopy={onCopy} onOpenTerminal={onOpenTerminal} />;
+      return (
+        <CommandItem
+          item={item}
+          onCopy={onCopy}
+          onOpenTerminal={onOpenTerminal}
+          onOpenBrowser={onOpenBrowser}
+        />
+      );
     case 'fileChange':
       return (
         <FileChangeItem
@@ -771,6 +934,11 @@ function TimelineItem({
         />
       );
     case 'mcpToolCall':
+      return item.browserActivity ? (
+        <BrowserActivityCard activity={item.browserActivity} onCopy={onCopy} />
+      ) : (
+        <ToolItem item={item} />
+      );
     case 'dynamicToolCall':
     case 'collabAgentToolCall':
     case 'webSearch':
@@ -793,7 +961,8 @@ function TurnBlockComponent({
   onOpenFile,
   onRevealPath,
   onRevertFile,
-  onOpenTerminal
+  onOpenTerminal,
+  onOpenBrowser
 }: Omit<ConversationTimelineProps, 'thread' | 'usage'> & {
   turn: CodexTurn;
 }) {
@@ -814,6 +983,7 @@ function TurnBlockComponent({
             onRevealPath={onRevealPath}
             onRevertFile={onRevertFile}
             onOpenTerminal={onOpenTerminal}
+            onOpenBrowser={onOpenBrowser}
           />
           {itemApprovals.has(item.id) ? (
             <ApprovalCard
@@ -868,7 +1038,8 @@ export function ConversationTimeline({
   onOpenFile,
   onRevealPath,
   onRevertFile,
-  onOpenTerminal
+  onOpenTerminal,
+  onOpenBrowser
 }: ConversationTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -1178,6 +1349,7 @@ export function ConversationTimeline({
                   onRevealPath={onRevealPath}
                   onRevertFile={onRevertFile}
                   onOpenTerminal={onOpenTerminal}
+                  onOpenBrowser={onOpenBrowser}
                 />
               ))}
             </>

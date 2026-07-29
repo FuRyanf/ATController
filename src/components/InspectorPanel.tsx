@@ -1,6 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
+import { api } from '../lib/api';
 import type {
+  BrowserAction,
+  BrowserDiagnostics,
+  BrowserSessionMetadata,
   CodexDiagnostics,
   CodexFileChange,
   CodexThread,
@@ -13,13 +17,16 @@ import type {
 } from '../types';
 import { AppIcon } from './AppIcon';
 
-type InspectorTab = 'changes' | 'commands' | 'thread' | 'runtime';
+type InspectorTab = 'changes' | 'commands' | 'browser' | 'thread' | 'runtime';
 
 interface InspectorPanelProps {
   thread: CodexThread;
   session?: CodexThreadSession;
   metadata?: CodexThreadUiMetadata;
   diagnostics: CodexDiagnostics | null;
+  browserSession?: BrowserSessionMetadata;
+  browserDiagnostics: BrowserDiagnostics | null;
+  browserBusy: boolean;
   gitInfo: GitInfo | null;
   gitStatus: GitWorkspaceStatus | null;
   gitBranches: GitBranchEntry[];
@@ -36,6 +43,10 @@ interface InspectorPanelProps {
   onOpenResumeInTerminal: () => void;
   onOpenTerminal: (path: string) => void;
   onRestartRuntime: () => void;
+  onBrowserAction: (action: BrowserAction) => void;
+  onBrowserSetup: () => void;
+  onBrowserDiagnostics: () => void;
+  onOpenBrowserPage: () => void;
 }
 
 function allFileChanges(thread: CodexThread): CodexFileChange[] {
@@ -60,6 +71,9 @@ export function InspectorPanel({
   session,
   metadata,
   diagnostics,
+  browserSession,
+  browserDiagnostics,
+  browserBusy,
   gitInfo,
   gitStatus,
   gitBranches,
@@ -75,7 +89,11 @@ export function InspectorPanel({
   onCopyResume,
   onOpenResumeInTerminal,
   onOpenTerminal,
-  onRestartRuntime
+  onRestartRuntime,
+  onBrowserAction,
+  onBrowserSetup,
+  onBrowserDiagnostics,
+  onOpenBrowserPage
 }: InspectorPanelProps) {
   const [tab, setTab] = useState<InspectorTab>('changes');
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
@@ -83,6 +101,8 @@ export function InspectorPanel({
   const [diffError, setDiffError] = useState('');
   const [loadingDiff, setLoadingDiff] = useState(false);
   const [newBranch, setNewBranch] = useState('');
+  const [browserScreenshot, setBrowserScreenshot] = useState('');
+  const [browserScreenshotError, setBrowserScreenshotError] = useState('');
   const changes = useMemo(() => allFileChanges(thread), [thread]);
   const workingFiles = useMemo<GitChangedFile[]>(
     () =>
@@ -103,11 +123,34 @@ export function InspectorPanel({
     [thread]
   );
 
+  useEffect(() => {
+    const reference = browserSession?.lastScreenshotReference;
+    if (tab !== 'browser' || !reference) {
+      setBrowserScreenshot('');
+      setBrowserScreenshotError('');
+      return;
+    }
+    let cancelled = false;
+    setBrowserScreenshot('');
+    setBrowserScreenshotError('');
+    void api
+      .readBrowserScreenshot(thread.id, reference)
+      .then((screenshot) => {
+        if (!cancelled) setBrowserScreenshot(screenshot.dataUrl);
+      })
+      .catch((error) => {
+        if (!cancelled) setBrowserScreenshotError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [browserSession?.lastScreenshotReference, tab, thread.id]);
+
   return (
     <aside className="inspector-panel">
       <header className="inspector-header">
         <nav aria-label="Inspector">
-          {(['changes', 'commands', 'thread', 'runtime'] as const).map((candidate) => (
+          {(['changes', 'commands', 'browser', 'thread', 'runtime'] as const).map((candidate) => (
             <button
               key={candidate}
               type="button"
@@ -117,6 +160,7 @@ export function InspectorPanel({
               {candidate}
               {candidate === 'changes' && workingFiles.length ? <span>{workingFiles.length}</span> : null}
               {candidate === 'commands' && commands.length ? <span>{commands.length}</span> : null}
+              {candidate === 'browser' && browserSession?.recentActivities.length ? <span>{browserSession.recentActivities.length}</span> : null}
             </button>
           ))}
         </nav>
@@ -265,6 +309,113 @@ export function InspectorPanel({
                   </footer>
                 </article>
               ))}
+            </div>
+          )
+        ) : null}
+
+        {tab === 'browser' ? (
+          !browserDiagnostics?.configuration.configured ? (
+            <div className="inspector-empty browser-empty-state">
+              <AppIcon name="browser" size={22} />
+              <strong>Browser setup required</strong>
+              <p>Connect Playwright MCP to let Codex inspect and test web applications.</p>
+              <button type="button" onClick={onBrowserSetup}>Open Browser Setup</button>
+            </div>
+          ) : !browserSession || browserSession.state === 'stopped' ? (
+            <div className="inspector-empty browser-empty-state">
+              <AppIcon name="browser" size={22} />
+              <strong>No browser session</strong>
+              <p>Ask Codex to open the application in a browser, or start a headed session manually.</p>
+              <button type="button" disabled={browserBusy} onClick={() => onBrowserAction('open')}>Open Browser</button>
+            </div>
+          ) : browserSession.state === 'disconnected' ||
+            browserSession.state === 'failed' ? (
+            <div className="inspector-empty browser-empty-state">
+              <AppIcon name="warning" size={22} />
+              <strong>
+                {browserSession.state === 'disconnected'
+                  ? 'Browser disconnected'
+                  : 'Browser session failed'}
+              </strong>
+              <p>
+                {browserSession.failure ||
+                  'The isolated browser is no longer connected to this Codex thread.'}
+              </p>
+              <button
+                type="button"
+                disabled={browserBusy}
+                onClick={() => onBrowserAction('restart')}
+              >
+                Recover Browser Session
+              </button>
+              <button type="button" onClick={onBrowserDiagnostics}>
+                Browser Diagnostics
+              </button>
+            </div>
+          ) : (
+            <div className="browser-inspector">
+              <section className="browser-inspector-status">
+                <span className={`browser-state-dot ${browserSession.state}`} />
+                <div>
+                  <strong>{browserSession.lastPageTitle || 'Browser session'}</strong>
+                  <p>{browserSession.controlOwner === 'user' ? 'User controlling browser' : browserSession.state === 'codexActive' ? 'Codex controlling browser' : 'Ready for Codex'}</p>
+                </div>
+              </section>
+              {browserSession.lastUrl ? (
+                <button
+                  type="button"
+                  className="browser-current-url"
+                  title={browserSession.lastUrl}
+                  onClick={onOpenBrowserPage}
+                >
+                  {browserSession.lastUrl}
+                </button>
+              ) : null}
+              {browserSession.lastScreenshotReference ? (
+                <section className="browser-inspector-screenshot">
+                  <header>
+                    <strong>Latest screenshot</strong>
+                    <button type="button" disabled={browserBusy} onClick={() => onBrowserAction('takeScreenshot')}>Refresh</button>
+                  </header>
+                  {browserScreenshot ? (
+                    <img src={browserScreenshot} alt={`Latest browser view for ${browserSession.lastPageTitle || thread.title}`} />
+                  ) : browserScreenshotError ? (
+                    <p>{browserScreenshotError}</p>
+                  ) : (
+                    <div className="browser-screenshot-loading">Loading screenshot…</div>
+                  )}
+                </section>
+              ) : (
+                <button type="button" className="browser-capture-empty" disabled={browserBusy} onClick={() => onBrowserAction('takeScreenshot')}>
+                  <AppIcon name="camera" />
+                  Capture the current page
+                </button>
+              )}
+              <section className="browser-inspector-metrics">
+                <div><strong>{browserSession.consoleErrorCount}</strong><span>Console errors</span></div>
+                <div><strong>{browserSession.failedRequestCount}</strong><span>Failed requests</span></div>
+              </section>
+              <section className="browser-recent-actions">
+                <h3>Recent activity</h3>
+                {browserSession.recentActivities.slice(-8).reverse().map((activity) => (
+                  <div key={`${activity.id}-${activity.timestamp}`}>
+                    <span className={`browser-state-dot ${activity.status === 'failed' ? 'failed' : activity.status === 'inProgress' ? 'codexActive' : 'ready'}`} />
+                    <span><strong>{activity.label}</strong><small>{activity.pageTitle || activity.url || activity.tool}</small></span>
+                  </div>
+                ))}
+              </section>
+              <section className="inspector-button-stack">
+                {browserSession.controlOwner === 'user' ? (
+                  <button type="button" disabled={browserBusy} onClick={() => onBrowserAction('returnToCodex')}><AppIcon name="check" />Return to Codex</button>
+                ) : (
+                  <button type="button" disabled={browserBusy} onClick={() => onBrowserAction('takeControl')}><AppIcon name="browser" />Take Control</button>
+                )}
+                <button type="button" disabled={browserBusy} onClick={() => onBrowserAction('inspectConsole')}><AppIcon name="code" />Inspect console errors</button>
+                <button type="button" disabled={browserBusy} onClick={() => onBrowserAction('inspectNetwork')}><AppIcon name="info" />Inspect failed requests</button>
+                <button type="button" disabled={browserBusy} onClick={() => onBrowserAction('restart')}><AppIcon name="refresh" />Restart browser session</button>
+                <button type="button" disabled={browserBusy} onClick={() => onBrowserAction('stop')}><AppIcon name="stop" />Stop browser session</button>
+                <button type="button" onClick={onBrowserDiagnostics}><AppIcon name="info" />Browser diagnostics</button>
+              </section>
             </div>
           )
         ) : null}

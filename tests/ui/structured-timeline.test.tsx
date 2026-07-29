@@ -2,7 +2,10 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import { ConversationTimeline } from '../../src/components/ConversationTimeline';
+import {
+  ConversationTimeline,
+  findLocalDevelopmentUrl
+} from '../../src/components/ConversationTimeline';
 import type { CodexApprovalRequest, CodexThread } from '../../src/types';
 
 function structuredThread(): CodexThread {
@@ -261,6 +264,39 @@ describe('structured Codex timeline', () => {
     expect(revertFile).toHaveBeenCalledWith('/tmp/project/hello.txt');
   });
 
+  it('offers local development-server URLs to the isolated browser', async () => {
+    expect(
+      findLocalDevelopmentUrl(
+        'ready at http://0.0.0.0:4317/dashboard?token=temporary.'
+      )
+    ).toBe('http://127.0.0.1:4317/dashboard?token=temporary');
+    expect(findLocalDevelopmentUrl('https://example.com')).toBeNull();
+
+    const user = userEvent.setup();
+    const onOpenBrowser = vi.fn();
+    const thread = structuredThread();
+    const command = thread.turns[0].items.find(
+      (item) => item.kind === 'commandExecution'
+    )!;
+    command.output = 'Vite ready at http://localhost:5173/';
+    render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={vi.fn()}
+        onOpenFile={vi.fn()}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+        onOpenBrowser={onOpenBrowser}
+      />
+    );
+    await user.click(screen.getByRole('button', { name: 'Open in Browser' }));
+    expect(onOpenBrowser).toHaveBeenCalledWith('http://localhost:5173/');
+  });
+
   it('renders safe GitHub-flavored Markdown with copyable fenced code', async () => {
     const user = userEvent.setup();
     const onCopy = vi.fn();
@@ -502,5 +538,55 @@ describe('structured Codex timeline', () => {
     );
     expect(screen.getByText('Pasted image')).toBeInTheDocument();
     expect(screen.queryByText(/INLINEIMAGEBYTES/)).not.toBeInTheDocument();
+  });
+
+  it('renders structured Playwright activity without exposing raw form input', () => {
+    const thread = structuredThread();
+    thread.turns[0].items.splice(1, 0, {
+      id: 'browser-1',
+      kind: 'mcpToolCall',
+      status: 'completed',
+      toolServer: 'atcontroller-playwright',
+      toolName: 'browser_click',
+      toolArguments: { element: 'Create project', value: '[redacted]' },
+      browserActivity: {
+        id: 'browser-1',
+        activityType: 'click',
+        label: 'Clicked “Create project”',
+        status: 'completed',
+        server: 'atcontroller-playwright',
+        tool: 'browser_click',
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        pageTitle: 'Projects',
+        url: 'http://127.0.0.1:3000/projects',
+        target: 'Create project',
+        consoleErrorCount: 0,
+        failedRequestCount: 0,
+        summaryLines: [],
+        details: { value: '[redacted]' },
+        timestamp: '2026-07-29T12:00:00Z'
+      },
+      summary: [],
+      reasoning: [],
+      content: [],
+      changes: []
+    });
+    render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={vi.fn()}
+        onOpenFile={vi.fn()}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+      />
+    );
+    expect(screen.getByText('Clicked “Create project”')).toBeInTheDocument();
+    expect(screen.getByText('Projects')).toBeInTheDocument();
+    expect(screen.queryByText('do-not-persist')).not.toBeInTheDocument();
   });
 });

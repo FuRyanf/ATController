@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { ControlCenterDialog } from '../../src/components/ControlCenterDialog';
 import type {
+  BrowserDiagnostics,
+  BrowserSetupPlan,
   CodexDiagnostics,
   CodexRuntimeCatalog,
   Settings
@@ -85,6 +87,46 @@ const diagnostics: CodexDiagnostics = {
   restartAttempts: 0
 };
 
+const browserDiagnostics: BrowserDiagnostics = {
+  node: { available: true, path: '/opt/node', version: 'v22.22.0' },
+  npx: { available: true, path: '/opt/npx', version: '10.9.4' },
+  browser: {
+    available: true,
+    path: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    version: 'Google Chrome 150'
+  },
+  playwrightBrowsersAvailable: true,
+  configuration: {
+    serverName: 'atcontroller-playwright',
+    configured: false,
+    managedByAtcontroller: false,
+    arguments: [],
+    package: '@playwright/mcp',
+    packageVersion: '0.0.77',
+    isolated: true,
+    headed: true,
+    outputDirectory: '/tmp/browser-cache'
+  },
+  codexCanSeeServer: false,
+  codexCanSeeBrowserTools: false,
+  toolNames: [],
+  screenshotCachePath: '/tmp/browser-cache',
+  connectionState: 'notConfigured'
+};
+
+const browserSetupPlan: BrowserSetupPlan = {
+  ready: false,
+  canConfigure: true,
+  requiresReplacement: false,
+  command:
+    '/opt/codex mcp add atcontroller-playwright -- /opt/npx -y @playwright/mcp@0.0.77 --isolated',
+  serverName: 'atcontroller-playwright',
+  package: '@playwright/mcp',
+  packageVersion: '0.0.77',
+  effects: ['Register the Playwright MCP package'],
+  blockers: []
+};
+
 function props() {
   return {
     open: true,
@@ -92,6 +134,9 @@ function props() {
     settings,
     catalog,
     diagnostics,
+    browserDiagnostics,
+    browserSetupPlan,
+    browserSelfTestResult: null,
     dataRoot: '/tmp/ATController',
     selfTestResult: null,
     busy: false,
@@ -102,7 +147,11 @@ function props() {
     onRegenerateProtocol: vi.fn(),
     onCopyDiagnostics: vi.fn(),
     onOpenDataRoot: vi.fn(),
-    onOpenCodexConfiguration: vi.fn()
+    onOpenCodexConfiguration: vi.fn(),
+    onConfigureBrowser: vi.fn(),
+    onRunBrowserSelfTest: vi.fn(),
+    onCopyBrowserDiagnostics: vi.fn(),
+    onOpenBrowserCache: vi.fn()
   };
 }
 
@@ -167,5 +216,18 @@ describe('ATController control center', () => {
     expect(control.onCopyDiagnostics).toHaveBeenCalledOnce();
     expect(control.onOpenDataRoot).toHaveBeenCalledOnce();
     expect(control.onOpenCodexConfiguration).toHaveBeenCalledOnce();
+  });
+
+  it('previews the exact Playwright MCP change before configuring it', async () => {
+    const user = userEvent.setup();
+    const control = { ...props(), initialTab: 'browser' as const };
+    render(<ControlCenterDialog {...control} />);
+
+    expect(screen.getAllByText(/@playwright\/mcp@0\.0\.77/)).toHaveLength(2);
+    expect(screen.getByText('Isolated per MCP client')).toBeInTheDocument();
+    await user.click(
+      screen.getByRole('button', { name: /Configure Playwright MCP/ })
+    );
+    expect(control.onConfigureBrowser).toHaveBeenCalledOnce();
   });
 });

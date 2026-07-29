@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 
 import type {
   AppearanceMode,
+  BrowserDiagnostics,
+  BrowserSelfTestResult,
+  BrowserSetupPlan,
   CodexDiagnostics,
   CodexRuntimeCatalog,
   PermissionMode,
@@ -9,7 +12,7 @@ import type {
 } from '../types';
 import { AppIcon } from './AppIcon';
 
-type ControlCenterTab = 'settings' | 'diagnostics';
+type ControlCenterTab = 'settings' | 'diagnostics' | 'browser';
 
 interface ControlCenterDialogProps {
   open: boolean;
@@ -17,6 +20,9 @@ interface ControlCenterDialogProps {
   settings: Settings;
   catalog: CodexRuntimeCatalog | null;
   diagnostics: CodexDiagnostics | null;
+  browserDiagnostics: BrowserDiagnostics | null;
+  browserSetupPlan: BrowserSetupPlan | null;
+  browserSelfTestResult: BrowserSelfTestResult | Record<string, unknown> | null;
   dataRoot: string;
   selfTestResult: Record<string, unknown> | null;
   busy: boolean;
@@ -28,6 +34,10 @@ interface ControlCenterDialogProps {
   onCopyDiagnostics: () => void;
   onOpenDataRoot: () => void;
   onOpenCodexConfiguration: () => void;
+  onConfigureBrowser: () => void;
+  onRunBrowserSelfTest: () => void;
+  onCopyBrowserDiagnostics: () => void;
+  onOpenBrowserCache: () => void;
 }
 
 function usageRemaining(usedPercent?: number): string {
@@ -56,6 +66,9 @@ export function ControlCenterDialog({
   settings,
   catalog,
   diagnostics,
+  browserDiagnostics,
+  browserSetupPlan,
+  browserSelfTestResult,
   dataRoot,
   selfTestResult,
   busy,
@@ -66,7 +79,11 @@ export function ControlCenterDialog({
   onRegenerateProtocol,
   onCopyDiagnostics,
   onOpenDataRoot,
-  onOpenCodexConfiguration
+  onOpenCodexConfiguration,
+  onConfigureBrowser,
+  onRunBrowserSelfTest,
+  onCopyBrowserDiagnostics,
+  onOpenBrowserCache
 }: ControlCenterDialogProps) {
   const [tab, setTab] = useState<ControlCenterTab>(initialTab);
   const [draft, setDraft] = useState(settings);
@@ -117,6 +134,17 @@ export function ControlCenterDialog({
           <button type="button" className={tab === 'diagnostics' ? 'active' : ''} onClick={() => setTab('diagnostics')}>
             Diagnostics
             <span className={`runtime-dot ${diagnostics?.connectionState ?? 'stopped'}`} />
+          </button>
+          <button type="button" className={tab === 'browser' ? 'active' : ''} onClick={() => setTab('browser')}>
+            Browser
+            <span
+              className={`runtime-dot ${
+                browserDiagnostics?.configuration.configured &&
+                browserDiagnostics.codexCanSeeBrowserTools
+                  ? 'ready'
+                  : 'stopped'
+              }`}
+            />
           </button>
         </nav>
 
@@ -282,7 +310,7 @@ export function ControlCenterDialog({
                 <div><span>Plan</span><strong>{catalog?.account.planType ?? 'Not supplied'}</strong></div>
               </section>
             </div>
-          ) : (
+          ) : tab === 'diagnostics' ? (
             <div className="diagnostics-view">
               <section className="diagnostics-hero">
                 <span className={`runtime-dot large ${diagnostics?.connectionState ?? 'stopped'}`} />
@@ -340,6 +368,134 @@ export function ControlCenterDialog({
                 <button type="button" onClick={onCopyDiagnostics}><AppIcon name="copy" />Copy diagnostics</button>
                 <button type="button" onClick={onOpenDataRoot}><AppIcon name="folder" />Open data directory</button>
                 <button type="button" onClick={onOpenCodexConfiguration}><AppIcon name="folder" />Open Codex configuration</button>
+              </div>
+            </div>
+          ) : (
+            <div className="diagnostics-view browser-control-center">
+              <section className="diagnostics-hero">
+                <span
+                  className={`runtime-dot large ${
+                    browserDiagnostics?.configuration.configured &&
+                    browserDiagnostics.codexCanSeeBrowserTools
+                      ? 'ready'
+                      : 'stopped'
+                  }`}
+                />
+                <div>
+                  <h3>
+                    {browserDiagnostics?.codexCanSeeBrowserTools
+                      ? 'Playwright browser tools ready'
+                      : browserDiagnostics?.configuration.configured
+                        ? 'Playwright MCP configured'
+                        : 'Browser setup required'}
+                  </h3>
+                  <p>
+                    Codex uses an isolated, headed browser through structured
+                    Playwright MCP tool calls.
+                  </p>
+                </div>
+              </section>
+
+              <section className="diagnostics-table browser-diagnostics-table">
+                <dl>
+                  <div>
+                    <dt>Node.js</dt>
+                    <dd>
+                      {browserDiagnostics?.node.available
+                        ? `${browserDiagnostics.node.version ?? 'Detected'} · ${browserDiagnostics.node.path ?? ''}`
+                        : browserDiagnostics?.node.detail ?? 'Not detected'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>npx</dt>
+                    <dd>
+                      {browserDiagnostics?.npx.available
+                        ? `${browserDiagnostics.npx.version ?? 'Detected'} · ${browserDiagnostics.npx.path ?? ''}`
+                        : browserDiagnostics?.npx.detail ?? 'Not detected'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Browser</dt>
+                    <dd>
+                      {browserDiagnostics?.browser.available
+                        ? `${browserDiagnostics.browser.version ?? 'Detected'} · ${browserDiagnostics.browser.path ?? ''}`
+                        : browserDiagnostics?.browser.detail ?? 'Not detected'}
+                    </dd>
+                  </div>
+                  <div><dt>Playwright browsers</dt><dd>{browserDiagnostics?.playwrightBrowsersAvailable ? 'Available' : 'Not detected'}</dd></div>
+                  <div><dt>MCP server</dt><dd>{browserDiagnostics?.configuration.serverName ?? 'atcontroller-playwright'}</dd></div>
+                  <div><dt>Package</dt><dd>{browserDiagnostics ? `${browserDiagnostics.configuration.package}@${browserDiagnostics.configuration.packageVersion}` : 'Not inspected'}</dd></div>
+                  <div><dt>Configuration</dt><dd>{browserDiagnostics?.configuration.configured ? browserDiagnostics.configuration.managedByAtcontroller ? 'Configured by ATController' : 'Existing configuration' : 'Not configured'}</dd></div>
+                  <div><dt>Codex visibility</dt><dd>{browserDiagnostics?.codexCanSeeServer ? browserDiagnostics.codexCanSeeBrowserTools ? `${browserDiagnostics.toolNames.length} browser tools` : 'Server visible; tools unavailable' : 'Server not visible'}</dd></div>
+                  <div><dt>Profile</dt><dd>{browserDiagnostics?.configuration.isolated ? 'Isolated per MCP client' : 'Not isolated'}</dd></div>
+                  <div><dt>Window</dt><dd>{browserDiagnostics?.configuration.headed ? 'Headed browser' : 'Headless browser'}</dd></div>
+                  <div><dt>Screenshot cache</dt><dd>{browserDiagnostics?.screenshotCachePath ?? 'Not available'}</dd></div>
+                  <div><dt>Connection</dt><dd>{browserDiagnostics?.connectionState ?? 'Unknown'}</dd></div>
+                </dl>
+              </section>
+
+              {!browserDiagnostics?.configuration.configured && browserSetupPlan ? (
+                <section className="browser-setup-plan">
+                  <h3>Configure Playwright MCP</h3>
+                  <p>
+                    ATController will add one named MCP entry to the Codex
+                    configuration. npx downloads the pinned package the first
+                    time it starts. Your personal Chrome profile is never used.
+                  </p>
+                  {browserSetupPlan.command ? (
+                    <pre>{browserSetupPlan.command}</pre>
+                  ) : null}
+                  <ul>
+                    {browserSetupPlan.effects.map((effect) => <li key={effect}>{effect}</li>)}
+                  </ul>
+                  {browserSetupPlan.blockers.length ? (
+                    <div className="browser-setup-blockers">
+                      {browserSetupPlan.blockers.map((blocker) => (
+                        <p key={blocker}><AppIcon name="warning" />{blocker}</p>
+                      ))}
+                    </div>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={busy || !browserSetupPlan.canConfigure}
+                    onClick={onConfigureBrowser}
+                  >
+                    <AppIcon name="browser" />
+                    Configure Playwright MCP
+                  </button>
+                </section>
+              ) : null}
+
+              {browserDiagnostics?.lastError ? (
+                <p className="timeline-error">{browserDiagnostics.lastError}</p>
+              ) : null}
+              {browserSelfTestResult ? (
+                <pre className="self-test-result">
+                  {JSON.stringify(browserSelfTestResult, null, 2)}
+                </pre>
+              ) : null}
+              <div className="diagnostic-actions">
+                <button
+                  type="button"
+                  disabled={busy || !browserDiagnostics?.configuration.configured}
+                  onClick={onRunBrowserSelfTest}
+                >
+                  <AppIcon name="check" />
+                  Run Browser Self Test
+                </button>
+                <button type="button" onClick={onCopyBrowserDiagnostics}>
+                  <AppIcon name="copy" />
+                  Copy Browser Diagnostics
+                </button>
+                <button type="button" onClick={onOpenBrowserCache}>
+                  <AppIcon name="folder" />
+                  Open Screenshot Cache
+                </button>
+                <button type="button" onClick={onOpenCodexConfiguration}>
+                  <AppIcon name="folder" />
+                  Open Codex Configuration
+                </button>
               </div>
             </div>
           )}

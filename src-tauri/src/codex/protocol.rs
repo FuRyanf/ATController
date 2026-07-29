@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -170,6 +171,32 @@ pub struct CodexInputPart {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserActivity {
+    pub id: String,
+    pub activity_type: String,
+    pub label: String,
+    pub status: String,
+    pub server: String,
+    pub tool: String,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub browser_session_id: Option<String>,
+    pub page_id: Option<String>,
+    pub page_title: Option<String>,
+    pub url: Option<String>,
+    pub target: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub screenshot_reference: Option<String>,
+    pub console_error_count: u32,
+    pub failed_request_count: u32,
+    pub summary_lines: Vec<String>,
+    pub details: Option<Value>,
+    pub error: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexItem {
@@ -191,6 +218,7 @@ pub struct CodexItem {
     pub tool_server: Option<String>,
     pub tool_arguments: Option<Value>,
     pub tool_result: Option<Value>,
+    pub browser_activity: Option<BrowserActivity>,
     pub error: Option<String>,
     pub details: Option<Value>,
 }
@@ -534,6 +562,21 @@ pub fn normalize_thread(value: &Value, archived: bool) -> Result<CodexThread> {
                 .take(120)
                 .collect()
         });
+    let mut turns = value
+        .get("turns")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|turn| normalize_turn(turn).ok())
+        .collect::<Vec<_>>();
+    for turn in &mut turns {
+        for item in &mut turn.items {
+            if let Some(activity) = item.browser_activity.as_mut() {
+                activity.thread_id = Some(id.clone());
+                activity.turn_id = Some(turn.id.clone());
+            }
+        }
+    }
     Ok(CodexThread {
         id: id.clone(),
         session_id: optional_string(value, "sessionId").unwrap_or_else(|| id.clone()),
@@ -567,13 +610,7 @@ pub fn normalize_thread(value: &Value, archived: bool) -> Result<CodexThread> {
             .unwrap_or_else(|| "unknown".to_string()),
         cli_version: optional_string(value, "cliVersion").unwrap_or_default(),
         archived,
-        turns: value
-            .get("turns")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|turn| normalize_turn(turn).ok())
-            .collect(),
+        turns,
     })
 }
 
@@ -653,15 +690,33 @@ pub fn normalize_item(value: &Value) -> Result<CodexItem> {
         "mcpToolCall" => {
             item.tool_server = optional_string(value, "server");
             item.tool_name = optional_string(value, "tool");
-            item.tool_arguments = value.get("arguments").map(bounded_json);
-            item.tool_result = value
-                .get("result")
-                .filter(|result| !result.is_null())
-                .map(bounded_json);
+            let is_browser =
+                is_playwright_tool(item.tool_server.as_deref(), item.tool_name.as_deref());
+            item.tool_arguments = value.get("arguments").map(|arguments| {
+                if is_browser {
+                    bounded_json(&redact_browser_value(arguments, None))
+                } else {
+                    bounded_json(arguments)
+                }
+            });
+            item.tool_result =
+                value
+                    .get("result")
+                    .filter(|result| !result.is_null())
+                    .map(|result| {
+                        if is_browser {
+                            bounded_json(&redact_browser_value(result, None))
+                        } else {
+                            bounded_json(result)
+                        }
+                    });
             item.error = value
                 .get("error")
                 .filter(|error| !error.is_null())
                 .map(value_label);
+            if is_browser {
+                item.browser_activity = normalize_browser_activity(value, &item);
+            }
         }
         "dynamicToolCall" | "collabAgentToolCall" => {
             item.tool_name = optional_string(value, "tool");
@@ -745,6 +800,471 @@ fn bounded_json(value: &Value) -> Value {
     })
 }
 
+fn is_playwright_tool(server: Option<&str>, tool: Option<&str>) -> bool {
+    let Some(tool) = tool else {
+        return false;
+    };
+    if !tool.starts_with("browser_") {
+        return false;
+    }
+    server.is_some_and(|server| {
+        let normalized = server.to_ascii_lowercase();
+        normalized == "atcontroller-playwright"
+            || normalized == "playwright"
+            || normalized.contains("playwright")
+    })
+}
+
+fn normalize_browser_activity(value: &Value, item: &CodexItem) -> Option<BrowserActivity> {
+    let server = item.tool_server.clone()?;
+    let tool = item.tool_name.clone()?;
+    let arguments = value.get("arguments").unwrap_or(&Value::Null);
+    let result = value.get("result").unwrap_or(&Value::Null);
+    let result_text = browser_result_text(result);
+    let status = item
+        .status
+        .clone()
+        .unwrap_or_else(|| "inProgress".to_string());
+    let error = item.error.clone();
+    let activity_type = browser_activity_type(&tool, arguments, error.is_some());
+    let target = browser_target(arguments);
+    let page_title = browser_labeled_line(&result_text, "Page Title:");
+    let url = optional_string(arguments, "url")
+        .or_else(|| browser_labeled_line(&result_text, "Page URL:"))
+        .map(|url| redact_browser_url(&url));
+    let screenshot_reference = extract_screenshot_reference(arguments, &result_text);
+    let console_error_count = if tool == "browser_console_messages" {
+        count_browser_console_errors(&result_text)
+    } else {
+        0
+    };
+    let failed_request_count =
+        if tool == "browser_network_requests" || tool == "browser_network_request" {
+            count_browser_failed_requests(&result_text)
+        } else {
+            0
+        };
+    let summary_lines = browser_summary_lines(
+        &tool,
+        &result_text,
+        console_error_count,
+        failed_request_count,
+    );
+    Some(BrowserActivity {
+        id: item.id.clone(),
+        label: browser_activity_label(&tool, arguments, target.as_deref(), &status, error.as_ref()),
+        activity_type,
+        status,
+        server,
+        tool,
+        thread_id: None,
+        turn_id: None,
+        browser_session_id: None,
+        page_id: browser_labeled_line(&result_text, "Page ID:"),
+        page_title,
+        url,
+        target,
+        duration_ms: item.duration_ms,
+        screenshot_reference,
+        console_error_count,
+        failed_request_count,
+        summary_lines,
+        details: item
+            .tool_result
+            .clone()
+            .or_else(|| item.tool_arguments.clone()),
+        error,
+        timestamp: Utc::now(),
+    })
+}
+
+fn browser_activity_type(tool: &str, arguments: &Value, failed: bool) -> String {
+    if failed {
+        return "toolError".to_string();
+    }
+    match tool {
+        "browser_navigate" | "browser_navigate_back" => "navigation",
+        "browser_click" => "click",
+        "browser_type" | "browser_fill_form" | "browser_press_key" => "type",
+        "browser_select_option" => "select",
+        "browser_hover" => "hover",
+        "browser_drag" | "browser_drop" => "drag",
+        "browser_file_upload" => "fileUpload",
+        "browser_take_screenshot" => "screenshot",
+        "browser_snapshot" => "pageInspected",
+        "browser_console_messages" => "consoleInspected",
+        "browser_network_requests" | "browser_network_request" => "networkInspected",
+        "browser_close" => "browserStopped",
+        "browser_tabs" => match optional_string(arguments, "action").as_deref() {
+            Some("new") => "tabOpened",
+            Some("close") => "tabClosed",
+            _ => "tabsInspected",
+        },
+        "browser_resize" | "browser_wait_for" | "browser_evaluate" => "browserInteraction",
+        _ => "browserTool",
+    }
+    .to_string()
+}
+
+fn browser_activity_label(
+    tool: &str,
+    arguments: &Value,
+    target: Option<&str>,
+    status: &str,
+    error: Option<&String>,
+) -> String {
+    if error.is_some() || status == "failed" {
+        return match tool {
+            "browser_navigate" => "Navigation failed".to_string(),
+            "browser_take_screenshot" => "Screenshot failed".to_string(),
+            _ => "Browser action failed".to_string(),
+        };
+    }
+    let target = target
+        .map(|target| format!(" “{}”", target.chars().take(100).collect::<String>()))
+        .unwrap_or_default();
+    match tool {
+        "browser_navigate" => optional_string(arguments, "url")
+            .map(|url| format!("Opened {}", redact_browser_url(&url)))
+            .unwrap_or_else(|| "Opened page".to_string()),
+        "browser_navigate_back" => "Went back".to_string(),
+        "browser_click" => format!("Clicked{target}"),
+        "browser_type" => format!("Typed into{target}"),
+        "browser_fill_form" => "Filled form".to_string(),
+        "browser_press_key" => optional_string(arguments, "key")
+            .map(|key| format!("Pressed {key}"))
+            .unwrap_or_else(|| "Pressed key".to_string()),
+        "browser_select_option" => format!("Selected option in{target}"),
+        "browser_hover" => format!("Hovered over{target}"),
+        "browser_drag" => "Dragged element".to_string(),
+        "browser_drop" => "Dropped content".to_string(),
+        "browser_file_upload" => "Uploaded file".to_string(),
+        "browser_take_screenshot" => "Captured screenshot".to_string(),
+        "browser_snapshot" => "Inspected page".to_string(),
+        "browser_console_messages" => "Inspected console".to_string(),
+        "browser_network_requests" | "browser_network_request" => "Inspected network".to_string(),
+        "browser_close" => "Closed browser".to_string(),
+        "browser_tabs" => match optional_string(arguments, "action").as_deref() {
+            Some("new") => "Opened tab".to_string(),
+            Some("close") => "Closed tab".to_string(),
+            Some("select") => "Selected tab".to_string(),
+            _ => "Inspected tabs".to_string(),
+        },
+        "browser_resize" => "Resized browser".to_string(),
+        "browser_wait_for" => "Waited for page".to_string(),
+        "browser_evaluate" => "Inspected page behavior".to_string(),
+        _ => "Used browser".to_string(),
+    }
+}
+
+fn browser_target(arguments: &Value) -> Option<String> {
+    optional_string(arguments, "element")
+        .or_else(|| optional_string(arguments, "target"))
+        .map(|value| value.chars().take(160).collect())
+}
+
+fn browser_result_text(value: &Value) -> String {
+    fn collect(value: &Value, output: &mut Vec<String>, depth: usize) {
+        if depth > 10 || output.len() >= 128 {
+            return;
+        }
+        match value {
+            Value::String(value) => output.push(value.clone()),
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, output, depth + 1);
+                }
+            }
+            Value::Object(map) => {
+                if let Some(text) = map.get("text").and_then(Value::as_str) {
+                    output.push(text.to_string());
+                }
+                for (key, value) in map {
+                    if key != "text" && key != "data" {
+                        collect(value, output, depth + 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut output = Vec::new();
+    collect(value, &mut output, 0);
+    output.join("\n")
+}
+
+fn browser_labeled_line(text: &str, label: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(label).map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_screenshot_reference(arguments: &Value, result_text: &str) -> Option<String> {
+    let _ = arguments;
+    result_text.lines().find_map(|line| {
+        let candidate = line.replace('\\', "/");
+        let relative = candidate.split("browser-cache/playwright/").nth(1)?;
+        let relative = relative
+            .trim()
+            .trim_matches('`')
+            .trim_matches('<')
+            .trim_matches('>')
+            .trim_end_matches(')');
+        safe_screenshot_reference(relative).then(|| relative.to_string())
+    })
+}
+
+fn safe_screenshot_reference(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && value.len() <= 1_024
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && matches!(
+            path.extension()
+                .and_then(std::ffi::OsStr::to_str)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("png" | "jpg" | "jpeg" | "webp")
+        )
+}
+
+fn count_browser_console_errors(text: &str) -> u32 {
+    u32::try_from(
+        text.lines()
+            .filter(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("[error]") || line.contains("uncaught") || line.contains("unhandled")
+            })
+            .count(),
+    )
+    .unwrap_or(u32::MAX)
+}
+
+fn count_browser_failed_requests(text: &str) -> u32 {
+    u32::try_from(
+        text.lines()
+            .filter(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("=> [4")
+                    || line.contains("=> [5")
+                    || line.contains("net::err_")
+                    || line.contains("failed")
+            })
+            .count(),
+    )
+    .unwrap_or(u32::MAX)
+}
+
+fn browser_summary_lines(
+    tool: &str,
+    result_text: &str,
+    console_errors: u32,
+    failed_requests: u32,
+) -> Vec<String> {
+    match tool {
+        "browser_console_messages" => {
+            let mut lines = vec![if console_errors == 0 {
+                "No console errors detected".to_string()
+            } else {
+                format!(
+                    "{console_errors} console error{} detected",
+                    if console_errors == 1 { "" } else { "s" }
+                )
+            }];
+            lines.extend(
+                result_text
+                    .lines()
+                    .filter(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower.contains("[error]")
+                            || lower.contains("uncaught")
+                            || lower.contains("unhandled")
+                    })
+                    .map(redact_browser_diagnostic_line)
+                    .filter(|line| !line.is_empty())
+                    .take(5),
+            );
+            lines
+        }
+        "browser_network_requests" | "browser_network_request" => {
+            let mut lines = vec![if failed_requests == 0 {
+                "No failed requests detected".to_string()
+            } else {
+                format!(
+                    "{failed_requests} failed request{} detected",
+                    if failed_requests == 1 { "" } else { "s" }
+                )
+            }];
+            lines.extend(
+                result_text
+                    .lines()
+                    .filter(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower.contains("=> [4")
+                            || lower.contains("=> [5")
+                            || lower.contains("net::err_")
+                            || lower.contains("failed")
+                    })
+                    .map(redact_browser_diagnostic_line)
+                    .filter(|line| !line.is_empty())
+                    .take(5),
+            );
+            lines
+        }
+        "browser_snapshot" => browser_labeled_line(result_text, "Page Title:")
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn redact_browser_diagnostic_line(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    if [
+        "authorization:",
+        "proxy-authorization:",
+        "cookie:",
+        "set-cookie:",
+        "api-key:",
+        "x-api-key:",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return "[Sensitive browser detail redacted]".to_string();
+    }
+    line.split_whitespace()
+        .map(|part| {
+            let (prefix, value) = if let Some(value) = part.strip_prefix('(') {
+                ("(", value)
+            } else {
+                ("", part)
+            };
+            let trailing = value
+                .chars()
+                .rev()
+                .take_while(|character| ".,;:)]}".contains(*character))
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            let core = value.trim_end_matches(|character| ".,;:)]}".contains(character));
+            if core.starts_with("http://") || core.starts_with("https://") {
+                format!("{prefix}{}{trailing}", redact_browser_url(core))
+            } else if lower.contains("token=") || lower.contains("key=") {
+                "[Sensitive value redacted]".to_string()
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(600)
+        .collect()
+}
+
+pub(crate) fn redact_browser_value(value: &Value, key: Option<&str>) -> Value {
+    if key.is_some_and(is_sensitive_browser_key) {
+        return Value::String("[redacted]".to_string());
+    }
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), redact_browser_value(value, Some(key.as_str()))))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| redact_browser_value(value, key))
+                .collect(),
+        ),
+        Value::String(value) if value.starts_with("http://") || value.starts_with("https://") => {
+            Value::String(redact_browser_url(value))
+        }
+        Value::String(value) if value.len() > 8_000 => {
+            Value::String(format!("[{} characters omitted]", value.chars().count()))
+        }
+        _ => value.clone(),
+    }
+}
+
+fn is_sensitive_browser_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "text"
+            | "value"
+            | "values"
+            | "password"
+            | "secret"
+            | "token"
+            | "authorization"
+            | "cookie"
+            | "cookies"
+            | "headers"
+            | "formdata"
+            | "formcontent"
+    )
+}
+
+pub fn redact_browser_url(value: &str) -> String {
+    let without_fragment = value.split('#').next().unwrap_or(value);
+    let Some((base, query)) = without_fragment.split_once('?') else {
+        return without_fragment.chars().take(4_096).collect();
+    };
+    let query = query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (key, raw_value) = part.split_once('=').unwrap_or((part, ""));
+            if is_sensitive_query_key(key) {
+                format!("{key}=[redacted]")
+            } else {
+                let value = raw_value.chars().take(160).collect::<String>();
+                if raw_value.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{key}={value}")
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    if query.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{query}")
+    }
+}
+
+fn is_sensitive_query_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    [
+        "access_token",
+        "auth",
+        "authorization",
+        "code",
+        "credential",
+        "jwt",
+        "key",
+        "oauth",
+        "password",
+        "secret",
+        "session",
+        "signature",
+        "sig",
+        "token",
+    ]
+    .iter()
+    .any(|sensitive| normalized == *sensitive || normalized.contains(sensitive))
+}
+
 pub fn normalize_notification(sequence: u64, method: &str, params: &Value) -> CodexEvent {
     let mut event = CodexEvent {
         sequence,
@@ -781,6 +1301,14 @@ pub fn normalize_notification(sequence: u64, method: &str, params: &Value) -> Co
                 .get("item")
                 .and_then(|item| normalize_item(item).ok());
             event.item_id = event.item.as_ref().map(|item| item.id.clone());
+            if let Some(activity) = event
+                .item
+                .as_mut()
+                .and_then(|item| item.browser_activity.as_mut())
+            {
+                activity.thread_id = event.thread_id.clone();
+                activity.turn_id = event.turn_id.clone();
+            }
         }
         "item/agentMessage/delta"
         | "item/plan/delta"
@@ -792,6 +1320,10 @@ pub fn normalize_notification(sequence: u64, method: &str, params: &Value) -> Co
             if method.contains("reasoning") {
                 event.data = Some(params.clone());
             }
+        }
+        "item/mcpToolCall/progress" => {
+            event.delta = optional_string(params, "message");
+            event.data = Some(params.clone());
         }
         "item/reasoning/summaryPartAdded" => {
             event.delta = Some(String::new());
@@ -967,6 +1499,7 @@ fn event_kind(method: &str) -> &'static str {
         "item/reasoning/textDelta" => "reasoningDelta",
         "item/commandExecution/outputDelta" => "commandOutputDelta",
         "item/fileChange/patchUpdated" => "fileChangeUpdated",
+        "item/mcpToolCall/progress" => "mcpToolCallProgress",
         "turn/diff/updated" => "turnDiffUpdated",
         "turn/plan/updated" => "turnPlanUpdated",
         "serverRequest/resolved" => "approvalResolved",
@@ -1346,6 +1879,95 @@ mod tests {
             .expect("tool result should remain structured");
         assert_eq!(result.get("truncated").and_then(Value::as_bool), Some(true));
         assert!(result.get("preview").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn playwright_tool_calls_become_redacted_browser_activity() {
+        let item = normalize_item(&json!({
+            "type": "mcpToolCall",
+            "id": "browser-1",
+            "server": "atcontroller-playwright",
+            "tool": "browser_fill_form",
+            "status": "completed",
+            "arguments": {
+                "fields": [
+                    {
+                        "name": "Password",
+                        "ref": "input-2",
+                        "type": "textbox",
+                        "value": "do-not-persist"
+                    }
+                ]
+            },
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Page Title: Sign in\nPage URL: https://example.test/login?token=secret&tab=main"
+                    }
+                ]
+            }
+        }))
+        .expect("browser item should normalize");
+        let activity = item.browser_activity.expect("browser activity");
+        assert_eq!(activity.activity_type, "type");
+        assert_eq!(activity.page_title.as_deref(), Some("Sign in"));
+        assert_eq!(
+            activity.url.as_deref(),
+            Some("https://example.test/login?token=[redacted]&tab=main")
+        );
+        let arguments = item.tool_arguments.expect("redacted arguments");
+        assert_eq!(arguments["fields"][0]["value"], "[redacted]");
+        let result = item.tool_result.expect("redacted result");
+        assert_eq!(result["content"][0]["text"], "[redacted]");
+    }
+
+    #[test]
+    fn browser_named_tools_from_unrelated_servers_remain_generic_mcp_items() {
+        let item = normalize_item(&json!({
+            "type": "mcpToolCall",
+            "id": "not-playwright",
+            "server": "unrelated-tools",
+            "tool": "browser_click",
+            "status": "completed",
+            "arguments": { "element": "Submit" }
+        }))
+        .expect("generic item should normalize");
+        assert!(item.browser_activity.is_none());
+        assert_eq!(item.tool_arguments.unwrap()["element"], "Submit");
+    }
+
+    #[test]
+    fn browser_console_and_network_failures_are_grouped() {
+        let console = normalize_item(&json!({
+            "type": "mcpToolCall",
+            "id": "console-1",
+            "server": "playwright",
+            "tool": "browser_console_messages",
+            "status": "completed",
+            "result": { "content": [{ "text": "[error] first\nUncaught second\n[log] ok" }] }
+        }))
+        .expect("console item")
+        .browser_activity
+        .expect("console activity");
+        assert_eq!(console.console_error_count, 2);
+        assert!(console
+            .summary_lines
+            .iter()
+            .any(|line| line.contains("[error] first")));
+
+        let network = normalize_item(&json!({
+            "type": "mcpToolCall",
+            "id": "network-1",
+            "server": "playwright",
+            "tool": "browser_network_requests",
+            "status": "completed",
+            "result": { "content": [{ "text": "GET /ok => [200]\nPOST /bad => [500]\nGET /gone => [404]" }] }
+        }))
+        .expect("network item")
+        .browser_activity
+        .expect("network activity");
+        assert_eq!(network.failed_request_count, 2);
     }
 
     #[test]

@@ -41,6 +41,7 @@ The unified sidebar search matches project names and paths plus thread titles, p
 - Rust 1.88+ and Xcode Command Line Tools for native builds
 - The official Codex CLI installed and authenticated
 - A Codex CLI version that supports `app-server --stdio`, `generate-ts`, and `generate-json-schema`
+- For optional browser automation: Node.js, `npx`, and Chrome/Chromium or a Playwright-managed browser
 
 Install and authenticate Codex:
 
@@ -71,6 +72,18 @@ Rust Codex app-server client
 codex app-server --stdio
         ↕
 Official Codex runtime
+```
+
+Browser automation stays on the same structured runtime path:
+
+```text
+ATController browser UI
+        ↕ typed Tauri commands and normalized events
+codex app-server
+        ↕ structured MCP calls and results
+Playwright MCP
+        ↕
+isolated headed browser
 ```
 
 The Rust layer owns process discovery, startup, initialization, request correlation, streaming, approvals, diagnostics, restart supervision, and shutdown. React receives a narrow ATController domain model rather than importing raw generated protocol types.
@@ -133,6 +146,37 @@ The default resume-command handoff opens Terminal.app in the thread workspace an
 Command J opens or hides the built-in Project Terminal shelf. Project and command context actions can open the same shelf at a validated directory inside the selected project. The shelf supports ANSI applications, interactive input, resize, clear, restart, stop, and a persisted panel height.
 
 Rust owns each native PTY process. ATController starts the user’s configured absolute login shell directly, bounds its input and output queues, and allows at most one shell session per project. The working directory is canonicalized and must stay inside a registered project. Hiding the shelf keeps its session alive; stopping it or quitting ATController terminates the process group. Project Terminal output is neither parsed as Codex activity nor persisted as conversation history.
+
+## Browser automation
+
+ATController can expose browser automation to Codex through the official app-server MCP boundary. The initial production backend is `@playwright/mcp@0.0.77`, running a visible browser with an isolated profile. ATController never attaches to the user’s ordinary Chrome profile by default and never infers browser activity from assistant prose or terminal output.
+
+Open **Browser → Browser Setup** from a thread or the command palette. Setup detects the installed Node.js, `npx`, browser, Codex MCP configuration, and Playwright tool inventory before changing anything. It shows the exact command and effects, then waits for an explicit **Configure Playwright MCP** action. ATController registers one managed Codex MCP entry named `atcontroller-playwright` through the installed CLI’s supported `codex mcp add` command. It does not silently install a global package or overwrite a foreign MCP entry with the same name.
+
+The managed command pins the package version and uses settings equivalent to:
+
+```text
+<resolved-npx> -y @playwright/mcp@0.0.77
+  --isolated
+  --browser chrome
+  --output-dir "~/Library/Application Support/ATController/browser-cache/playwright"
+  --output-max-size 268435456
+  --image-responses omit
+  --console-level warning
+  --timeout-action 10000
+  --timeout-navigation 60000
+  --codegen none
+```
+
+The setup screen renders the real argument-safe `codex mcp add` command for the current machine. After registration, ATController reloads MCP configuration through app-server and verifies that Codex can see the `browser_*` tools.
+
+Each Codex thread has separate ATController browser metadata and app-server MCP routing. The Browser menu and inspector can open or stop the headed browser, take a screenshot, refresh page state, inspect console errors and failed requests, restart the session, hand control to the user, and return control to Codex. During a Codex turn, typed `mcpToolCall` items from `atcontroller-playwright` become compact navigation, interaction, console, network, screenshot, and failure cards in the normal timeline. Raw, redacted tool details remain behind progressive disclosure.
+
+When structured command output reports a `localhost`, loopback, or `0.0.0.0` development-server URL, its command card offers **Open in Browser**. ATController rewrites `0.0.0.0` to the reachable loopback address and never auto-opens detected URLs.
+
+Screenshots are lazy-loaded from the managed cache, associated with their thread, turn, session, URL, and activity, and bounded to 256 MB or 160 files. ATController persists browser UI metadata only. It does not persist cookies, passwords, authorization headers, form contents, or authentication tokens.
+
+**Run Browser Self Test** creates a temporary local page, launches a real isolated headed browser, reads its title, interacts with it, takes a screenshot, closes the browser, and reports a structured result. Closing ATController first closes known browser sessions through Playwright MCP, then shuts down the owning app-server process group.
 
 ## Permissions
 
@@ -213,6 +257,7 @@ The diagnostics screen shows:
 - active workspace, thread, and turn
 - pending request and event-queue counts
 - recent redacted stderr, protocol errors, and exit status
+- Playwright MCP configuration, package/tool inventory, browser dependencies, cache path, session state, URL, page title, control owner, console errors, and failed requests
 
 Actions can copy redacted diagnostics, run a connection self-test, restart the runtime, generate a protocol snapshot in the application data directory, open Codex configuration, or open ATController data.
 
@@ -232,6 +277,7 @@ The active layout is:
 settings.json
 workspaces.json
 codex-thread-ui.json
+browser-sessions.json
 migrations/app-server-v3.json
 migrations/codex-settings-v1.json
 migrations/project-shelves-v1.json
@@ -239,6 +285,7 @@ migration-backups/app-server-v3/
 migration-backups/codex-settings-v1/
 migration-backups/project-shelves-v1/
 generated-codex-protocol/
+browser-cache/playwright/
 ```
 
 Codex owns conversation history in its own home directory. ATController does not duplicate full transcripts.
@@ -268,6 +315,9 @@ Production builds always use the fixed Application Support path. Debug and test 
 - Protocol stdout, diagnostic stderr, and stdin remain separate.
 - Protocol logs are bounded and redacted.
 - Codex authentication tokens are never copied into ATController persistence.
+- Browser automation uses an isolated profile and does not connect to the user’s normal Chrome profile.
+- Browser tool inputs and results redact credentials, cookies, authorization values, sensitive query parameters, and form values before entering UI state or diagnostics.
+- Screenshot paths must resolve beneath ATController’s managed browser cache before the frontend can read, reveal, or delete them.
 - External URLs are limited to validated HTTP(S) values.
 - The WebView uses a restrictive Content Security Policy.
 - Shutdown terminates the app-server process group and escalates only after a timeout.
@@ -311,14 +361,15 @@ yarn test
 yarn build
 cargo test --manifest-path src-tauri/Cargo.toml
 yarn test:contract
+yarn test:browser-contract
 yarn test:e2e
 yarn verify
 make verify
 ```
 
-Unit tests cover protocol framing and normalization, redaction, permission mapping, attachment serialization, state reduction, persistence migration, Git safety, Project Terminal path and size validation, safe Markdown rendering, structured timeline behavior, approvals, composer behavior, sidebar interactions, inspector actions, appearance, diagnostics, and keyboard command surfaces.
+Unit tests cover protocol framing and normalization, browser event normalization and redaction, browser state and cache bounds, permission mapping, attachment serialization, native and WebKit file drops, state reduction, persistence migration, Git safety, Project Terminal path and size validation, safe Markdown rendering, structured timeline behavior, approvals, composer behavior, sidebar interactions, inspector actions, appearance, diagnostics, and keyboard command surfaces.
 
-The real contract and end-to-end tests use a temporary Git repository, skip clearly when Codex is unavailable or unauthenticated, and never mutate a user project.
+The real contract and end-to-end tests use a temporary Git repository, skip clearly when Codex is unavailable or unauthenticated, and never mutate a user project. The browser contract additionally starts two isolated Playwright sessions, proves that neither thread controls the other page, exercises a real Codex turn that emits structured browser MCP items, validates console/network/screenshot handling, and checks app-server/MCP process-group cleanup.
 
 ## Build and release
 
@@ -355,5 +406,7 @@ If startup fails:
 6. Restart the runtime and reopen the thread.
 
 Unknown notifications are retained as generic structured activity instead of crashing the session. Unsupported required capabilities produce explicit upgrade or compatibility errors; ATController does not fall back to terminal scraping.
+
+The browser is intentionally a separate headed window in this release. ATController provides status, screenshots, activity, and lifecycle controls in its inspector; it does not embed Chrome, animate a synthetic cursor, forward mouse input, or connect to a personal browser profile. MCP and browser child PIDs are shown only when the installed app-server exposes a safe identity—ATController does not guess by globally matching Chrome or Node processes.
 
 See [docs/known-issues.md](docs/known-issues.md) for current runtime-specific limitations.

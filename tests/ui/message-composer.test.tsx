@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   attachmentsToInputs,
   MessageComposer,
+  pathsFromDataTransfer,
   physicalPointInsideRect,
   type ComposerAttachment
 } from '../../src/components/MessageComposer';
@@ -189,6 +190,35 @@ describe('Codex message composer', () => {
         2
       )
     ).toBe(false);
+    expect(
+      physicalPointInsideRect(
+        { x: 650, y: 700 },
+        { left: 600, right: 700, top: 650, bottom: 750 },
+        2,
+        900
+      )
+    ).toBe(true);
+    expect(
+      physicalPointInsideRect(
+        { x: 80, y: 180 },
+        { left: 20, right: 120, top: 700, bottom: 760 },
+        2,
+        800
+      )
+    ).toBe(true);
+  });
+
+  it('recovers macOS file URLs when WebKit omits File.path', () => {
+    const transfer = {
+      files: [],
+      getData: (type: string) =>
+        type === 'text/uri-list'
+          ? '# Finder files\nfile:///tmp/project/file%20with%20spaces.txt\nhttps://example.test'
+          : ''
+    } as unknown as DataTransfer;
+    expect(pathsFromDataTransfer(transfer)).toEqual([
+      '/tmp/project/file with spaces.txt'
+    ]);
   });
 
   it('accepts file paths from the native Tauri drop event', async () => {
@@ -219,6 +249,36 @@ describe('Codex message composer', () => {
     });
     await waitFor(() =>
       expect(onDropPaths).toHaveBeenCalledWith(['/tmp/project/notes.txt'])
+    );
+  });
+
+  it('keeps a Finder file drag valid when the final native point uses another origin', async () => {
+    (globalThis as typeof globalThis & { isTauri?: boolean }).isTauri = true;
+    const onDropPaths = vi.fn(async () => undefined);
+    renderComposer({ onDropPaths });
+    await waitFor(() => expect(nativeDrop.handler).not.toBeNull());
+
+    act(() => {
+      nativeDrop.handler?.({
+        payload: {
+          type: 'enter',
+          paths: ['/tmp/project/from finder.txt'],
+          position: { x: 50_000, y: 50_000 }
+        }
+      });
+      nativeDrop.handler?.({
+        payload: {
+          type: 'drop',
+          paths: ['/tmp/project/from finder.txt'],
+          position: { x: -50_000, y: -50_000 }
+        }
+      });
+    });
+
+    await waitFor(() =>
+      expect(onDropPaths).toHaveBeenCalledWith([
+        '/tmp/project/from finder.txt'
+      ])
     );
   });
 
