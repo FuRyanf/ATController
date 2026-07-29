@@ -1,51 +1,50 @@
 # Known Issues
 
-## Unsigned Development Builds
+## Codex protocol compatibility
 
-Pull-request, `main`, and manually dispatched workflows build ATController without Apple signing credentials. macOS Gatekeeper may block an unsigned development artifact on first launch.
+ATController generates its protocol bindings from the installed Codex CLI. Upgrading Codex can add notifications or fields before ATController has a specialized renderer for them.
 
-Version-tag builds require Developer ID signing and notarization credentials and fail before publication if they are unavailable. Only production release artifacts are intended for normal installation.
+Unknown notifications are preserved as generic structured activity. Missing required stable methods produce a compatibility error instead of falling back to terminal parsing.
 
-## Terminal Rendering Differences
+After upgrading Codex, run:
 
-ATController renders the Codex terminal UI through xterm.js. Font metrics, Unicode width rules, and rapid cursor redraws can differ slightly from Terminal.app.
+```bash
+yarn codex:generate-protocol
+yarn codex:check-protocol
+```
 
-If the display becomes stale or misaligned:
+Review and commit the generated changes with any required normalization updates.
 
-1. Resize the ATController window.
-2. Switch to another thread and back.
-3. Use the terminal refresh action.
+## Thread deletion in Codex CLI 0.144.0
 
-Report reproducible cases with the macOS version, Codex CLI version, terminal dimensions, and a redacted tail of the affected run’s `output.log`.
+Some installations of Codex CLI 0.144.0 remove a temporary thread rollout and then report a database cleanup error involving missing agent-job state. ATController confirms whether the thread is gone before deciding whether deletion failed.
 
-## Session Discovery Depends on Local Rollout Files
+This is an installed-runtime behavior. It does not affect listing, resume, archive, or restore.
 
-Bulk import discovers Codex sessions from `$CODEX_HOME/sessions/` or `~/.codex/sessions/`. Sessions stored under another Codex home, removed rollout files, and sessions that cannot be matched to a workspace may not appear.
+## Account-dependent usage data
 
-Use manual import when you know the session ID, and confirm ATController is using the same `CODEX_HOME` as your terminal.
+ATController displays only rate-limit windows supplied by the signed-in Codex account. Some authentication modes or plans do not return both the five-hour and weekly windows.
 
-The recent-session sidebar uses the active local Codex session files, excludes archived sessions,
-and assigns nested working directories to the deepest matching registered workspace. It may take
-up to one minute for an external Codex CLI session to appear automatically; reopening the app
-refreshes it immediately.
+An unavailable value means the runtime did not report that window. ATController does not estimate usage.
 
-## Usage Availability
+## Insert-for-review requires zsh
 
-ATController displays only the 5-hour and weekly windows returned by the authenticated local Codex
-CLI. Some account types or plans do not return both windows. An unavailable label means Codex did
-not report that window; it is not a zero-usage estimate. Model and speed controls remain available
-when usage cannot be read.
+The safe default for **Open Resume Command in Terminal** inserts the shell-escaped command for review with zsh `print -z`.
 
-## Remote Environment Setup
+When the configured login shell is not zsh, ATController reports an explicit compatibility error. Choose **Execute immediately** in Settings only if that behavior is intended.
 
-SSH and rdev workspaces depend on the remote machine’s shell startup, Codex installation, authentication, and repository access. ATController cannot repair a remote login or Codex configuration that fails in a normal terminal.
+## Unsigned local builds
 
-Verify the connection command, `codex --version`, and `codex login status` directly on the remote environment before troubleshooting ATController.
+Local and branch builds use an ad-hoc or development signature. Gatekeeper may require an explicit first-open action. Tagged production releases require Developer ID signing, notarization, and stapling before publication.
 
-ATController does not read Codex rollout JSONL from the remote host. Automatic session-ID persistence and durable resume are not guaranteed for SSH or rdev threads.
+## Runtime-generated model availability
+
+Models, reasoning efforts, Ultra, and service tiers can change with the installed runtime and account. A previously selected value may become unavailable after a Codex update or account change.
+
+ATController keeps the requested value distinct from the effective runtime value and reports fallback or rejection instead of silently downgrading.
 
 ## Full Access
 
-Full access launches Codex with `--dangerously-bypass-approvals-and-sandbox`. This disables Codex’s approval and sandbox protections for that thread.
+Full Access configures `danger-full-access` with the `never` approval policy. Codex can read, modify, delete, and execute resources available to the current macOS user.
 
-Use Workspace mode unless the repository, instructions, tools, and execution environment are trusted.
+Use Standard or Workspace Access when that scope is not appropriate. ATController is not an operating-system sandbox.

@@ -1,163 +1,445 @@
-# ATController Technology Notes
+# ATController Technology
 
-This document describes ATController’s runtime architecture.
+This document describes the production architecture of ATController.
 
-## Application Identity
+## Fixed identity
 
-- Product name: `ATController`
-- macOS bundle: `ATController.app`
+- Product and displayed name: `ATController`
+- macOS application bundle: `ATController.app`
 - Bundle identifier: `com.furyanf.atcontroller`
+- Release files: `ATController.dmg` and `ATController.app.zip`
 - Application data: `~/Library/Application Support/ATController/`
-- Release artifacts: `ATController.dmg` and `ATController.app.zip`
+- Runtime: the locally installed official Codex CLI
 
-This application identity and data directory are fixed. OpenAI Codex CLI is the only supported runtime.
-
-## Architecture
-
-ATController has three local layers:
-
-- React and TypeScript frontend under `src/`
-- Tauri command bridge and persistence in `src-tauri/src/`
-- Rust PTY engine backed by `portable_pty`
-
-The PTY output is rendered with xterm.js. ATController does not implement a separate model API client.
-
-## Core Runtime Flow
-
-1. The frontend selects a workspace thread.
-2. The frontend invokes the terminal start command with the workspace, thread, and permission mode.
-3. The backend resolves the configured or detected `codex` executable.
-4. The backend launches the user’s login shell with `$SHELL -lic`, falling back to `/bin/zsh`.
-5. The shell starts one of these interactive Codex commands:
-   - `codex [permission flags]` for a new session
-   - `codex [permission flags] resume <session-id>` for a saved local session
-   - `codex [permission flags] fork <session-id>` when forking a local session
-6. The backend streams PTY output to the run log and frontend terminal events.
-7. The frontend applies ordered chunks to xterm.js.
-
-Permission flags are explicit:
-
-- Workspace mode: `--sandbox workspace-write --ask-for-approval on-request`
-- Full access: `--dangerously-bypass-approvals-and-sandbox`
-
-## Terminal Stream Contract
-
-The backend assigns monotonic stream positions to output:
-
-- `TerminalDataEvent { startPosition, endPosition, data }`
-- `TerminalOutputSnapshot { text, startPosition, endPosition, truncated }`
-
-Snapshot hydration and live output are phase-separated:
-
-1. Bind the selected terminal session.
-2. Buffer live chunks while reading the snapshot.
-3. Apply the snapshot once.
-4. Replay only chunks beyond the snapshot’s `endPosition`.
-5. Continue with ordered live chunks.
-
-`TerminalPanel` is the only production xterm writer. The session stream reducer owns ordering, duplicate suppression, and hydration boundaries.
-
-The backend waits for the PTY reader, syncs the output file, and persists the final stream position before emitting terminal exit.
-
-## Session Discovery
-
-Codex session import scans rollout files under:
-
-- `$CODEX_HOME/sessions/**/rollout-*.jsonl` when `CODEX_HOME` is set
-- `~/.codex/sessions/**/rollout-*.jsonl` otherwise
-
-ATController reads local Codex session metadata for discovery, workspace matching, resume, fork, and completion state. Import does not rewrite the source rollout files.
-
-ATController does not inspect JSONL on remote SSH or rdev hosts. Automatic session-ID persistence, resume, fork detection, and semantic completion tracking are therefore best-effort local features and are not guaranteed for remote threads.
-
-## Persistence Layout
-
-ATController-owned state remains under:
+## System architecture
 
 ```text
-~/Library/Application Support/ATController/
+React + TypeScript session UI
+        ↕
+Typed Tauri commands and `codex:event` notifications
+        ↕
+Rust ATController domain and supervision layer
+        ↕
+JSON RPC-style messages framed as JSONL over stdio
+        ↕
+codex app-server --stdio
+        ↕
+Official Codex runtime and Codex-owned thread history
 ```
 
-The main layout is:
+React never owns the Codex child process. Rust never sends terminal keystrokes to operate a conversation. Standard session workflows use app-server methods and structured notifications.
+
+## Source map
+
+### Frontend
+
+- `src/App.tsx` coordinates projects, selected threads, persistence, Git refreshes, shortcuts, dialogs, and recovery.
+- `src/stores/codexStore.ts` batches ordered protocol events and reduces them into stable thread, turn, item, approval, usage, and diagnostics views.
+- `src/components/CodexSidebar.tsx` renders project switching and Pinned, Active, Recent, and Archived thread sections.
+- `src/components/ConversationTimeline.tsx` renders typed Codex items with progressive disclosure.
+- `src/components/MessageComposer.tsx` serializes structured text, image, file, and skill input.
+- `src/components/InspectorPanel.tsx` reconciles Codex activity with Git and runtime state.
+- `src/components/ThreadContextMenu.tsx` and `CommandPalette.tsx` expose thread and keyboard-first actions.
+- `src/components/ControlCenterDialog.tsx` owns settings and diagnostics surfaces.
+- `src/lib/api.ts` is the single typed frontend wrapper around the Tauri boundary.
+
+### Rust
+
+- `src-tauri/src/codex/process.rs` discovers the executable, probes required capabilities, spawns the process, validates workspace paths, generates protocol snapshots, and controls process groups.
+- `src-tauri/src/codex/transport.rs` owns bounded JSONL framing and keeps stdin, stdout, and stderr separate.
+- `src-tauri/src/codex/rpc.rs` allocates IDs, correlates responses, handles notifications and server requests, applies timeouts and safe retries, and rejects pending work on exit.
+- `src-tauri/src/codex/protocol.rs` normalizes generated wire values into the narrow ATController domain model.
+- `src-tauri/src/codex/threads.rs` implements thread, turn, model, permission, attachment, and skill operations.
+- `src-tauri/src/codex/resume.rs` probes and constructs external resume commands and performs Terminal.app handoff.
+- `src-tauri/src/codex/diagnostics.rs` maintains bounded, redacted runtime diagnostics.
+- `src-tauri/src/codex/mod.rs` supervises one connection and emits normalized events.
+- `src-tauri/src/storage.rs` persists project and UI metadata and performs the app-server migration.
+- `src-tauri/src/git_tools.rs` provides bounded Git inspection and safe mutations.
+- `src-tauri/src/main.rs` exposes the narrow Tauri command surface and native lifecycle hooks.
+
+## Codex discovery and protocol generation
+
+Discovery checks, in order:
+
+1. the path stored in ATController settings;
+2. `CODEX_CLI_PATH`;
+3. the current process `PATH`;
+4. common Homebrew and local installation paths;
+5. the user login-shell environment.
+
+Login-shell discovery uses a delimited marker so shell startup noise cannot be mistaken for the executable path.
+
+`scripts/generate-codex-protocol.mjs`:
+
+1. resolves the same configured or discoverable Codex binary;
+2. records `codex --version`;
+3. verifies both generation commands exist;
+4. generates TypeScript into a temporary directory;
+5. generates JSON Schema into a nested schema directory;
+6. canonicalizes JSON output;
+7. writes version metadata;
+8. replaces `generated/codex-app-server/` only after successful generation.
+
+`yarn codex:check-protocol` regenerates into a temporary directory and compares a deterministic tree digest. It fails when the installed runtime and checked-in protocol do not match.
+
+Generated files are never manually mirrored into the frontend. Protocol-specific handling stays behind the Rust normalization layer.
+
+## Process lifecycle
+
+ATController starts exactly one normal runtime process with:
+
+```text
+<resolved-codex-binary> app-server --stdio
+```
+
+The executable and arguments are passed separately. The selected project is supplied through structured `cwd` request fields.
+
+The supervised state machine is:
+
+```text
+Stopped → Starting → Initializing → Ready
+                         │            │
+                         └→ Failed    ├→ Degraded → Restarting → Ready
+                                      └→ Stopping → Stopped
+```
+
+Automatic restart is bounded to two attempts. A connection that stays healthy for one minute resets the attempt counter. Explicit restart closes the old connection before spawning its replacement.
+
+On application shutdown:
+
+1. the connection stops accepting work;
+2. the writer closes app-server stdin;
+3. pending requests are rejected;
+4. ATController waits briefly for normal exit;
+5. the process group receives `SIGTERM`;
+6. `SIGKILL` is used only if the process still has not exited.
+
+This also terminates descendants and prevents orphaned app-server processes.
+
+## Transport and framing
+
+The production transport is stdio:
+
+```text
+stdin   outbound protocol requests, notifications, and server-request responses
+stdout  newline-delimited JSON protocol messages
+stderr  bounded diagnostic and crash output
+```
+
+stdout and stderr never share a parser. The transport uses:
+
+- a 256-message outbound channel;
+- a 256-message inbound channel;
+- an 8 MiB maximum JSONL frame;
+- a 16 KiB maximum stderr line;
+- bounded enqueue timeouts and natural async backpressure.
+
+Malformed or oversized messages are isolated to one frame and recorded as redacted protocol diagnostics. Parsing resumes at the next newline.
+
+## Initialization
+
+No normal request is accepted before initialization succeeds.
+
+ATController sends:
+
+```json
+{
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "clientInfo": {
+      "name": "atcontroller",
+      "title": "ATController",
+      "version": "<application-version>"
+    },
+    "capabilities": {
+      "experimentalApi": false
+    }
+  }
+}
+```
+
+After the successful response, ATController sends `initialized` once and marks the connection Ready. Reinitialization requires a new process and connection.
+
+## RPC behavior
+
+The wire protocol follows the generated Codex schema and may omit a `jsonrpc` field. ATController therefore does not inject one.
+
+The client provides:
+
+- monotonically increasing unsigned request IDs;
+- concurrent response correlation through one-shot channels;
+- duplicate and unknown response detection;
+- server notifications without IDs;
+- supported server requests with exact response shapes;
+- operation-specific timeouts;
+- automatic pending-request rejection on transport loss;
+- clean late-response handling;
+- unknown-notification tolerance;
+- overload retry only for idempotent operations;
+- exponential backoff with jitter and at most three attempts.
+
+User turns, thread creation, rename, archive, deletion, steering, approvals, and other state-changing operations are never automatically replayed. A failed user turn is retried only through an explicit new action.
+
+## Implemented methods
+
+Stable request methods currently used include:
+
+```text
+model/list
+permissionProfile/list
+config/read
+account/read
+account/rateLimits/read
+account/login/start
+skills/list
+
+thread/list
+thread/start
+thread/read
+thread/resume
+thread/fork
+thread/name/set
+thread/archive
+thread/unarchive
+thread/delete
+
+turn/start
+turn/steer
+turn/interrupt
+```
+
+Supported server requests include:
+
+```text
+item/commandExecution/requestApproval
+item/fileChange/requestApproval
+item/permissions/requestApproval
+item/tool/requestUserInput
+mcpServer/elicitation/request
+execCommandApproval
+applyPatchApproval
+```
+
+Unsupported future server requests receive a structured method-not-supported response instead of hanging.
+
+## Normalized notifications
+
+The normalizer recognizes thread lifecycle, turn lifecycle, item lifecycle, streamed agent text, streamed command output, reasoning summary and detail deltas, plan updates, file-change updates, token usage, account/rate-limit changes, thread settings, and server-request resolution.
+
+Important recognized methods include:
+
+```text
+thread/started
+thread/status/changed
+thread/name/updated
+thread/archived
+thread/unarchived
+thread/deleted
+thread/settings/updated
+
+turn/started
+turn/completed
+turn/plan/updated
+turn/diff/updated
+
+item/started
+item/completed
+item/agentMessage/delta
+item/commandExecution/outputDelta
+item/fileChange/outputDelta
+item/fileChange/patchUpdated
+item/reasoning/summaryPartAdded
+item/reasoning/summaryTextDelta
+item/reasoning/textDelta
+item/plan/delta
+
+thread/tokenUsage/updated
+account/updated
+account/rateLimits/updated
+account/login/completed
+serverRequest/resolved
+```
+
+Unknown methods become generic structured events containing bounded details. They do not terminate the session.
+
+## Domain model and state reduction
+
+The frontend consumes six first-class concepts:
+
+```text
+Workspace
+Codex Thread
+Codex Turn
+Codex Item
+Approval Request
+Runtime Process
+```
+
+An event sequence is assigned by the long-lived Rust runtime and remains monotonic across process restarts. React queues events until the next animation frame, sorts by sequence, and reduces them without rebuilding unrelated threads. A frame is synchronously flushed at 2,048 pending events to keep the frontend queue bounded without dropping output.
+
+Item events may arrive before the request response or before the turn payload. The reducer creates placeholders, appends deltas to only the matching item, and merges later authoritative objects. Repeated sequences and repeated item completion payloads are deduplicated.
+
+Completed turns are memoized and older blocks use CSS content visibility. Streaming output updates only the active item. Scroll follow is conditional: output follows when the reader is at the bottom and shows **Jump to latest** when the reader scrolls upward.
+
+Rendered live command output is capped at the latest one million characters per item with an explicit truncation marker. This keeps pathological command streams from exhausting the WebView while Codex-owned history and the working tree remain authoritative.
+
+## Permissions and approvals
+
+The three UI modes map to generated protocol values:
+
+| Mode | Thread sandbox | Turn sandbox policy | Approval policy |
+| --- | --- | --- | --- |
+| Standard | `read-only` | `readOnly` with network disabled | `on-request` |
+| Workspace Access | `workspace-write` | `workspaceWrite` scoped to the project | `on-request` |
+| Full Access | `danger-full-access` | `dangerFullAccess` | `never` |
+
+Approval decisions are limited to values exposed by the installed protocol. Command and file requests support accept, accept-for-session, decline, and cancel where advertised. Permission requests return the requested structured permission subset or an empty subset. User-input answers preserve protocol question identifiers. MCP elicitation uses the generated action values.
+
+Full Access is configured through protocol fields. It is never implemented by writing an approval answer into a terminal.
+
+## Models and effective settings
+
+`model/list` is the only source for model names, supported reasoning efforts, input modalities, service tiers, and Ultra availability.
+
+ATController keeps:
+
+- the user-requested model, effort, and tier in UI metadata;
+- the runtime-reported effective values in the active thread session;
+- a resolution label indicating applied, runtime default, or runtime fallback.
+
+The UI never silently treats a fallback as the requested setting.
+
+## Attachments
+
+Structured input conversion validates:
+
+- non-empty text;
+- supported inline image media types;
+- a maximum estimated 10 MiB decoded inline image size;
+- canonical local paths;
+- whether a local file is inside the active project;
+- explicit `allowOutsideWorkspace` for external paths;
+- selected skill name/path against the runtime `skills/list` result.
+
+Binary files are not expanded into giant text prompts.
+
+## Persistence
+
+Codex remains the source of truth for thread and turn history. ATController persists:
 
 ```text
 workspaces.json
 settings.json
-threads/<workspaceId>/<threadId>/thread.json
-threads/<workspaceId>/<threadId>/runs/<runId>/input_manifest.json
-threads/<workspaceId>/<threadId>/runs/<runId>/output.log
-threads/<workspaceId>/<threadId>/runs/<runId>/metadata.json
+codex-thread-ui.json
 ```
 
-Thread metadata persists the Codex session ID, permission mode, enabled skills, activity timestamps, and fork state. Live PTY process identifiers remain runtime-only.
+`codex-thread-ui.json` is keyed by canonical thread ID and contains only UI metadata:
 
-The first launch after upgrading performs a versioned migration in this same directory. It preserves existing workspace and thread data, resets legacy `fullAccess: true` thread values and `defaultNewThreadFullAccess: true` settings to `false`, then atomically records `migrations/codex-only-v1.json`. Malformed legacy JSON encountered during this migration is atomically quarantined with a `.codex-only-v1.invalid` suffix so it cannot remain active; malformed settings and workspace indexes are recreated with safe defaults. A failed or interrupted migration does not write the completion marker and is retried on the next startup. Once the marker exists, newly corrupted active files fail to load and are not silently overwritten.
+- project association and fallback title
+- pinned and unread state
+- draft and bounded prompt history
+- requested model, reasoning, and service tier
+- permission mode
+- last-viewed and update timestamps
 
-`ATCONTROLLER_APP_SUPPORT_ROOT` is available only in debug and test builds for isolated fixtures. Production builds ignore it and always use `~/Library/Application Support/ATController/`.
+The app-server v3 migration writes a backup before importing compatible metadata. Records without a canonical Codex identifier or with an incompatible runtime identity are reported and left untouched. Migration writes use temporary files, fsync, and atomic rename.
 
-### Runtime Log Retention
+## Git boundary
 
-For active terminal sessions, ATController atomically compacts an `output.log` when it would exceed 8 MiB, retaining its most recent 6 MiB. Logical stream positions remain monotonic across compaction so reconnect snapshots can report omitted output correctly.
+All Git commands receive a canonical registered project path. File paths must resolve inside the repository root and outside `.git`. Branch names are validated and passed as individual process arguments. Output capture is bounded and drains stdout/stderr concurrently to avoid pipe deadlocks.
 
-ATController keeps the newest 32 UUID-named thread run directories per thread and the newest 32 UUID-named workspace-shell session directories per workspace. The latest recorded thread run and directories marked by a live ATController process are protected even when they fall outside the newest-32 window. This policy applies only to ATController-owned runtime history and does not modify Codex session history under `$CODEX_HOME`.
+Branch switching refuses unsafe dirty states. File revert requires UI confirmation and refuses to silently delete untracked files.
 
-## Workspace Semantics
+## Security boundary
 
-ATController supports local, SSH, and rdev workspaces.
+ATController is not a privilege boundary around Codex. Full Access gives Codex the rights of the current macOS user.
 
-- A local workspace starts Codex on the Mac.
-- A remote workspace starts the configured shell connection and then invokes Codex in that environment.
-- Remote environments use their own Codex installation, authentication, configuration, and session history.
-- Remote threads do not promise durable automatic resume because ATController cannot inspect the remote Codex rollout files.
+The application does provide integration hardening:
 
-Removing a workspace stops its active terminal sessions, removes its registration, and removes ATController’s thread storage for that workspace.
+- restrictive WebView Content Security Policy;
+- typed and narrow Tauri commands;
+- canonical path allowlists;
+- direct process spawning without shell command composition;
+- no arbitrary frontend shell execution;
+- bounded transport queues and diagnostic buffers;
+- credential-pattern redaction;
+- no ATController credential store;
+- no prompt text in copied diagnostics;
+- separate diagnostic stderr;
+- exact external URL scheme validation.
 
-## Skills
+## Sequence
 
-Skill discovery scans:
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI as ATController React UI
+    participant Rust as ATController Rust
+    participant Server as codex app-server
+    participant Runtime as Official Codex runtime
 
-- `<workspace>/.agents/skills/`
-- `~/.agents/skills/`
+    User->>UI: Launch ATController
+    UI->>Rust: Load projects and UI metadata
+    Rust->>Server: Spawn codex app-server --stdio
+    Rust->>Server: initialize(clientInfo, stable capabilities)
+    Server-->>Rust: InitializeResponse
+    Rust->>Server: initialized
+    Rust-->>UI: Ready diagnostics and runtime catalog
 
-Selected skill context is assembled locally and added to the next prompt. The Codex CLI remains responsible for executing the session.
+    User->>UI: Open or create thread
+    UI->>Rust: thread/read, thread/resume, or thread/start
+    Rust->>Server: Structured thread request with cwd and permissions
+    Server->>Runtime: Open canonical Codex thread
+    Runtime-->>Server: Thread state
+    Server-->>Rust: Response and thread notifications
+    Rust-->>UI: Normalized thread session
 
-## Git Integration
+    User->>UI: Send structured prompt and attachments
+    UI->>Rust: turn/start
+    Rust->>Server: turn/start(threadId, input, settings)
+    Server->>Runtime: Start turn
+    Runtime-->>Server: Messages, reasoning, commands, edits, tools
+    Server-->>Rust: Structured item and delta notifications
+    Rust-->>UI: Ordered normalized events
+    UI-->>User: Stream timeline and changes
 
-`src-tauri/src/git_tools.rs` provides:
+    opt Approval required
+        Server->>Rust: Server-initiated approval request
+        Rust-->>UI: Inline approval card
+        User->>UI: Approve once, approve for session, or deny
+        UI->>Rust: Typed approval response
+        Rust->>Server: Result for original request ID
+        Server->>Runtime: Continue or deny action
+    end
 
-- branch listing
-- status summaries
-- branch checkout
-- optional pull-before-start behavior
+    Runtime-->>Server: Turn completed
+    Server-->>Rust: turn/completed
+    Rust-->>UI: Final structured turn and usage
+    UI-->>User: Completion and unread/notification state
 
-Before branch switching, ATController shuts down workspace terminal sessions so a running process cannot remain attached to the previous checkout state.
-
-## Keyboard and Terminal Behavior
-
-- `Cmd+C` follows native macOS copy behavior in the embedded terminal.
-- `Ctrl+C` sends the interrupt sequence to the active Codex PTY.
-- Enter, resize, streaming, and ANSI behavior are passed through the PTY rather than translated into a chat API.
-
-## Release Build
-
-The release workflow builds `aarch64-apple-darwin`, verifies a thin `arm64` executable, checks the bundle name and identifier, verifies the DMG and ZIP, and publishes:
-
-```text
-ATController.dmg
-ATController.app.zip
+    User->>UI: Quit
+    UI->>Rust: Window destroyed
+    Rust->>Server: Close stdin and stop process group
+    Rust-->>UI: Stopped
 ```
 
-Pull-request, `main`, and manually dispatched builds are unsigned development artifacts. The fresh version-tag release job receives Apple credentials only through the protected `production` environment and fails closed unless every required signing and notarization secret is present.
+## Test layers
 
-Before a tag can publish, CI verifies the bundle identifier and version, the expected Apple Team ID, the native Apple silicon architecture, strict code-signature validity, Gatekeeper acceptance, stapled notarization tickets, DMG integrity, and the exact two release artifact names.
+- Rust unit tests cover framing, oversized recovery, redaction, permission mapping, protocol normalization, workspace validation, Git safety, migration, resume argument construction, and process behavior.
+- Frontend tests cover event reduction, ordering, deduplication, sidebar sections, approvals, structured timeline cards, attachments, prompt history, controls, diagnostics, inspector actions, appearance, context menus, and keyboard behavior.
+- Contract tests start the real installed app-server in a temporary Git repository and exercise initialization, account/model reads, thread lifecycle, a real streamed turn, archive/restore, and cleanup.
+- End-to-end runtime tests create and modify a real temporary file, verify structured activity and Git state, restart the process, resume the same thread, interrupt a turn, exercise Standard approval denial and Full Access, handle invalid IDs, and verify no orphan process remains.
 
-## Maintainer Invariants
+## Release architecture
 
-- Keep `ATController` as the product name everywhere.
-- Keep application data under `~/Library/Application Support/ATController/`.
-- Keep Codex CLI as the only runtime.
-- Do not add a second terminal content source outside the session stream reducer and `TerminalPanel`.
-- Preserve monotonic stream positions across snapshot hydration and live replay.
-- Attempt durable output sync before terminal exit, and surface any persistence failure in both the run state and exit event.
-- Treat full access as an explicit thread or new-thread-default opt-in that bypasses Codex approvals and sandboxing.
-- Validate terminal changes with automated tests and the live checklist in `docs/manual-terminal-rendering.md`.
+Local production-shaped packages are native Apple silicon only. `scripts/package-local-macos.sh`:
+
+1. builds `ATController.app`;
+2. verifies the executable is `arm64`;
+3. verifies bundle name and identifier;
+4. applies and verifies an ad-hoc local signature;
+5. creates and verifies `ATController.dmg`;
+6. creates and verifies `ATController.app.zip`.
+
+Tagged GitHub Actions releases import a Developer ID certificate, sign, notarize, staple, verify Gatekeeper acceptance, and publish exactly the two production artifact names.

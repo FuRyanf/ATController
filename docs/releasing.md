@@ -38,6 +38,7 @@ Run the local checks:
 
 ```bash
 yarn audit:branding
+yarn codex:check-protocol
 yarn audit --level moderate
 yarn build
 yarn test:ui
@@ -84,5 +85,7 @@ Download both assets from the GitHub Release and confirm:
 - the DMG opens and contains `ATController.app`
 - `ATController.app` launches normally on an Apple silicon Mac that did not build it
 - About ATController reports the tagged version
-- a Workspace-mode thread starts with workspace-write sandboxing and on-request approvals
-- Full access requires an explicit thread or new-thread-default choice
+- an existing Codex thread lists, opens, and resumes through the structured app-server connection
+- a Workspace Access thread starts with workspace-write sandboxing and on-request approvals
+- a Full Access thread uses structured danger-full-access permissions with no redundant local approval
+- quitting ATController leaves no orphaned app-server process

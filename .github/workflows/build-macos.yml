@@ -99,11 +99,29 @@ jobs:
       - name: Install frontend dependencies
         run: yarn install --frozen-lockfile
 
+      - name: Install the checked-in Codex schema generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex_version="$(
+            node -e '
+              const metadata = require("./generated/codex-app-server/version.json");
+              const match = String(metadata.codexVersion).match(/[0-9]+\.[0-9]+\.[0-9]+/);
+              if (!match) process.exit(1);
+              process.stdout.write(match[0]);
+            '
+          )"
+          npm install --global "@openai/codex@${codex_version}"
+          codex --version
+
       - name: Audit frontend dependencies
         run: yarn audit --level moderate
 
       - name: Audit product identity and runtime scope
         run: yarn audit:branding
+
+      - name: Validate generated Codex protocol
+        run: yarn codex:check-protocol
 
       - name: Validate repository version alignment
         run: yarn version:check

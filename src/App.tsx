@@ -5,8708 +5,1788 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from 'react';
 
-import { setTheme as setAppTheme } from '@tauri-apps/api/app';
 import { confirm, open } from '@tauri-apps/plugin-dialog';
 
 import './styles.css';
-import { AddWorkspaceModal } from './components/AddWorkspaceModal';
-import { BulkImportCodexSessionsModal } from './components/BulkImportCodexSessionsModal';
-import { ImportSessionModal } from './components/ImportSessionModal';
-import { BottomBar } from './components/BottomBar';
-import { HeaderBar } from './components/HeaderBar';
-import { LeftRail } from './components/LeftRail';
-import { SettingsModal } from './components/SettingsModal';
-import { TerminalPanel } from './components/TerminalPanel';
-import { ThreadSkillsPopover } from './components/ThreadSkillsPopover';
-import { ToastRegion, type ToastItem } from './components/ToastRegion';
-import { WorkspaceShellDrawer } from './components/WorkspaceShellDrawer';
-import * as apiModule from './lib/api';
-import { resolveAppendedTerminalLogChunk } from './lib/terminalLogChunkUpdate';
+import { AppIcon } from './components/AppIcon';
+import { CodexSidebar } from './components/CodexSidebar';
+import { CommandPalette, type PaletteAction } from './components/CommandPalette';
+import { ControlCenterDialog } from './components/ControlCenterDialog';
+import { ConversationTimeline } from './components/ConversationTimeline';
+import { InspectorPanel } from './components/InspectorPanel';
 import {
-  presentTerminalEventData,
-  presentTerminalText,
-  presentTerminalWindow,
-  shouldPreserveRawTerminalPresentation
-} from './lib/terminalOutputPresentation';
+  MessageComposer,
+  type ComposerAttachment
+} from './components/MessageComposer';
+import {
+  ThreadContextMenu,
+  type ThreadMenuAction
+} from './components/ThreadContextMenu';
+import { ThreadHeader } from './components/ThreadHeader';
+import * as apiModule from './lib/api';
 import {
   applyAppearanceMode,
   normalizeAppearanceMode,
-  persistAppearanceMode,
-  readStoredAppearanceMode,
-  resolveAppearanceTheme
+  persistAppearanceMode
 } from './lib/appearance';
-import {
-  sendTaskCompletionAlert,
-  sendTaskCompletionAlertsEnabledConfirmation,
-  sendTaskCompletionAlertsTestNotification
-} from './lib/taskCompletionAlerts';
-import {
-  createRunLifecycleState,
-  isStreamingStuck,
-  markRunExited,
-  markRunReady,
-  markRunStreaming,
-  noteRunOutput,
-  type TerminalRunLifecycleState
-} from './lib/terminalRunLifecycle';
-import {
-  appendTerminalStreamChunk,
-  bindLiveTerminalSessionStream,
-  bindTerminalSessionStream,
-  createTerminalSessionStreamState,
-  hydrateTerminalSessionStream,
-  presentTerminalSnapshot,
-  terminalSessionStreamKnownRawEndPosition,
-  type TerminalSessionStreamState
-} from './lib/terminalSessionStream';
-import { selectTerminalStreamCacheEvictions } from './lib/terminalStreamCache';
-import { looksLikeStatefulTerminalUi, stripAnsi } from './lib/terminalUiHeuristics';
-import {
-  appendMeaningfulOutputTail,
-  extractMeaningfulOutputTail,
-  looksLikeShellPromptText,
-  looksLikeTerminalPromptLine,
-  matchesVisibleOutputTail,
-  MAX_VISIBLE_OUTPUT_TAIL_CHARS,
-  normalizeMeaningfulOutputText,
-  trimMeaningfulOutputTail
-} from './lib/visibleOutputTail';
-import {
-  clearThreadSearchText,
-  rememberThreadSearchText
-} from './lib/threadSearchTextCache';
-import {
-  loadSkillUsageMap,
-  persistSkillUsageMap,
-  recordSkillUsage,
-  toggleSkillPinned,
-  type SkillUsageMap
-} from './lib/skillUsage';
-import { isRemoteWorkspaceKind } from './lib/workspaceKind';
-import { useRunStore } from './stores/runStore';
-import { useThreadStore } from './stores/threadStore';
-import {
-  normalizeTerminalScrollbackLines,
-  type AppearanceMode,
-  type AppUpdateInfo,
-  type CodexTurnCompletionSummary,
-  type CreateThreadOptions,
-  type GitBranchEntry,
-  type GitInfo,
-  type GitWorkspaceStatus,
-  type ImportableCodexProject,
-  type ImportableCodexSession,
-  type PreparedNativeFork,
-  type RecentCodexThread,
-  type RunStatus,
-  type Settings,
-  type SkillInfo,
-  type TerminalDataEvent,
-  type TerminalExitEvent,
-  type TerminalOutputSnapshot,
-  type TerminalReadyEvent,
-  type TerminalSshAuthStatusEvent,
-  type TerminalSshAuthStatusReason,
-  type TerminalTurnCompletedEvent,
-  type TerminalTurnCompletionMode,
-  type TerminalSessionMode,
-  type ThreadMetadata,
-  type Workspace
+import { codexStore, useCodexStore } from './stores/codexStore';
+import type {
+  CodexApprovalRequest,
+  CodexEvent,
+  CodexRuntimeCatalog,
+  CodexSkill,
+  CodexThread,
+  CodexThreadUiMetadata,
+  ComposerInput,
+  GitBranchEntry,
+  GitInfo,
+  GitWorkspaceStatus,
+  PermissionMode,
+  ResumeCommandRequest,
+  ServerRequestResponse,
+  Settings,
+  ThreadPreferences,
+  Workspace
 } from './types';
 
-const CODEX_FULL_ACCESS_ARGS = ['--dangerously-bypass-approvals-and-sandbox'] as const;
-const CODEX_WORKSPACE_ACCESS_ARGS = ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'] as const;
+const api = apiModule.api;
+const SELECTED_WORKSPACE_KEY = 'atcontroller:selected-workspace-v2';
+const SELECTED_THREAD_KEY = 'atcontroller:selected-codex-thread-v2';
+const SIDEBAR_WIDTH_KEY = 'atcontroller:sidebar-width-v2';
+const INSPECTOR_OPEN_KEY = 'atcontroller:inspector-open-v2';
 
-const { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } = apiModule;
-const onTerminalSshAuthStatus =
-  apiModule.onTerminalSshAuthStatus ??
-  (async (_handler: (event: TerminalSshAuthStatusEvent) => void) => () => undefined);
-const onTerminalTurnCompleted =
-  apiModule.onTerminalTurnCompleted ??
-  (async (_handler: (event: TerminalTurnCompletedEvent) => void) => () => undefined);
-
-const CODEX_LABEL = 'Codex';
-const STORAGE_PREFIX = 'atcontroller';
-const SELECTED_WORKSPACE_KEY = `${STORAGE_PREFIX}:selected-workspace`;
-const SIDEBAR_WIDTH_KEY = `${STORAGE_PREFIX}:sidebar-width`;
-const SHELL_DRAWER_HEIGHT_KEY = `${STORAGE_PREFIX}:shell-drawer-height`;
-const THREAD_VISIBLE_OUTPUT_GUARD_KEY = `${STORAGE_PREFIX}:visible-output-guard`;
-const THREAD_ATTENTION_STATE_V2_KEY = `${STORAGE_PREFIX}:thread-attention-v2`;
-const THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY = `${STORAGE_PREFIX}:jsonl-completion-attention-v1`;
-const TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY = `${STORAGE_PREFIX}:task-completion-alerts-bootstrap-v1`;
-const SIDEBAR_WIDTH_DEFAULT = 320;
-const SIDEBAR_WIDTH_MIN = 260;
-const SIDEBAR_WIDTH_MAX = 460;
-const SHELL_DRAWER_HEIGHT_DEFAULT = 280;
-const SHELL_DRAWER_HEIGHT_MIN = 220;
-// Must be >= backend TERMINAL_STREAM_TAIL_MAX_CHARS + TRIM_HYSTERESIS (320K)
-// to avoid position gaps that trigger full terminal resets during trimming.
-const TERMINAL_LOG_BUFFER_CHARS = 1_200_000;
-const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
-const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
-const TERMINAL_LOG_FLUSH_SAFETY_MS = 48;
-const TERMINAL_STREAM_CACHE_MAX_THREADS = 16;
-const TERMINAL_STREAM_CACHE_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS * 10;
-const TERMINAL_STREAM_CACHE_PRUNE_DELAY_MS = 500;
-const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
-const TERMINAL_RESIZE_DEBOUNCE_MS = 80;
-const STATEFUL_TERMINAL_RESYNC_DEBOUNCE_MS = 160;
-const STATEFUL_TERMINAL_REFRESH_RETRY_DELAYS_MS = [220, 520];
-const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
-const SESSION_SNAPSHOT_LATE_REFRESH_DELAYS_MS = [2200, 4200];
-const CODEX_IN_PLACE_RESTART_DELAY_MS = 120;
-const RDEV_SHELL_PROMPT_POLL_INTERVAL_MS = 120;
-const RDEV_SHELL_PROMPT_MAX_POLLS = 12;
-const AUTO_RECOVER_SESSION_TIMEOUT_MS = 900;
-const AUTO_RECOVER_RETRY_COOLDOWN_MS = 1200;
-const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
-const THREAD_WORKING_STUCK_TIMEOUT_MS = 15_000;
-const THREAD_FORK_RESOLUTION_POLL_INTERVAL_MS = 400;
-const THREAD_FORK_RESOLUTION_TIMEOUT_MS = 12_000;
-const THREAD_FORK_RESOLUTION_HARD_TIMEOUT_MS = 5 * 60 * 1000;
-const BRANCH_SWITCH_RESUME_FAILURE_SUPPRESS_MS = 15_000;
-const MAX_ATTACHMENT_DRAFTS = 24;
-const MAX_ATTACHMENTS_PER_MESSAGE = 12;
-const MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD = 80;
-const IGNORED_SSH_AUTH_STATUS_SESSION_TTL_MS = 5 * 60 * 1000;
-const MAX_IGNORED_SSH_AUTH_STATUS_SESSIONS = 512;
-const IGNORED_SSH_AUTH_STATUS_SESSION_PRUNE_INTERVAL_MS = 10_000;
-const MAX_PENDING_TERMINAL_DATA_SESSIONS = 64;
-const MAX_PENDING_TERMINAL_DATA_EVENTS_PER_SESSION = 64;
-const MAX_PENDING_TERMINAL_DATA_CHARS_PER_SESSION = 256_000;
-const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
-function remoteAccessStartupBlockReason(accessLabel: string): string {
-  const lowerLabel = accessLabel.toLowerCase();
-  const threadLabel = `${CODEX_LABEL} ${lowerLabel} thread`;
-  return `Send a message first to establish the session, then toggle ${accessLabel}. To start with ${accessLabel}, use New thread options and choose ${threadLabel}, or enable ${lowerLabel} by default in Settings.`;
+interface Toast {
+  id: string;
+  message: string;
+  tone: 'neutral' | 'success' | 'error';
 }
 
-function normalizeSettings(settings?: Settings | null): Settings {
-  return {
-    codexCliPath: settings?.codexCliPath ?? null,
-    appearanceMode: normalizeAppearanceMode(settings?.appearanceMode),
-    defaultNewThreadFullAccess: settings?.defaultNewThreadFullAccess === true,
-    taskCompletionAlerts: settings?.taskCompletionAlerts === true,
-    terminalScrollbackLines: normalizeTerminalScrollbackLines(settings?.terminalScrollbackLines)
-  };
-}
-
-function detectActiveCliPath(): Promise<string | null> {
-  return api.detectCodexCliPath();
-}
-
-function threadCodexSessionId(thread?: Pick<ThreadMetadata, 'codexSessionId'> | null): string {
-  return thread?.codexSessionId?.trim() ?? '';
-}
-
-function codexAccessArgs(fullAccess: boolean): readonly string[] {
-  return fullAccess ? CODEX_FULL_ACCESS_ARGS : CODEX_WORKSPACE_ACCESS_ARGS;
-}
-
-interface PendingSessionStart {
-  requestId: number;
-  promise: Promise<string>;
-}
-
-type ThreadAttentionActiveTurnStatus = 'idle' | 'running' | 'completed';
-type ThreadAttentionCompletionStatus = Extract<RunStatus, 'Succeeded' | 'Failed'>;
-
-interface ThreadAttentionState {
-  activeTurnId: number | null;
-  activeTurnStatus: ThreadAttentionActiveTurnStatus;
-  activeTurnStartedAtMs: number | null;
-  activeTurnHasMeaningfulOutput: boolean;
-  activeTurnLastOutputAtMs: number | null;
-  activeTurnSeenOutputAtMs: number | null;
-  lastCompletedTurnIdWithOutput: number;
-  lastCompletedTurnStatus: ThreadAttentionCompletionStatus | null;
-  lastCompletedTurnAtMs: number | null;
-  lastCompletedTurnLastOutputAtMs: number | null;
-  lastNotifiedTurnId: number;
-  lastNotifiedTurnStatus: ThreadAttentionCompletionStatus | null;
-}
-
-interface ThreadJsonlCompletionAttentionState {
-  codexSessionId: string;
-  latestCompletionIndex: number;
-  lastSeenCompletionIndex: number;
-  lastNotifiedCompletionIndex: number;
-  latestStatus: ThreadAttentionCompletionStatus | null;
-  latestCompletedAtMs: number | null;
-}
-
-interface ThreadVisibleOutputGuard {
-  seenAtMs: number;
-  baselineUserInputAtMs: number;
-  tail: string;
-}
-
-interface SshStartupBlockModalState {
-  sessionId: string;
-  workspaceId: string;
-  threadId?: string | null;
-  reason: TerminalSshAuthStatusReason;
-}
-
-interface ResumeFailureModalState {
+interface ContextMenuState {
   threadId: string;
-  workspaceId: string;
-  log: string;
-  showLog: boolean;
+  x: number;
+  y: number;
 }
 
-interface ForkResolutionFailureModalState {
+interface RenameState {
   threadId: string;
-  workspaceId: string;
+  value: string;
 }
 
-function removeThreadFlag(map: Record<string, boolean>, threadId: string) {
-  if (!map[threadId]) {
-    return map;
-  }
-  const next = { ...map };
-  delete next[threadId];
-  return next;
+function nowIso(): string {
+  return new Date().toISOString();
 }
 
-function findThreadById(
-  threadById: Record<string, ThreadMetadata>,
-  threadId: string | null | undefined
-): ThreadMetadata | undefined {
-  if (!threadId) {
-    return undefined;
-  }
-  return threadById[threadId];
-}
-
-function removeRecordEntry<T>(map: Record<string, T>, key: string) {
-  if (!(key in map)) {
-    return map;
-  }
-  const next = { ...map };
-  delete next[key];
-  return next;
-}
-
-function addRecordFlag(
-  map: Record<string, true>,
-  key: string | null | undefined
-): Record<string, true> {
-  if (!key || map[key]) {
-    return map;
-  }
-  return {
-    ...map,
-    [key]: true
-  } as Record<string, true>;
-}
-
-function requiresExplicitSshReadySignal(workspaceKind: Workspace['kind'] | undefined | null): boolean {
-  return workspaceKind === 'ssh';
-}
-
-function sshStartupBlockHeading(reason: TerminalSshAuthStatusReason): string {
-  switch (reason) {
-    case 'host-verification-required':
-      return 'Finish SSH setup in Terminal first';
-    case 'password-auth-unsupported':
-      return 'ATController supports keys-only SSH';
-    case 'interactive-auth-unsupported':
-      return 'SSH must be unlocked outside ATController';
-  }
-}
-
-function sshStartupBlockBody(reason: TerminalSshAuthStatusReason): string {
-  switch (reason) {
-    case 'host-verification-required':
-      return 'Connect once in Terminal to accept the host key, then retry here.';
-    case 'password-auth-unsupported':
-      return 'This host requested a password. Configure SSH keys with macOS Keychain or ssh-agent, then verify `ssh user@host` works in Terminal before retrying.';
-    case 'interactive-auth-unsupported':
-      return 'This SSH target requires interactive auth such as a key passphrase or MFA prompt. Unlock it in macOS Keychain or ssh-agent and verify it in Terminal before retrying.';
-  }
-}
-
-function sshStartupBlockOverlayMessage(reason: TerminalSshAuthStatusReason): string {
-  switch (reason) {
-    case 'host-verification-required':
-      return 'SSH setup blocked. Accept the host key in Terminal, then retry.';
-    case 'password-auth-unsupported':
-      return 'SSH setup blocked. ATController requires key-based auth via macOS Keychain or ssh-agent.';
-    case 'interactive-auth-unsupported':
-      return 'SSH setup blocked. Unlock your key or MFA outside ATController, then retry.';
-  }
-}
-
-function pruneIgnoredSshAuthStatusSessionsInPlace(
-  sessions: Record<string, number>,
-  nowMs: number
-) {
-  let retainedCount = 0;
-  for (const [sessionId, ignoredAtMs] of Object.entries(sessions)) {
-    if (
-      !Number.isFinite(ignoredAtMs) ||
-      ignoredAtMs <= 0 ||
-      nowMs - ignoredAtMs > IGNORED_SSH_AUTH_STATUS_SESSION_TTL_MS
-    ) {
-      delete sessions[sessionId];
-      continue;
-    }
-    retainedCount += 1;
-  }
-
-  if (retainedCount <= MAX_IGNORED_SSH_AUTH_STATUS_SESSIONS) {
-    return;
-  }
-
-  const entries = Object.entries(sessions).sort((a, b) => b[1] - a[1]);
-  for (let index = MAX_IGNORED_SSH_AUTH_STATUS_SESSIONS; index < entries.length; index += 1) {
-    delete sessions[entries[index][0]];
-  }
-}
-
-function parseThreadVisibleOutputGuardMap(raw: string | null): Record<string, ThreadVisibleOutputGuard> {
-  if (!raw) {
-    return {};
-  }
+function releaseTauriListener(stop: () => void): void {
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {};
+    const result = (stop as unknown as () => void | Promise<void>)();
+    if (result && typeof result === 'object' && 'catch' in result) {
+      void result.catch(() => undefined);
     }
-    const normalized: Record<string, ThreadVisibleOutputGuard> = {};
-    for (const [threadId, value] of Object.entries(parsed)) {
-      if (!threadId || !value || typeof value !== 'object' || Array.isArray(value)) {
-        continue;
-      }
-      const seenAtMs =
-        typeof (value as { seenAtMs?: unknown }).seenAtMs === 'number'
-          ? (value as { seenAtMs: number }).seenAtMs
-          : Number((value as { seenAtMs?: unknown }).seenAtMs);
-      if (!Number.isFinite(seenAtMs) || seenAtMs <= 0) {
-        continue;
-      }
-      const baselineUserInputAtMs =
-        typeof (value as { baselineUserInputAtMs?: unknown }).baselineUserInputAtMs === 'number'
-          ? (value as { baselineUserInputAtMs: number }).baselineUserInputAtMs
-          : Number((value as { baselineUserInputAtMs?: unknown }).baselineUserInputAtMs ?? 0);
-      const rawTail = typeof (value as { tail?: unknown }).tail === 'string' ? (value as { tail: string }).tail : '';
-      const tail = rawTail.trim();
-      if (!tail) {
-        continue;
-      }
-      normalized[threadId] = {
-        seenAtMs: Math.trunc(seenAtMs),
-        baselineUserInputAtMs:
-          Number.isFinite(baselineUserInputAtMs) && baselineUserInputAtMs > 0
-            ? Math.trunc(baselineUserInputAtMs)
-            : 0,
-        tail:
-          tail.length <= MAX_VISIBLE_OUTPUT_TAIL_CHARS
-            ? tail
-            : tail.slice(tail.length - MAX_VISIBLE_OUTPUT_TAIL_CHARS)
-      };
-    }
-    return normalized;
   } catch {
-    return {};
+    // Development hot reload can invalidate Tauri's listener registry first.
   }
 }
 
-function loadThreadVisibleOutputGuardMap(storageKey: string): Record<string, ThreadVisibleOutputGuard> {
-  if (typeof window === 'undefined') {
-    return {};
-  }
-  return parseThreadVisibleOutputGuardMap(window.localStorage.getItem(storageKey));
-}
-
-function persistThreadVisibleOutputGuardMap(storageKey: string, map: Record<string, ThreadVisibleOutputGuard>) {
-  if (typeof window === 'undefined') {
-    return;
-  }
-  try {
-    const entries = Object.entries(map)
-      .map(([threadId, value]) => {
-        const tail = typeof value.tail === 'string' ? value.tail.trim() : '';
-        if (!threadId || !tail || !Number.isFinite(value.seenAtMs) || value.seenAtMs <= 0) {
-          return null;
-        }
-        return [
-          threadId,
-          {
-            seenAtMs: Math.trunc(value.seenAtMs),
-            baselineUserInputAtMs:
-              Number.isFinite(value.baselineUserInputAtMs) && value.baselineUserInputAtMs > 0
-                ? Math.trunc(value.baselineUserInputAtMs)
-                : 0,
-            tail:
-              tail.length <= MAX_VISIBLE_OUTPUT_TAIL_CHARS
-                ? tail
-                : tail.slice(tail.length - MAX_VISIBLE_OUTPUT_TAIL_CHARS)
-          }
-        ] as const;
-      })
-      .filter((entry): entry is readonly [string, ThreadVisibleOutputGuard] => entry !== null);
-    if (entries.length === 0) {
-      window.localStorage.removeItem(storageKey);
-      return;
-    }
-    window.localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(entries)));
-  } catch {
-    // best effort
-  }
-}
-
-function createThreadAttentionState(): ThreadAttentionState {
+function defaultSettings(): Settings {
   return {
-    activeTurnId: null,
-    activeTurnStatus: 'idle',
-    activeTurnStartedAtMs: null,
-    activeTurnHasMeaningfulOutput: false,
-    activeTurnLastOutputAtMs: null,
-    activeTurnSeenOutputAtMs: null,
-    lastCompletedTurnIdWithOutput: 0,
-    lastCompletedTurnStatus: null,
-    lastCompletedTurnAtMs: null,
-    lastCompletedTurnLastOutputAtMs: null,
-    lastNotifiedTurnId: 0,
-    lastNotifiedTurnStatus: null
+    appearanceMode: 'system',
+    defaultNewThreadFullAccess: true,
+    defaultPermissionMode: 'fullAccess',
+    defaultModel: null,
+    defaultReasoningEffort: null,
+    defaultServiceTier: null,
+    resumeTerminalBehavior: 'insertForReview',
+    commandEnterToSend: true,
+    taskCompletionAlerts: true
   };
 }
 
-function normalizePositiveInteger(value: unknown): number | null {
-  const numeric = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(numeric) || numeric <= 0) {
-    return null;
-  }
-  return Math.trunc(numeric);
-}
-
-function normalizeNonNegativeInteger(value: unknown): number {
-  const normalized = normalizePositiveInteger(value);
-  return normalized ?? 0;
-}
-
-function normalizeThreadAttentionTurnStatus(value: unknown): ThreadAttentionActiveTurnStatus {
-  return value === 'running' || value === 'completed' ? value : 'idle';
-}
-
-function normalizeThreadAttentionCompletionStatus(value: unknown): ThreadAttentionCompletionStatus | null {
-  return value === 'Succeeded' || value === 'Failed' ? value : null;
-}
-
-function normalizeThreadAttentionState(value: unknown): ThreadAttentionState | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-
-  const record = value as Record<string, unknown>;
-  const activeTurnId = normalizePositiveInteger(record.activeTurnId);
-  const activeTurnStatus = normalizeThreadAttentionTurnStatus(record.activeTurnStatus);
-  const activeTurnStartedAtMs = normalizePositiveInteger(record.activeTurnStartedAtMs);
-  const activeTurnLastOutputAtMs = normalizePositiveInteger(record.activeTurnLastOutputAtMs);
-  const activeTurnSeenOutputAtMs = normalizePositiveInteger(record.activeTurnSeenOutputAtMs);
-  const lastCompletedTurnIdWithOutput = normalizeNonNegativeInteger(record.lastCompletedTurnIdWithOutput);
-  const lastCompletedTurnStatus = normalizeThreadAttentionCompletionStatus(record.lastCompletedTurnStatus);
-  const lastCompletedTurnAtMs = normalizePositiveInteger(record.lastCompletedTurnAtMs);
-  const lastCompletedTurnLastOutputAtMs = normalizePositiveInteger(record.lastCompletedTurnLastOutputAtMs);
-  const legacyLastViewedTurnId = normalizeNonNegativeInteger(record.lastViewedTurnId);
-  const legacyLastViewedAtMs = normalizePositiveInteger(record.lastViewedAtMs);
-  const lastNotifiedTurnId = normalizeNonNegativeInteger(record.lastNotifiedTurnId);
-  const lastNotifiedTurnStatus = normalizeThreadAttentionCompletionStatus(record.lastNotifiedTurnStatus);
-  const normalizedSeenOutputAtMs =
-    activeTurnId &&
-    legacyLastViewedTurnId === activeTurnId &&
-    legacyLastViewedAtMs !== null
-      ? Math.max(activeTurnSeenOutputAtMs ?? 0, legacyLastViewedAtMs)
-      : activeTurnSeenOutputAtMs;
-
+function preferencesFromSettings(settings: Settings): ThreadPreferences {
   return {
-    activeTurnId,
-    activeTurnStatus: activeTurnId ? activeTurnStatus : 'idle',
-    activeTurnStartedAtMs: activeTurnId ? activeTurnStartedAtMs : null,
-    activeTurnHasMeaningfulOutput: record.activeTurnHasMeaningfulOutput === true,
-    activeTurnLastOutputAtMs,
-    activeTurnSeenOutputAtMs: activeTurnId ? normalizedSeenOutputAtMs : null,
-    lastCompletedTurnIdWithOutput,
-    lastCompletedTurnStatus,
-    lastCompletedTurnAtMs,
-    lastCompletedTurnLastOutputAtMs,
-    lastNotifiedTurnId,
-    lastNotifiedTurnStatus
+    permissionMode:
+      settings.defaultPermissionMode ??
+      (settings.defaultNewThreadFullAccess === false ? 'workspaceAccess' : 'fullAccess'),
+    model: settings.defaultModel ?? null,
+    reasoningEffort: settings.defaultReasoningEffort ?? null,
+    serviceTier: settings.defaultServiceTier ?? null
   };
 }
 
-function parseThreadAttentionStateMap(raw: string | null): Record<string, ThreadAttentionState> {
-  if (!raw) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {};
-    }
-    const normalized: Record<string, ThreadAttentionState> = {};
-    for (const [threadId, value] of Object.entries(parsed)) {
-      if (!threadId) {
-        continue;
-      }
-      const state = normalizeThreadAttentionState(value);
-      if (!state) {
-        continue;
-      }
-      normalized[threadId] = state;
-    }
-    return normalized;
-  } catch {
-    return {};
-  }
-}
-
-function loadThreadAttentionStateMap(storageKey: string): Record<string, ThreadAttentionState> {
-  if (typeof window === 'undefined') {
-    return {};
-  }
-  return parseThreadAttentionStateMap(window.localStorage.getItem(storageKey));
-}
-
-function isDefaultThreadAttentionState(state: ThreadAttentionState): boolean {
-  return (
-    state.activeTurnId === null &&
-    state.activeTurnStatus === 'idle' &&
-    state.activeTurnStartedAtMs === null &&
-    !state.activeTurnHasMeaningfulOutput &&
-    state.activeTurnLastOutputAtMs === null &&
-    state.activeTurnSeenOutputAtMs === null &&
-    state.lastCompletedTurnIdWithOutput === 0 &&
-    state.lastCompletedTurnStatus === null &&
-    state.lastCompletedTurnAtMs === null &&
-    state.lastCompletedTurnLastOutputAtMs === null &&
-    state.lastNotifiedTurnId === 0 &&
-    state.lastNotifiedTurnStatus === null
-  );
-}
-
-function persistThreadAttentionStateMap(storageKey: string, map: Record<string, ThreadAttentionState>) {
-  if (typeof window === 'undefined') {
-    return;
-  }
-  try {
-    const entries = Object.entries(map).filter(([, value]) => !isDefaultThreadAttentionState(value));
-    if (entries.length === 0) {
-      window.localStorage.removeItem(storageKey);
-      return;
-    }
-    window.localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(entries)));
-  } catch {
-    // best effort
-  }
-}
-
-function normalizeThreadJsonlCompletionAttentionState(
-  value: unknown
-): ThreadJsonlCompletionAttentionState | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-
-  const record = value as Record<string, unknown>;
-  const codexSessionId =
-    typeof record.codexSessionId === 'string' ? record.codexSessionId.trim() : '';
-  const latestCompletionIndex = normalizeNonNegativeInteger(record.latestCompletionIndex);
-  const lastSeenCompletionIndex = normalizeNonNegativeInteger(record.lastSeenCompletionIndex);
-  const lastNotifiedCompletionIndex = normalizeNonNegativeInteger(record.lastNotifiedCompletionIndex);
-  const latestStatus = normalizeThreadAttentionCompletionStatus(record.latestStatus);
-  const latestCompletedAtMs = normalizePositiveInteger(record.latestCompletedAtMs);
-
-  if (!codexSessionId || latestCompletionIndex === 0 || !latestStatus || latestCompletedAtMs === null) {
-    return null;
-  }
-
+function preferencesFromMetadata(
+  metadata: CodexThreadUiMetadata | undefined,
+  settings: Settings
+): ThreadPreferences {
+  if (!metadata) return preferencesFromSettings(settings);
   return {
-    codexSessionId,
-    latestCompletionIndex,
-    lastSeenCompletionIndex: Math.min(lastSeenCompletionIndex, latestCompletionIndex),
-    lastNotifiedCompletionIndex: Math.min(lastNotifiedCompletionIndex, latestCompletionIndex),
-    latestStatus,
-    latestCompletedAtMs
+    permissionMode: metadata.permissionMode,
+    model: metadata.requestedModel ?? null,
+    reasoningEffort: metadata.requestedReasoningEffort ?? null,
+    serviceTier: metadata.requestedServiceTier ?? null
   };
 }
 
-function parseThreadJsonlCompletionAttentionStateMap(
-  raw: string | null
-): Record<string, ThreadJsonlCompletionAttentionState> {
-  if (!raw) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {};
-    }
-    const normalized: Record<string, ThreadJsonlCompletionAttentionState> = {};
-    for (const [threadId, value] of Object.entries(parsed)) {
-      if (!threadId) {
-        continue;
-      }
-      const state = normalizeThreadJsonlCompletionAttentionState(value);
-      if (!state) {
-        continue;
-      }
-      normalized[threadId] = state;
-    }
-    return normalized;
-  } catch {
-    return {};
-  }
+function createUiMetadata(
+  workspace: Workspace,
+  thread: CodexThread,
+  preferences: ThreadPreferences
+): CodexThreadUiMetadata {
+  const timestamp = nowIso();
+  return {
+    threadId: thread.id,
+    workspaceId: workspace.id,
+    fallbackTitle: thread.title || 'New thread',
+    pinned: false,
+    unread: false,
+    draft: '',
+    promptHistory: [],
+    permissionMode: preferences.permissionMode,
+    requestedModel: preferences.model ?? null,
+    requestedReasoningEffort: preferences.reasoningEffort ?? null,
+    requestedServiceTier: preferences.serviceTier ?? null,
+    lastViewedAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
 }
 
-function loadThreadJsonlCompletionAttentionStateMap(
-  storageKey: string
-): Record<string, ThreadJsonlCompletionAttentionState> {
-  if (typeof window === 'undefined') {
-    return {};
-  }
-  return parseThreadJsonlCompletionAttentionStateMap(window.localStorage.getItem(storageKey));
-}
-
-function persistThreadJsonlCompletionAttentionStateMap(
-  storageKey: string,
-  map: Record<string, ThreadJsonlCompletionAttentionState>
-) {
-  if (typeof window === 'undefined') {
-    return;
-  }
-  try {
-    const entries = Object.entries(map).filter(([, value]) => {
-      return (
-        value.codexSessionId.trim().length > 0 &&
-        value.latestCompletionIndex > 0 &&
-        value.latestStatus !== null &&
-        value.latestCompletedAtMs !== null
-      );
-    });
-    if (entries.length === 0) {
-      window.localStorage.removeItem(storageKey);
-      return;
-    }
-    window.localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(entries)));
-  } catch {
-    // best effort
-  }
-}
-
-function areThreadJsonlCompletionAttentionStatesEqual(
-  left: ThreadJsonlCompletionAttentionState | null | undefined,
-  right: ThreadJsonlCompletionAttentionState | null | undefined
+function workspaceMatchesThread(
+  workspace: Workspace,
+  thread: CodexThread,
+  metadata?: CodexThreadUiMetadata
 ): boolean {
-  if (!left && !right) {
-    return true;
+  if (metadata?.workspaceId === workspace.id) return true;
+  const clean = (value: string) => value.replace(/\/+$/, '');
+  return Boolean(thread.cwd) && clean(thread.cwd) === clean(workspace.path);
+}
+
+function lastRunningTurn(thread?: CodexThread) {
+  if (!thread) return undefined;
+  for (let index = thread.turns.length - 1; index >= 0; index -= 1) {
+    if (thread.turns[index].status === 'inProgress') return thread.turns[index];
   }
-  if (!left || !right) {
-    return false;
-  }
+  return undefined;
+}
+
+function attachmentFromPath(path: string, workspacePath: string): ComposerAttachment {
+  const extension = path.split('.').pop()?.toLocaleLowerCase() ?? '';
+  const kind = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'heif'].includes(extension)
+    ? 'image'
+    : 'file';
+  const root = workspacePath.endsWith('/') ? workspacePath : `${workspacePath}/`;
+  return {
+    id: crypto.randomUUID(),
+    name: path.split('/').pop() || path,
+    kind,
+    path,
+    outsideWorkspace: path !== workspacePath && !path.startsWith(root)
+  };
+}
+
+function EmptyWorkspace({
+  kind,
+  detail,
+  action,
+  onAction
+}: {
+  kind: 'folder' | 'warning' | 'history' | 'info';
+  detail: string;
+  action: string;
+  onAction: () => void;
+}) {
   return (
-    left.codexSessionId === right.codexSessionId &&
-    left.latestCompletionIndex === right.latestCompletionIndex &&
-    left.lastSeenCompletionIndex === right.lastSeenCompletionIndex &&
-    left.lastNotifiedCompletionIndex === right.lastNotifiedCompletionIndex &&
-    left.latestStatus === right.latestStatus &&
-    left.latestCompletedAtMs === right.latestCompletedAtMs
+    <main className="application-empty-state">
+      <div className="empty-state-icon"><AppIcon name={kind} size={24} /></div>
+      <h1>{detail}</h1>
+      <p>ATController uses the locally installed official Codex runtime through its structured app server.</p>
+      <button type="button" className="primary-button" onClick={onAction}>{action}</button>
+    </main>
   );
-}
-
-function isUnreadJsonlCompletionAttention(
-  state: ThreadJsonlCompletionAttentionState | null | undefined
-): boolean {
-  if (!state) {
-    return false;
-  }
-  return state.latestCompletionIndex > state.lastSeenCompletionIndex;
-}
-
-function shouldTrackThreadJsonlCompletionAttention(
-  thread: Pick<ThreadMetadata, 'isArchived' | 'codexSessionId'>,
-  workspaceKind: Workspace['kind'] | undefined | null
-): boolean {
-  return (
-    !thread.isArchived &&
-    workspaceKind === 'local' &&
-    (thread.codexSessionId?.trim() ?? '').length > 0
-  );
-}
-
-function areThreadAttentionStatesEqual(left: ThreadAttentionState, right: ThreadAttentionState): boolean {
-  return (
-    left.activeTurnId === right.activeTurnId &&
-    left.activeTurnStatus === right.activeTurnStatus &&
-    left.activeTurnStartedAtMs === right.activeTurnStartedAtMs &&
-    left.activeTurnHasMeaningfulOutput === right.activeTurnHasMeaningfulOutput &&
-    left.activeTurnLastOutputAtMs === right.activeTurnLastOutputAtMs &&
-    left.activeTurnSeenOutputAtMs === right.activeTurnSeenOutputAtMs &&
-    left.lastCompletedTurnIdWithOutput === right.lastCompletedTurnIdWithOutput &&
-    left.lastCompletedTurnStatus === right.lastCompletedTurnStatus &&
-    left.lastCompletedTurnAtMs === right.lastCompletedTurnAtMs &&
-    left.lastCompletedTurnLastOutputAtMs === right.lastCompletedTurnLastOutputAtMs &&
-    left.lastNotifiedTurnId === right.lastNotifiedTurnId &&
-    left.lastNotifiedTurnStatus === right.lastNotifiedTurnStatus
-  );
-}
-
-function nextTurnIdForAttentionState(state: ThreadAttentionState): number {
-  return Math.max(
-    state.activeTurnId ?? 0,
-    state.lastCompletedTurnIdWithOutput,
-    state.lastNotifiedTurnId
-  ) + 1;
-}
-
-function runningTurnReattachBoundaryMs(state?: ThreadAttentionState): number | null {
-  if (!state || state.activeTurnId === null || state.activeTurnStatus !== 'running') {
-    return null;
-  }
-
-  return state.activeTurnStartedAtMs ?? state.activeTurnLastOutputAtMs ?? state.lastCompletedTurnAtMs ?? null;
-}
-
-function hasSeenCompletedAttentionTurn(state?: ThreadAttentionState): boolean {
-  if (!state) {
-    return false;
-  }
-  if (state.activeTurnId === null || state.lastCompletedTurnIdWithOutput === 0) {
-    return false;
-  }
-  if (state.activeTurnId !== state.lastCompletedTurnIdWithOutput) {
-    return false;
-  }
-  if (state.lastCompletedTurnLastOutputAtMs === null) {
-    return false;
-  }
-  return (state.activeTurnSeenOutputAtMs ?? 0) >= state.lastCompletedTurnLastOutputAtMs;
-}
-
-function hasCompletedAttentionTurn(state?: ThreadAttentionState): boolean {
-  if (!state) {
-    return false;
-  }
-  return state.activeTurnId !== null && state.activeTurnStatus === 'completed';
-}
-
-function shouldNotifyAttentionTurn(state?: ThreadAttentionState): boolean {
-  if (!state || !state.lastCompletedTurnStatus || state.lastCompletedTurnIdWithOutput === 0) {
-    return false;
-  }
-  if (state.lastCompletedTurnIdWithOutput > state.lastNotifiedTurnId) {
-    return !hasSeenCompletedAttentionTurn(state);
-  }
-  return (
-    state.lastCompletedTurnIdWithOutput === state.lastNotifiedTurnId &&
-    state.lastCompletedTurnStatus === 'Failed' &&
-    state.lastNotifiedTurnStatus !== 'Failed' &&
-    !hasSeenCompletedAttentionTurn(state)
-  );
-}
-
-function threadSelectionKey(workspaceId: string) {
-  return `atcontroller:selected-thread:${workspaceId}`;
-}
-
-function todayId() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-}
-
-function isUuidLike(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
-}
-
-function buildCodexInPlaceRestartCommand(
-  sessionId: string,
-  fullAccess: boolean
-): string {
-  const parts = [
-    'exec',
-    'env',
-    'TERM=xterm-256color',
-    'COLORTERM=truecolor',
-    'CLICOLOR=1',
-    'CLICOLOR_FORCE=1',
-    'FORCE_COLOR=1',
-    'NO_COLOR=',
-    'codex',
-    'resume',
-    shellQuote(sessionId)
-  ];
-  parts.push(...codexAccessArgs(fullAccess));
-  return parts.join(' ');
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function buildCodexResumeCommand(
-  sessionId: string,
-  fullAccess: boolean
-): string {
-  const parts = ['codex', 'resume', shellQuote(sessionId)];
-  parts.push(...codexAccessArgs(fullAccess));
-  return parts.join(' ');
-}
-
-function buildThreadResumeCommand(
-  thread: Pick<ThreadMetadata, 'codexSessionId' | 'fullAccess'>
-): string | null {
-  const sessionId = threadCodexSessionId(thread);
-  if (!sessionId) {
-    return null;
-  }
-  return buildCodexResumeCommand(sessionId, thread.fullAccess);
-}
-
-function buildThreadInPlaceRestartCommand(
-  thread: Pick<ThreadMetadata, 'codexSessionId' | 'fullAccess'>
-): string | null {
-  const sessionId = threadCodexSessionId(thread);
-  if (!sessionId) {
-    return null;
-  }
-  return buildCodexInPlaceRestartCommand(sessionId, thread.fullAccess);
-}
-
-function buildThreadResumeTerminalCommand(
-  thread: Pick<ThreadMetadata, 'codexSessionId' | 'fullAccess'>,
-  cwd?: string | null
-): string | null {
-  const command = buildThreadResumeCommand(thread);
-  if (!command) {
-    return null;
-  }
-  const workingDirectory = cwd?.trim() ?? '';
-  if (!workingDirectory) {
-    return command;
-  }
-  return `cd ${shellQuote(workingDirectory)} && ${command}`;
-}
-
-function hasShellPromptInSnapshot(snapshot: string): boolean {
-  if (!snapshot) {
-    return false;
-  }
-
-  const lines = snapshot
-    .replace(/\r/g, '\n')
-    .split('\n')
-    .slice(-12)
-    .map((line) =>
-      stripAnsi(line)
-        .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
-        .trimEnd()
-    )
-    .filter((line) => line.length > 0);
-
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index];
-    const lower = line.toLowerCase();
-    if (
-      lower.includes('for shortcuts') ||
-      lower.includes('openai codex') ||
-      lower.includes('starting ssh connection') ||
-      lower.includes('uploading gh auth token')
-    ) {
-      continue;
-    }
-    if (looksLikeTerminalPromptLine(line)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function looksLikeCodexUiReadyText(snapshot: string): boolean {
-  if (!snapshot) {
-    return false;
-  }
-
-  const normalized = stripAnsi(snapshot).toLowerCase();
-  return (
-    normalized.includes('for shortcuts') ||
-    normalized.includes('openai codex') ||
-    normalized.includes('ask codex')
-  );
-}
-
-function isDefaultThreadTitle(title: string): boolean {
-  return title.trim().toLowerCase() === 'new thread';
-}
-
-function normalizeTerminalInputChunk(data: string): string {
-  // Codex treats Esc+Enter as "insert newline without submitting".
-  // We preserve that behavior in app-side draft parsing so Shift/Option+Enter
-  // stays multiline instead of looking like a normal submit.
-  return data.replace(/\x1b\r/g, '\n');
-}
-
-interface StripControlSequencesResult {
-  text: string;
-  carry: string;
-}
-
-function consumeCsiSequence(input: string, startIndex: number): number | null {
-  let index = startIndex;
-  while (index < input.length) {
-    const code = input.charCodeAt(index);
-    if (code >= 0x40 && code <= 0x7e) {
-      return index + 1;
-    }
-    index += 1;
-  }
-  return null;
-}
-
-function consumeStringControlSequence(input: string, startIndex: number): number | null {
-  let index = startIndex;
-  while (index < input.length) {
-    const code = input.charCodeAt(index);
-    if (code === 0x07 || code === 0x9c) {
-      return index + 1;
-    }
-    if (code === 0x1b) {
-      if (index + 1 >= input.length) {
-        return null;
-      }
-      if (input.charCodeAt(index + 1) === 0x5c) {
-        return index + 2;
-      }
-    }
-    index += 1;
-  }
-  return null;
-}
-
-function consumeEscapeSequence(input: string, startIndex: number): number | null {
-  const escIndex = startIndex;
-  if (escIndex + 1 >= input.length) {
-    return null;
-  }
-
-  const code = input.charCodeAt(escIndex + 1);
-  if (code === 0x5b) {
-    return consumeCsiSequence(input, escIndex + 2);
-  }
-
-  // OSC, DCS, SOS, PM, APC
-  if (code === 0x5d || code === 0x50 || code === 0x58 || code === 0x5e || code === 0x5f) {
-    return consumeStringControlSequence(input, escIndex + 2);
-  }
-
-  // ESC Fe / ESC Fs / ESC Fp forms.
-  if (code >= 0x20 && code <= 0x2f) {
-    let index = escIndex + 2;
-    while (index < input.length) {
-      const current = input.charCodeAt(index);
-      if (current >= 0x30 && current <= 0x7e) {
-        return index + 1;
-      }
-      index += 1;
-    }
-    return null;
-  }
-
-  return escIndex + 2;
-}
-
-function stripTerminalControlSequences(chunk: string, previousCarry: string): StripControlSequencesResult {
-  const source = `${previousCarry}${chunk}`;
-  if (!source) {
-    return { text: '', carry: '' };
-  }
-
-  let output = '';
-  let index = 0;
-
-  while (index < source.length) {
-    const code = source.charCodeAt(index);
-
-    if (code === 0x1b) {
-      const next = consumeEscapeSequence(source, index);
-      if (next === null) {
-        return { text: output, carry: source.slice(index) };
-      }
-      index = next;
-      continue;
-    }
-
-    // C1 CSI
-    if (code === 0x9b) {
-      const next = consumeCsiSequence(source, index + 1);
-      if (next === null) {
-        return { text: output, carry: source.slice(index) };
-      }
-      index = next;
-      continue;
-    }
-
-    // C1 DCS / SOS / OSC / PM / APC
-    if (code === 0x90 || code === 0x98 || code === 0x9d || code === 0x9e || code === 0x9f) {
-      const next = consumeStringControlSequence(source, index + 1);
-      if (next === null) {
-        return { text: output, carry: source.slice(index) };
-      }
-      index = next;
-      continue;
-    }
-
-    output += source[index];
-    index += 1;
-  }
-
-  return { text: output, carry: '' };
-}
-
-function extractSubmittedInputLines(
-  previousBuffer: string,
-  previousControlCarry: string,
-  chunk: string
-): { nextBuffer: string; nextControlCarry: string; submittedLines: string[] } {
-  const normalizedChunk = normalizeTerminalInputChunk(chunk);
-  const { text: normalized, carry } = stripTerminalControlSequences(normalizedChunk, previousControlCarry);
-  if (!normalized) {
-    return { nextBuffer: previousBuffer, nextControlCarry: carry, submittedLines: [] };
-  }
-
-  let buffer = previousBuffer;
-  const submittedLines: string[] = [];
-
-  for (const char of normalized) {
-    if (char === '\n') {
-      buffer += '\n';
-      continue;
-    }
-
-    if (char === '\r') {
-      if (buffer.trim().length > 0) {
-        submittedLines.push(buffer);
-      }
-      buffer = '';
-      continue;
-    }
-
-    if (char === '\u007f' || char === '\b') {
-      if (buffer.length > 0) {
-        buffer = buffer.slice(0, -1);
-      }
-      continue;
-    }
-
-    if (char >= ' ' && char !== '\u007f') {
-      buffer += char;
-    }
-  }
-
-  return { nextBuffer: buffer, nextControlCarry: carry, submittedLines };
-}
-
-function detectNativeForkCommand(submittedLines: string[]): string | null {
-  if (submittedLines.length !== 1) {
-    return null;
-  }
-  const line = submittedLines[0]?.trim() ?? '';
-  if (!/^\/(?:fork|branch)(?:\s+.+)?$/i.test(line)) {
-    return null;
-  }
-  return line;
-}
-
-function isThreadAwaitingConsumedForkResolution(thread: ThreadMetadata | null | undefined): boolean {
-  if (!thread?.pendingForkLaunchConsumed) {
-    return false;
-  }
-  const sourceCodexSessionId = thread.pendingForkSourceCodexSessionId?.trim() ?? '';
-  if (!isUuidLike(sourceCodexSessionId)) {
-    return false;
-  }
-  const currentCodexSessionId = thread.codexSessionId?.trim() ?? '';
-  return !isUuidLike(currentCodexSessionId) || currentCodexSessionId === sourceCodexSessionId;
-}
-
-function isThreadMissingClaimedForkSession(thread: ThreadMetadata | null | undefined): boolean {
-  const forkedFromCodexSessionId = thread?.forkedFromCodexSessionId?.trim() ?? '';
-  if (!isUuidLike(forkedFromCodexSessionId)) {
-    return false;
-  }
-  const currentCodexSessionId = thread?.codexSessionId?.trim() ?? '';
-  if (isUuidLike(currentCodexSessionId)) {
-    return false;
-  }
-  const pendingSourceCodexSessionId = thread?.pendingForkSourceCodexSessionId?.trim() ?? '';
-  return !isUuidLike(pendingSourceCodexSessionId);
-}
-
-function isForkSessionAlreadyClaimedError(error: unknown): boolean {
-  return String(error).toLowerCase().includes('already claimed by another thread');
-}
-
-function normalizeAttachmentPaths(raw: string[]): string[] {
-  const seen = new Set<string>();
-  const normalized: string[] = [];
-
-  for (const value of raw) {
-    const path = value.trim();
-    if (!path || seen.has(path)) {
-      continue;
-    }
-    seen.add(path);
-    normalized.push(path);
-  }
-
-  return normalized;
-}
-
-function mergeAttachmentPaths(existing: string[], incoming: string[]): string[] {
-  const merged = [...existing];
-  const seen = new Set(existing);
-  for (const path of incoming) {
-    if (seen.has(path)) {
-      continue;
-    }
-    merged.push(path);
-    seen.add(path);
-    if (merged.length >= MAX_ATTACHMENT_DRAFTS) {
-      break;
-    }
-  }
-  return merged;
-}
-
-function isImageAttachmentPath(path: string): boolean {
-  const lastSegment = path.split(/[\\/]/).pop() ?? '';
-  const dotIndex = lastSegment.lastIndexOf('.');
-  if (dotIndex < 0) {
-    return false;
-  }
-  const extension = lastSegment.slice(dotIndex + 1).toLowerCase();
-  return IMAGE_ATTACHMENT_EXTENSIONS.has(extension);
-}
-
-function quotePathForPrompt(path: string): string {
-  return `"${path.replace(/"/g, '\\"')}"`;
-}
-
-function buildAttachmentPrompt(paths: string[]): string {
-  const limited = paths.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
-  const omittedCount = Math.max(0, paths.length - limited.length);
-  const hasImages = limited.some(isImageAttachmentPath);
-
-  const parts = [
-    'Attachments from ATController:',
-    ...limited.map((path) => `- ${quotePathForPrompt(path)}`),
-    '',
-    hasImages ? 'Inspect image and screenshot files visually.' : 'Read the attached files directly.',
-    'If any attachment cannot be opened, say exactly which one failed.'
-  ];
-
-  if (omittedCount > 0) {
-    parts.push(
-      `${omittedCount} additional attachment${omittedCount === 1 ? '' : 's'} were selected but omitted to keep the prompt compact.`
-    );
-  }
-
-  return parts.join('\n');
-}
-
-function buildSkillPrompt(skills: SkillInfo[]): string {
-  const limited = skills.slice(0, 8);
-  const omittedCount = Math.max(0, skills.length - limited.length);
-  const references = limited.map((skill) => `${skill.name} (${skill.relativePath})`);
-  const parts = [
-    'Project skills to use for this request when relevant:',
-    ...references.map((reference) => `- ${reference}`),
-    '',
-    'Read each referenced SKILL.md before acting and follow its instructions when it applies.'
-  ];
-
-  if (omittedCount > 0) {
-    parts.push(
-      `${omittedCount} additional skill${omittedCount === 1 ? '' : 's'} were selected but omitted from this inline preamble to keep it compact.`
-    );
-  }
-
-  return parts.join('\n');
-}
-
-function stripFirstOccurrence(source: string, fragment: string): string {
-  if (!source || !fragment) {
-    return source;
-  }
-  const index = source.indexOf(fragment);
-  if (index < 0) {
-    return source;
-  }
-  return `${source.slice(0, index)}${source.slice(index + fragment.length)}`;
-}
-
-function stripHiddenPromptEchoes(text: string, prompts: string[]): string {
-  if (!text || prompts.length === 0) {
-    return text;
-  }
-
-  let next = text;
-  for (const prompt of prompts) {
-    if (!prompt) {
-      continue;
-    }
-    const variants = new Set([
-      prompt,
-      prompt.replace(/\n/g, '\r\n'),
-      prompt.replace(/\n/g, '\r')
-    ]);
-    for (const variant of variants) {
-      next = stripFirstOccurrence(next, variant);
-    }
-  }
-  return next;
-}
-
-function isEditableElement(element: Element | null): boolean {
-  if (!(element instanceof HTMLElement)) {
-    return false;
-  }
-
-  if (element.isContentEditable) {
-    return true;
-  }
-
-  if (element.closest('.thread-rename-input') !== null) {
-    return true;
-  }
-
-  if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-    return true;
-  }
-
-  if (element instanceof HTMLInputElement) {
-    const type = element.type.toLowerCase();
-    if (type === 'button' || type === 'checkbox' || type === 'file' || type === 'radio' || type === 'reset' || type === 'submit') {
-      return false;
-    }
-    return true;
-  }
-
-  return element.getAttribute('role') === 'textbox';
-}
-
-function shouldIgnoreGlobalTerminalShortcutTarget(target: EventTarget | null): boolean {
-  if (target instanceof Element && isEditableElement(target)) {
-    return true;
-  }
-
-  if (typeof document !== 'undefined' && isEditableElement(document.activeElement)) {
-    return true;
-  }
-
-  return false;
-}
-
-function hasMeaningfulTerminalOutputChunk(chunk: string): boolean {
-  if (!chunk) {
-    return false;
-  }
-  const visibleText = stripAnsi(chunk).replace(/[\r\n\t\b\f\v]/g, '');
-  return visibleText.trim().length > 0;
-}
-
-function statusFromExit(event: TerminalExitEvent): RunStatus {
-  if (event.persistenceError) {
-    return 'Failed';
-  }
-  if (event.signal || event.code === 130) {
-    return 'Canceled';
-  }
-  if (event.code === 0) {
-    return 'Succeeded';
-  }
-  if (typeof event.code === 'number') {
-    return 'Failed';
-  }
-  return 'Idle';
-}
-
-function looksLikeResumeFailureOutput(output: string): boolean {
-  const normalized = stripAnsi(output).toLowerCase();
-  const mentionsResume =
-    normalized.includes('--resume') || normalized.includes('resume a conversation') || normalized.includes('session');
-  if (!mentionsResume) {
-    return false;
-  }
-  return (
-    normalized.includes('unknown session') ||
-    normalized.includes('invalid session') ||
-    normalized.includes('session not found') ||
-    normalized.includes('no session found') ||
-    normalized.includes('failed to resume')
-  );
-}
-
-function isTerminalSessionUnavailableError(error: unknown): boolean {
-  const message = String(error).toLowerCase();
-  return (
-    message.includes('terminal session not found') ||
-    message.includes('session not found') ||
-    message.includes('no such process') ||
-    message.includes('broken pipe')
-  );
-}
-
-function clampSidebarWidth(width: number): number {
-  return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.round(width)));
-}
-
-function clampShellDrawerHeight(height: number, viewportHeight = window.innerHeight): number {
-  const safeViewportHeight = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 900;
-  const maxHeight = Math.min(
-    Math.round(safeViewportHeight * 0.82),
-    Math.max(0, safeViewportHeight - 160)
-  );
-  const effectiveMin = Math.min(SHELL_DRAWER_HEIGHT_MIN, maxHeight);
-  return Math.max(effectiveMin, Math.min(maxHeight, Math.round(height)));
-}
-
-function reorderWorkspacesByIds(currentWorkspaces: Workspace[], workspaceIds: string[]): Workspace[] {
-  if (currentWorkspaces.length <= 1 || workspaceIds.length === 0) {
-    return currentWorkspaces;
-  }
-
-  const remaining = [...currentWorkspaces];
-  const ordered: Workspace[] = [];
-  for (const workspaceId of workspaceIds) {
-    const index = remaining.findIndex((workspace) => workspace.id === workspaceId);
-    if (index < 0) {
-      continue;
-    }
-    ordered.push(remaining[index]);
-    remaining.splice(index, 1);
-  }
-
-  if (ordered.length === 0) {
-    return currentWorkspaces;
-  }
-  return [...ordered, ...remaining];
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
-  return await Promise.race<T | null>([
-    promise,
-    new Promise<null>((resolve) => {
-      window.setTimeout(() => resolve(null), timeoutMs);
-    })
-  ]);
 }
 
 export default function App() {
-  const threadStore = useThreadStore();
-  const runStore = useRunStore();
-
-  const {
-    threadsByWorkspace,
-    selectedWorkspaceId,
-    selectedThreadId,
-    listThreads,
-    createThread,
-    setThreadFullAccess,
-    setThreadSkills,
-    renameThread,
-    deleteThread,
-    setSelectedWorkspace,
-    setSelectedThread,
-    setThreadRunState,
-    applyThreadUpdate,
-    releaseRemovedThread,
-    markThreadUserInput,
-    clearThreadUserInputTimestamps
-  } = threadStore;
-
+  const codex = useCodexStore((snapshot) => snapshot);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
+    () => window.localStorage.getItem(SELECTED_WORKSPACE_KEY)
+  );
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [visibleThreadIds, setVisibleThreadIds] = useState<string[]>([]);
+  const [metadata, setMetadata] = useState<Record<string, CodexThreadUiMetadata>>({});
+  const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [catalog, setCatalog] = useState<CodexRuntimeCatalog | null>(null);
+  const [dataRoot, setDataRoot] = useState('');
+  const [filter, setFilter] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [loadingThreads, setLoadingThreads] = useState(false);
+  const [recoveringThread, setRecoveringThread] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [fatalError, setFatalError] = useState<string | null>(null);
+  const [threadError, setThreadError] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [attachmentsByThread, setAttachmentsByThread] = useState<Record<string, ComposerAttachment[]>>({});
+  const [runtimeSkills, setRuntimeSkills] = useState<CodexSkill[]>([]);
+  const [skillsByThread, setSkillsByThread] = useState<Record<string, CodexSkill[]>>({});
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [rename, setRename] = useState<RenameState | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [controlCenter, setControlCenter] = useState<'settings' | 'diagnostics' | null>(null);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [selfTestResult, setSelfTestResult] = useState<Record<string, unknown> | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const savedRaw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
-    if (savedRaw !== null) {
-      const saved = Number(savedRaw);
-      if (Number.isFinite(saved)) {
-        return clampSidebarWidth(saved);
-      }
-    }
-    return SIDEBAR_WIDTH_DEFAULT;
+    const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    return Number.isFinite(stored) ? Math.min(420, Math.max(236, stored)) : 292;
   });
-  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
-  const [threadSearch, setThreadSearch] = useState('');
+  const [inspectorOpen, setInspectorOpen] = useState(
+    () => window.localStorage.getItem(INSPECTOR_OPEN_KEY) !== 'false'
+  );
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null);
-  const [threadRuntimeCwdByThread, setThreadRuntimeCwdByThread] = useState<Record<string, string>>({});
-  const [focusedTerminalKind, setFocusedTerminalKind] = useState<'codex' | 'shell' | null>(null);
-  const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
-  const [selectedTerminalFollowPaused, setSelectedTerminalFollowPaused] = useState(false);
-  const appUnmountedRef = useRef(false);
-  const [selectedStatefulHydrationSessionId, setSelectedStatefulHydrationSessionId] = useState<string | null>(null);
-  const [selectedStatefulHydrationFailedSessionId, setSelectedStatefulHydrationFailedSessionId] = useState<string | null>(null);
-  const [shellTerminalSize, setShellTerminalSize] = useState({ cols: 120, rows: 16 });
-  const [shellDrawerHeight, setShellDrawerHeight] = useState(() => {
-    const savedRaw = window.localStorage.getItem(SHELL_DRAWER_HEIGHT_KEY);
-    if (savedRaw !== null) {
-      const saved = Number(savedRaw);
-      if (Number.isFinite(saved)) {
-        return clampShellDrawerHeight(saved);
-      }
-    }
-    return SHELL_DRAWER_HEIGHT_DEFAULT;
-  });
-  const [isShellDrawerResizing, setIsShellDrawerResizing] = useState(false);
-  const [selectedTerminalStreamRevision, setSelectedTerminalStreamRevision] = useState(0);
-  const [draftAttachmentsByThread, setDraftAttachmentsByThread] = useState<Record<string, string[]>>({});
-  const [skillsByWorkspaceId, setSkillsByWorkspaceId] = useState<Record<string, SkillInfo[]>>({});
-  const [skillsLoadingByWorkspaceId, setSkillsLoadingByWorkspaceId] = useState<Record<string, boolean>>({});
-  const [skillErrorsByWorkspaceId, setSkillErrorsByWorkspaceId] = useState<Record<string, string | null>>({});
-  const [skillUsageMap, setSkillUsageMap] = useState<SkillUsageMap>(() => loadSkillUsageMap());
-  const [skillsUpdating, setSkillsUpdating] = useState(false);
-  const [shellDrawerOpen, setShellDrawerOpen] = useState(false);
-  const [shellTerminalSessionId, setShellTerminalSessionId] = useState<string | null>(null);
-  const [shellTerminalWorkspaceId, setShellTerminalWorkspaceId] = useState<string | null>(null);
-  const [shellTerminalStream, setShellTerminalStream] = useState<TerminalSessionStreamState>(
-    () => createTerminalSessionStreamState()
-  );
-  const [shellTerminalStarting, setShellTerminalStarting] = useState(false);
-  const [shellTerminalFocusRequestId, setShellTerminalFocusRequestId] = useState(0);
-  const [terminalSearchToggleRequestId, setTerminalSearchToggleRequestId] = useState(0);
-  const [shellTerminalSearchToggleRequestId, setShellTerminalSearchToggleRequestId] = useState(0);
+  const [gitStatus, setGitStatus] = useState<GitWorkspaceStatus | null>(null);
+  const [gitBranches, setGitBranches] = useState<GitBranchEntry[]>([]);
 
-  useEffect(() => {
-    appUnmountedRef.current = false;
-    return () => {
-      appUnmountedRef.current = true;
-    };
-  }, []);
-
-  const [settings, setSettings] = useState<Settings>(() =>
-    normalizeSettings({
-      codexCliPath: null,
-      appearanceMode: readStoredAppearanceMode(),
-      defaultNewThreadFullAccess: false,
-      taskCompletionAlerts: false,
-      terminalScrollbackLines: undefined
-    })
-  );
-  const activeCliPath = settings.codexCliPath ?? '';
-  const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [blockingError, setBlockingError] = useState<string | null>(null);
-  const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
-  const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
-  const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev' | 'ssh'>('local');
-  const [addWorkspacePath, setAddWorkspacePath] = useState('');
-  const [addWorkspaceRdevCommand, setAddWorkspaceRdevCommand] = useState('');
-  const [addWorkspaceSshCommand, setAddWorkspaceSshCommand] = useState('');
-  const [addWorkspaceSshRemotePath, setAddWorkspaceSshRemotePath] = useState('');
-  const [addWorkspaceDisplayName, setAddWorkspaceDisplayName] = useState('');
-  const [addWorkspaceError, setAddWorkspaceError] = useState<string | null>(null);
-  const [addingWorkspace, setAddingWorkspace] = useState(false);
-
-  const [importSessionWorkspace, setImportSessionWorkspace] = useState<Workspace | null>(null);
-  const [importSessionError, setImportSessionError] = useState<string | null>(null);
-  const [importingSession, setImportingSession] = useState(false);
-  const [bulkImportOpen, setBulkImportOpen] = useState(false);
-  const [bulkImportLoading, setBulkImportLoading] = useState(false);
-  const [bulkImporting, setBulkImporting] = useState(false);
-  const [bulkImportError, setBulkImportError] = useState<string | null>(null);
-  const [discoveredImportableCodexProjects, setDiscoveredImportableCodexProjects] = useState<
-    ImportableCodexProject[]
-  >([]);
-  const [selectedBulkImportSessionIds, setSelectedBulkImportSessionIds] = useState<string[]>([]);
-  const [recentCodexThreads, setRecentCodexThreads] = useState<RecentCodexThread[]>([]);
-  const [openingRecentCodexSessionIds, setOpeningRecentCodexSessionIds] = useState<
-    Record<string, boolean>
-  >({});
-  const recentCodexRefreshRequestIdRef = useRef(0);
-  const recentCodexRefreshRunningRef = useRef(false);
-  const suppressedRecentCodexSessionIdsRef = useRef(new Set<string>());
-
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null);
-  const [installingUpdate, setInstallingUpdate] = useState(false);
-  const [fullAccessUpdating, setFullAccessUpdating] = useState(false);
-  const [startingByThread, setStartingByThread] = useState<Record<string, boolean>>({});
-  const [readyByThread, setReadyByThread] = useState<Record<string, boolean>>({});
-  const [sshStartupBlockedByThread, setSshStartupBlockedByThread] = useState<
-    Record<string, TerminalSshAuthStatusReason>
-  >({});
-  const [sshStartupBlockedShellByWorkspace, setSshStartupBlockedShellByWorkspace] = useState<
-    Record<string, TerminalSshAuthStatusReason>
-  >({});
-  const [hasInteractedByThread, setHasInteractedByThread] = useState<Record<string, boolean>>({});
-  const [creatingThreadByWorkspace, setCreatingThreadByWorkspace] = useState<Record<string, boolean>>({});
-  const [resumeFailureBlockedByThread, setResumeFailureBlockedByThread] = useState<Record<string, true>>({});
-  const [resumeFailureModal, setResumeFailureModal] = useState<ResumeFailureModalState | null>(null);
-  const [forkResolutionFailureBlockedByThread, setForkResolutionFailureBlockedByThread] = useState<
-    Record<string, true>
-  >({});
-  const [forkResolutionFailureModal, setForkResolutionFailureModal] = useState<ForkResolutionFailureModalState | null>(
-    null
-  );
-  const [sshStartupBlockModal, setSshStartupBlockModal] = useState<SshStartupBlockModalState | null>(null);
-
-  const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
-  const selectedThreadIdRef = useRef<string | undefined>(undefined);
-  const focusedTerminalKindRef = useRef<'codex' | 'shell' | null>(null);
-  const shellTerminalSessionIdRef = useRef<string | null>(null);
-  const shellTerminalWorkspaceIdRef = useRef<string | null>(null);
-  const shellSessionStartRequestIdRef = useRef(0);
-  const pendingShellSessionStartRef = useRef<{ requestId: number; workspaceId: string } | null>(null);
-  const activeRunsByThreadRef = useRef(runStore.activeRunsByThread);
-  const workingByThreadRef = useRef(runStore.workingByThread);
-  const readyByThreadRef = useRef<Record<string, boolean>>({});
-  const sshStartupBlockedByThreadRef = useRef<Record<string, TerminalSshAuthStatusReason>>({});
-  const sshStartupBlockedShellByWorkspaceRef = useRef<Record<string, TerminalSshAuthStatusReason>>({});
-  const ignoredSshAuthStatusSessionIdsRef = useRef<Record<string, number>>({});
-  const ignoredSshAuthStatusSessionLastPrunedAtMsRef = useRef(0);
-  const pendingSshStartupAuthStatusBySessionIdRef = useRef<Record<string, TerminalSshAuthStatusEvent>>({});
-  const threadWorkspaceKindByThreadIdRef = useRef<Record<string, Workspace['kind']>>({});
-  const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
-  const shellDrawerResizeStateRef = useRef<{ startY: number; startHeight: number } | null>(null);
-  const startingSessionByThreadRef = useRef<Record<string, PendingSessionStart>>({});
-  const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
-  const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
-  const threadByIdRef = useRef<Record<string, ThreadMetadata>>({});
-  const terminalStreamsByThreadRef = useRef<Record<string, TerminalSessionStreamState>>({});
-  const terminalStreamAccessedAtByThreadRef = useRef<Record<string, number>>({});
-  const terminalStreamCachePruneTimerRef = useRef<number | null>(null);
-  const threadIdBySessionIdRef = useRef<Record<string, string>>({});
-  const pendingTerminalDataBySessionRef = useRef<Record<string, TerminalDataEvent[]>>({});
-  const lastTerminalLogByThreadRef = useRef<Record<string, string>>({});
-  const threadSearchTextByThreadRef = useRef<Record<string, string>>({});
-  const selectedStatefulTerminalCacheRef = useRef<{
-    sessionId: string | null;
-    resetToken: number;
-    endPosition: number;
-    textLength: number;
-    value: boolean;
-  } | null>(null);
-  const workingStopTimerByThreadRef = useRef<Record<string, number>>({});
-  const draftAttachmentsByThreadRef = useRef<Record<string, string[]>>({});
-  const inputBufferByThreadRef = useRef<Record<string, string>>({});
-  const inputControlCarryByThreadRef = useRef<Record<string, string>>({});
-  const outputControlCarryByThreadRef = useRef<Record<string, string>>({});
-  const threadTitleInitializedRef = useRef<Record<string, true>>({});
-  const deletedThreadIdsRef = useRef<Record<string, true>>({});
-  const creatingThreadByWorkspaceRef = useRef<Record<string, true>>({});
-  const pendingInputByThreadRef = useRef<Record<string, string>>({});
-  const pendingSubmittedInputByThreadRef = useRef<Record<string, true>>({});
-  const pendingSkillClearByThreadRef = useRef<Record<string, true>>({});
-  const pendingNativeForkCommandByThreadRef = useRef<Record<string, true>>({});
-  const hiddenInjectedPromptsByThreadRef = useRef<Record<string, string[]>>({});
-  const forkResolutionByThreadRef = useRef<Record<string, Promise<void>>>({});
-  const forkResolutionTimeoutNotifiedByThreadRef = useRef<Record<string, true>>({});
-  const suppressAutoForkResolutionByThreadRef = useRef<Record<string, true>>({});
-  const allowFreshStartAfterForkFailureByThreadRef = useRef<Record<string, true>>({});
-  const selectedGitContextPathRef = useRef<string | null>(null);
-  const threadRuntimeCwdByThreadRef = useRef<Record<string, string>>({});
-  const gitInfoRequestIdRef = useRef(0);
-  const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
-  const terminalDataListenerReadyRef = useRef(false);
-  const terminalDataListenerReadyResolverRef = useRef<(() => void) | null>(null);
-  const terminalDataListenerReadyPromiseRef = useRef<Promise<void> | null>(null);
-  const visibleOutputGuardByThreadRef = useRef<Record<string, ThreadVisibleOutputGuard>>(
-    loadThreadVisibleOutputGuardMap(THREAD_VISIBLE_OUTPUT_GUARD_KEY)
-  );
-  const threadAttentionByThreadRef = useRef<Record<string, ThreadAttentionState>>(
-    loadThreadAttentionStateMap(THREAD_ATTENTION_STATE_V2_KEY)
-  );
-  const threadJsonlCompletionAttentionByThreadRef = useRef<
-    Record<string, ThreadJsonlCompletionAttentionState>
-  >(loadThreadJsonlCompletionAttentionStateMap(THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY));
-  const visibleOutputGuardDirtyRef = useRef(false);
-  const threadAttentionDirtyRef = useRef(false);
-  const threadJsonlCompletionAttentionDirtyRef = useRef(false);
-  const jsonlCompletionReconcileRequestIdByThreadRef = useRef<Record<string, number>>({});
-  const jsonlCompletionSeededSessionIdByThreadRef = useRef<Record<string, string>>({});
-  const suppressResumeFailureModalUntilByWorkspaceRef = useRef<Record<string, number>>({});
-  const taskCompletionAlertBootstrapAttemptedRef = useRef(false);
-  const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
-  const lastSessionStartAtMsByThreadRef = useRef<Record<string, number>>({});
-  const lastUserInputAtMsByThreadRef = useRef<Record<string, number>>({});
-  const runLifecycleByThreadRef = useRef<Record<string, TerminalRunLifecycleState>>({});
-  const sessionFailCountByThreadRef = useRef<Record<string, number>>({});
-  const terminalDataEventHandlerRef = useRef<(event: TerminalDataEvent) => void>(() => undefined);
-  const terminalReadyEventHandlerRef = useRef<(event: TerminalReadyEvent) => void>(() => undefined);
-  const terminalSshAuthStatusEventHandlerRef = useRef<(event: TerminalSshAuthStatusEvent) => void>(() => undefined);
-  const terminalTurnCompletedEventHandlerRef = useRef<(event: TerminalTurnCompletedEvent) => void>(() => undefined);
-  const terminalExitEventHandlerRef = useRef<(event: TerminalExitEvent) => void>(() => undefined);
-  const threadUpdatedEventHandlerRef = useRef<(thread: ThreadMetadata) => void>(() => undefined);
-  const terminalOnDataHandlerRef = useRef<(data: string) => void>(() => undefined);
-  const terminalOnResizeHandlerRef = useRef<(cols: number, rows: number) => void>(() => undefined);
-  const pendingTerminalResizeRef = useRef<{ sessionId: string; cols: number; rows: number } | null>(null);
-  const pendingTerminalResizeTimerRef = useRef<number | null>(null);
-  const selectedTerminalStreamRevisionTimerRef = useRef<number | null>(null);
-  const selectedTerminalStreamRevisionSafetyTimerRef = useRef<number | null>(null);
-  const terminalHydrationRequestIdByThreadRef = useRef<Record<string, number>>({});
-  const lastSentTerminalSizeBySessionRef = useRef<Record<string, { cols: number; rows: number }>>({});
-  const selectedSessionIdRef = useRef<string | null>(null);
-  const previousSelectedTerminalBindingRef = useRef<{ threadId: string | null; sessionId: string | null }>({
-    threadId: null,
-    sessionId: null
-  });
-  const statefulTerminalResyncTimerRef = useRef<number | null>(null);
-  const statefulRedrawRequestTokenRef = useRef(0);
-  const autoRecoverInFlightRef = useRef(false);
-  const lastAutoRecoverAttemptAtRef = useRef(0);
-  const skillListRequestIdByWorkspaceRef = useRef<Record<string, number>>({});
-  const [threadJsonlCompletionAttentionVersion, setThreadJsonlCompletionAttentionVersion] = useState(0);
-  const sessionMetaBySessionIdRef = useRef<
-    Record<
-      string,
-      {
-        threadId: string;
-        workspaceId: string;
-        workspaceKind: Workspace['kind'];
-        codexSessionId?: string | null;
-        currentCwd?: string | null;
-        mode: TerminalSessionMode;
-        turnCompletionMode: TerminalTurnCompletionMode;
-        startedAtMs: number;
-      }
-    >
-  >({});
-
-  if (!terminalDataListenerReadyPromiseRef.current) {
-    terminalDataListenerReadyPromiseRef.current = new Promise<void>((resolve) => {
-      terminalDataListenerReadyResolverRef.current = resolve;
-    });
-  }
-
-  const stableTerminalOnData = useCallback((data: string) => {
-    terminalOnDataHandlerRef.current(data);
-  }, []);
-
-  const stableTerminalOnResize = useCallback((cols: number, rows: number) => {
-    terminalOnResizeHandlerRef.current(cols, rows);
-  }, []);
-
-  const selectedWorkspace = useMemo(
-    () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId),
-    [selectedWorkspaceId, workspaces]
-  );
-  const workspaceById = useMemo(
-    () => Object.fromEntries(workspaces.map((workspace) => [workspace.id, workspace])),
-    [workspaces]
-  );
-  const localWorkspaceHistoryKey = useMemo(
-    () =>
-      JSON.stringify(
-        workspaces
-          .filter((workspace) => workspace.kind === 'local')
-          .map((workspace) => [workspace.id, workspace.path])
-      ),
-    [workspaces]
-  );
-
-  const allThreads = useMemo(
-    () => Object.values(threadsByWorkspace).flat().filter((thread) => !thread.isArchived),
-    [threadsByWorkspace]
-  );
-  const importedCodexSessionIds = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          allThreads
-            .filter((thread) => !thread.isArchived)
-            .map((thread) => thread.codexSessionId?.trim() ?? '')
-            .filter((sessionId) => sessionId.length > 0)
-        )
-      ),
-    [allThreads]
-  );
-  const discoveredImportableCodexSessionsById = useMemo(() => {
-    const lookup = new Map<string, { project: ImportableCodexProject; session: ImportableCodexSession }>();
-    for (const project of discoveredImportableCodexProjects) {
-      for (const session of project.sessions) {
-        lookup.set(session.sessionId, { project, session });
-      }
-    }
-    return lookup;
-  }, [discoveredImportableCodexProjects]);
-  const recentCodexThreadsByWorkspace = useMemo(() => {
-    const imported = new Set(importedCodexSessionIds);
-    const grouped: Record<string, RecentCodexThread[]> = {};
-    for (const thread of recentCodexThreads) {
-      if (imported.has(thread.sessionId)) {
-        continue;
-      }
-      (grouped[thread.workspaceId] ??= []).push(thread);
-    }
-    return grouped;
-  }, [importedCodexSessionIds, recentCodexThreads]);
-
-  const selectedThread = useMemo(() => {
-    if (!selectedThreadId) {
-      return undefined;
-    }
-    return allThreads.find((thread) => thread.id === selectedThreadId);
-  }, [allThreads, selectedThreadId]);
-  const selectedThreadRuntimeCwd = selectedThread ? threadRuntimeCwdByThread[selectedThread.id] ?? null : null;
-  const selectedGitContextPath = useMemo(() => {
-    if (!selectedWorkspace || selectedWorkspace.kind !== 'local') {
-      return null;
-    }
-    const runtimeCwd = selectedThreadRuntimeCwd?.trim();
-    return runtimeCwd && runtimeCwd.length > 0 ? runtimeCwd : selectedWorkspace.path;
-  }, [selectedThreadRuntimeCwd, selectedWorkspace]);
-  selectedGitContextPathRef.current = selectedGitContextPath;
-  const selectedThreadResumeFailureBlocked =
-    selectedThread ? Boolean(resumeFailureBlockedByThread[selectedThread.id]) : false;
-  const selectedThreadForkResolutionFailureBlocked =
-    selectedThread ? Boolean(forkResolutionFailureBlockedByThread[selectedThread.id]) : false;
-  const selectedThreadAwaitingForkResolution =
-    selectedThread ? isThreadAwaitingConsumedForkResolution(selectedThread) : false;
-
-  useEffect(() => {
-    let changed = false;
-    for (const thread of allThreads) {
-      if (!allowFreshStartAfterForkFailureByThreadRef.current[thread.id]) {
-        continue;
-      }
-      if (
-        isUuidLike(thread.codexSessionId?.trim() ?? '') ||
-        isUuidLike(thread.pendingForkSourceCodexSessionId?.trim() ?? '')
-      ) {
-        delete allowFreshStartAfterForkFailureByThreadRef.current[thread.id];
-        changed = true;
-      }
-    }
-    if (!changed) {
-      return;
-    }
-  }, [allThreads]);
-
-  useEffect(() => {
-    if (!selectedThread) {
-      return;
-    }
-    if (allowFreshStartAfterForkFailureByThreadRef.current[selectedThread.id]) {
-      return;
-    }
-    if (!isThreadMissingClaimedForkSession(selectedThread)) {
-      if (forkResolutionFailureBlockedByThread[selectedThread.id]) {
-        setForkResolutionFailureBlockedByThread((current) => removeRecordEntry(current, selectedThread.id));
-      }
-      if (forkResolutionFailureModal?.threadId === selectedThread.id) {
-        setForkResolutionFailureModal(null);
-      }
-      return;
-    }
-
-    setForkResolutionFailureBlockedByThread((current) =>
-      current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
-    );
-    setForkResolutionFailureModal((current) =>
-      current?.threadId === selectedThread.id
-        ? current
-        : {
-            threadId: selectedThread.id,
-            workspaceId: selectedThread.workspaceId
-          }
-    );
-  }, [
-    forkResolutionFailureBlockedByThread,
-    forkResolutionFailureModal,
-    selectedThread
-  ]);
-
-  const selectedSessionId = runStore.sessionForThread(selectedThreadId);
-  const isSelectedThreadStarting = selectedThread ? Boolean(startingByThread[selectedThread.id]) : false;
-  const isSelectedThreadReady = selectedThread ? Boolean(readyByThread[selectedThread.id]) : false;
-  const selectedThreadSshStartupBlockReason =
-    selectedThread && selectedWorkspace?.kind === 'ssh'
-      ? sshStartupBlockedByThread[selectedThread.id] ?? null
-      : null;
-  const selectedShellSshStartupBlockReason =
-    selectedWorkspace?.kind === 'ssh' ? sshStartupBlockedShellByWorkspace[selectedWorkspace.id] ?? null : null;
-  const hasInteractedForSelectedThread = selectedThread ? Boolean(hasInteractedByThread[selectedThread.id]) : false;
-  const fullAccessToggleBlockedReason =
-    selectedThread &&
-    selectedWorkspace &&
-    isRemoteWorkspaceKind(selectedWorkspace.kind) &&
-    (isSelectedThreadStarting || !hasInteractedForSelectedThread)
-      ? remoteAccessStartupBlockReason('Full access')
-      : null;
-
-  const selectedTerminalStream = useMemo(() => {
-    if (!selectedThreadId) {
-      return createTerminalSessionStreamState();
-    }
-    return terminalStreamsByThreadRef.current[selectedThreadId] ?? createTerminalSessionStreamState();
-  }, [selectedTerminalStreamRevision, selectedThreadId]);
-  const selectedSessionMode = selectedSessionId ? sessionMetaBySessionIdRef.current[selectedSessionId]?.mode ?? null : null;
-  const selectedTerminalLooksStateful = useMemo(() => {
-    if (
-      !selectedThread ||
-      !selectedSessionId ||
-      selectedTerminalStream.sessionId !== selectedSessionId
-    ) {
-      return false;
-    }
-
-    const cached = selectedStatefulTerminalCacheRef.current;
-    if (
-      cached &&
-      cached.sessionId === selectedTerminalStream.sessionId &&
-      cached.resetToken === selectedTerminalStream.resetToken &&
-      cached.endPosition === selectedTerminalStream.endPosition &&
-      cached.textLength === selectedTerminalStream.text.length
-    ) {
-      return cached.value;
-    }
-
-    const value = looksLikeStatefulTerminalUi(selectedTerminalStream.text);
-    selectedStatefulTerminalCacheRef.current = {
-      sessionId: selectedTerminalStream.sessionId,
-      resetToken: selectedTerminalStream.resetToken,
-      endPosition: selectedTerminalStream.endPosition,
-      textLength: selectedTerminalStream.text.length,
-      value
-    };
-    return value;
-  }, [selectedSessionId, selectedTerminalStream, selectedThread]);
-  const selectedTerminalRenderStream = useMemo(() => {
-    if (!selectedSessionId || selectedStatefulHydrationSessionId !== selectedSessionId) {
-      return selectedTerminalStream;
-    }
-    return {
-      sessionId: selectedSessionId,
-      phase: 'hydrating' as const,
-      text: '',
-      rawEndPosition: selectedTerminalStream.rawEndPosition,
-      startPosition: 0,
-      endPosition: 0,
-      chunks: [],
-      resetToken: selectedTerminalStream.resetToken
-    };
-  }, [selectedSessionId, selectedStatefulHydrationSessionId, selectedTerminalStream]);
-  const hasSelectedTerminalContent = selectedTerminalRenderStream.text.length > 0;
-  const selectedTerminalPrefersLiveRedraw =
-    selectedStatefulHydrationSessionId !== selectedSessionId &&
-    selectedTerminalLooksStateful &&
-    selectedSessionMode !== 'new' &&
-    selectedTerminalStream.phase === 'ready';
-  const selectedTerminalOverlayMessage =
-    selectedThreadSshStartupBlockReason
-      ? sshStartupBlockOverlayMessage(selectedThreadSshStartupBlockReason)
-      : selectedThreadForkResolutionFailureBlocked
-      ? 'Forked session could not be confirmed. Start fresh to continue.'
-      : selectedThreadResumeFailureBlocked
-      ? 'Session resume failed. Start fresh to continue.'
-      : selectedStatefulHydrationFailedSessionId === selectedSessionId && Boolean(selectedSessionId)
-      ? `Could not refresh ${CODEX_LABEL} screen yet. Waiting for new output...`
-      : selectedStatefulHydrationSessionId === selectedSessionId && Boolean(selectedSessionId)
-      ? `Refreshing ${CODEX_LABEL} screen...`
-      : !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
-      ? `Starting ${CODEX_LABEL} session...`
+  const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId);
+  const selectedThread = selectedThreadId ? codex.threads[selectedThreadId] : undefined;
+  const selectedSession =
+    selectedThreadId && !selectedThread?.archived
+      ? codex.sessions[selectedThreadId]
       : undefined;
-  const selectedThreadWorking = selectedThread ? runStore.isThreadWorking(selectedThread.id) : false;
+  const selectedMetadata = selectedThreadId ? metadata[selectedThreadId] : undefined;
+  const selectedPreferences = preferencesFromMetadata(selectedMetadata, settings);
+  const selectedApprovals = Object.values(codex.approvals).filter(
+    (approval) => approval.threadId === selectedThreadId
+  );
+  const selectedRunningTurn = lastRunningTurn(selectedThread);
+  const visibleThreads = visibleThreadIds
+    .map((threadId) => codex.threads[threadId])
+    .filter((thread): thread is CodexThread => Boolean(thread));
+  const connected = codex.diagnostics?.connectionState === 'ready';
+  const currentAttachments = selectedThreadId ? attachmentsByThread[selectedThreadId] ?? [] : [];
+  const currentSkills = selectedThreadId ? skillsByThread[selectedThreadId] ?? [] : [];
+
+  const selectedWorkspaceRef = useRef<Workspace | undefined>(selectedWorkspace);
+  const selectedThreadIdRef = useRef<string | null>(selectedThreadId);
+  const metadataRef = useRef(metadata);
+  const settingsRef = useRef(settings);
+  const connectionStateRef = useRef(codex.diagnostics?.connectionState ?? 'stopped');
+  const gitRefreshTimer = useRef<number | null>(null);
+  const threadRefreshSequence = useRef(0);
+  const restoredWorkspace = useRef<string | null>(null);
+  const runtimeThreadFilter = useRef('');
 
   useEffect(() => {
-    setSelectedTerminalFollowPaused(false);
-  }, [selectedSessionId, selectedThreadId]);
-
+    selectedWorkspaceRef.current = selectedWorkspace;
+  }, [selectedWorkspace]);
   useEffect(() => {
-    if (!selectedSessionId && selectedStatefulHydrationSessionId !== null) {
-      setSelectedStatefulHydrationSessionId(null);
-      setSelectedStatefulHydrationFailedSessionId(null);
-      return;
-    }
-    if (
-      selectedStatefulHydrationSessionId !== null &&
-      selectedSessionId !== null &&
-      selectedStatefulHydrationSessionId !== selectedSessionId
-    ) {
-      setSelectedStatefulHydrationSessionId(null);
-    }
-    if (
-      selectedStatefulHydrationFailedSessionId !== null &&
-      selectedSessionId !== null &&
-      selectedStatefulHydrationFailedSessionId !== selectedSessionId
-    ) {
-      setSelectedStatefulHydrationFailedSessionId(null);
-    }
-  }, [selectedSessionId, selectedStatefulHydrationFailedSessionId, selectedStatefulHydrationSessionId]);
-
+    selectedThreadIdRef.current = selectedThreadId;
+  }, [selectedThreadId]);
   useEffect(() => {
-    if (
-      selectedStatefulHydrationFailedSessionId !== null &&
-      selectedStatefulHydrationFailedSessionId === selectedSessionId &&
-      selectedTerminalStream.text.length > 0
-    ) {
-      setSelectedStatefulHydrationFailedSessionId(null);
-    }
-  }, [selectedSessionId, selectedStatefulHydrationFailedSessionId, selectedTerminalStream.text]);
-
+    metadataRef.current = metadata;
+  }, [metadata]);
   useEffect(() => {
-    const activeThreadIds = new Set(allThreads.map((thread) => thread.id));
-    setThreadRuntimeCwdByThread((current) => {
-      let changed = false;
-      const next: Record<string, string> = {};
-      for (const [threadId, cwd] of Object.entries(current)) {
-        if (!activeThreadIds.has(threadId)) {
-          changed = true;
-          continue;
-        }
-        next[threadId] = cwd;
-      }
-      if (changed) {
-        threadRuntimeCwdByThreadRef.current = next;
-      }
-      return changed ? next : current;
-    });
-  }, [allThreads]);
-
-  const selectedThreadDraftAttachments = useMemo(() => {
-    if (!selectedThreadId) {
-      return [];
-    }
-    return draftAttachmentsByThread[selectedThreadId] ?? [];
-  }, [draftAttachmentsByThread, selectedThreadId]);
-
-  const selectedWorkspaceSkills = useMemo(() => {
-    if (!selectedWorkspace) {
-      return [];
-    }
-    return skillsByWorkspaceId[selectedWorkspace.id] ?? [];
-  }, [selectedWorkspace, skillsByWorkspaceId]);
-
-  const selectedWorkspaceSkillsLoading = selectedWorkspace ? Boolean(skillsLoadingByWorkspaceId[selectedWorkspace.id]) : false;
-  const selectedWorkspaceSkillError = selectedWorkspace ? skillErrorsByWorkspaceId[selectedWorkspace.id] ?? null : null;
-
-  const selectedInjectableSkills = useMemo(() => {
-    if (!selectedThread || !selectedWorkspace) {
-      return [];
-    }
-    const availableById = new Map(selectedWorkspaceSkills.map((skill) => [skill.id, skill]));
-    return selectedThread.enabledSkills
-      .map((skillId) => availableById.get(skillId))
-      .filter((skill): skill is SkillInfo => Boolean(skill));
-  }, [selectedThread, selectedWorkspace, selectedWorkspaceSkills]);
-
-  const handleCodexTerminalFocusChange = useCallback((focused: boolean) => {
-    setFocusedTerminalKind((current) => (focused ? 'codex' : current === 'codex' ? null : current));
-  }, []);
-
-  const handleShellTerminalFocusChange = useCallback((focused: boolean) => {
-    setFocusedTerminalKind((current) => (focused ? 'shell' : current === 'shell' ? null : current));
-  }, []);
-
-  const handleShellTerminalData = useCallback((data: string) => {
-    if (!shellTerminalSessionId || selectedShellSshStartupBlockReason) {
-      return;
-    }
-    void api.terminalWrite(shellTerminalSessionId, data);
-  }, [selectedShellSshStartupBlockReason, shellTerminalSessionId]);
-
-  const handleShellTerminalResize = useCallback((cols: number, rows: number) => {
-    setShellTerminalSize((current) =>
-      current.cols === cols && current.rows === rows ? current : { cols, rows }
-    );
-    if (!shellTerminalSessionId) {
-      return;
-    }
-    void api.terminalResize(shellTerminalSessionId, cols, rows);
-  }, [shellTerminalSessionId]);
-
-  const resolveTerminalDataListenerReady = useCallback(() => {
-    if (terminalDataListenerReadyRef.current) {
-      return;
-    }
-    terminalDataListenerReadyRef.current = true;
-    terminalDataListenerReadyResolverRef.current?.();
-    terminalDataListenerReadyResolverRef.current = null;
-  }, []);
-
-  const waitForTerminalDataListenerReady = useCallback(async () => {
-    if (terminalDataListenerReadyRef.current) {
-      return;
-    }
-    if (!terminalDataListenerReadyPromiseRef.current) {
-      return;
-    }
-    await withTimeout(terminalDataListenerReadyPromiseRef.current, TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS);
-  }, []);
-
-  const flushPendingTerminalResize = useCallback(() => {
-    if (pendingTerminalResizeTimerRef.current !== null) {
-      window.clearTimeout(pendingTerminalResizeTimerRef.current);
-      pendingTerminalResizeTimerRef.current = null;
-    }
-
-    const pending = pendingTerminalResizeRef.current;
-    pendingTerminalResizeRef.current = null;
-    if (!pending) {
-      return;
-    }
-
-    const lastSent = lastSentTerminalSizeBySessionRef.current[pending.sessionId];
-    if (lastSent && lastSent.cols === pending.cols && lastSent.rows === pending.rows) {
-      return;
-    }
-
-    lastSentTerminalSizeBySessionRef.current[pending.sessionId] = {
-      cols: pending.cols,
-      rows: pending.rows
-    };
-    void api.terminalResize(pending.sessionId, pending.cols, pending.rows);
-  }, []);
-
-  const scheduleTerminalResize = useCallback(
-    (sessionId: string, cols: number, rows: number, immediate = false) => {
-      pendingTerminalResizeRef.current = { sessionId, cols, rows };
-      if (immediate) {
-        flushPendingTerminalResize();
-        return;
-      }
-      if (pendingTerminalResizeTimerRef.current !== null) {
-        window.clearTimeout(pendingTerminalResizeTimerRef.current);
-      }
-      pendingTerminalResizeTimerRef.current = window.setTimeout(() => {
-        flushPendingTerminalResize();
-      }, TERMINAL_RESIZE_DEBOUNCE_MS);
-    },
-    [flushPendingTerminalResize]
-  );
-
+    settingsRef.current = settings;
+  }, [settings]);
   useEffect(() => {
-    return () => {
-      if (pendingTerminalResizeTimerRef.current !== null) {
-        window.clearTimeout(pendingTerminalResizeTimerRef.current);
-        pendingTerminalResizeTimerRef.current = null;
-      }
-      pendingTerminalResizeRef.current = null;
-    };
-  }, []);
-
+    const mode = normalizeAppearanceMode(settings.appearanceMode);
+    applyAppearanceMode(mode);
+    if (mode !== 'system') return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const update = () => applyAppearanceMode('system');
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, [settings.appearanceMode]);
   useEffect(() => {
-    const pending = pendingTerminalResizeRef.current;
-    if (!pending) {
-      return;
-    }
-    if (selectedSessionId && pending.sessionId === selectedSessionId) {
-      return;
-    }
-    if (pendingTerminalResizeTimerRef.current !== null) {
-      window.clearTimeout(pendingTerminalResizeTimerRef.current);
-      pendingTerminalResizeTimerRef.current = null;
-    }
-    pendingTerminalResizeRef.current = null;
-  }, [selectedSessionId]);
-
-  const cancelPendingStatefulTerminalResync = useCallback(() => {
-    if (statefulTerminalResyncTimerRef.current !== null) {
-      window.clearTimeout(statefulTerminalResyncTimerRef.current);
-      statefulTerminalResyncTimerRef.current = null;
-    }
-    statefulRedrawRequestTokenRef.current += 1;
-  }, []);
-
-  const handleSelectedTerminalFollowPausedChange = useCallback((paused: boolean) => {
-    setSelectedTerminalFollowPaused((current) => (current === paused ? current : paused));
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      cancelPendingStatefulTerminalResync();
-    };
-  }, [cancelPendingStatefulTerminalResync]);
-
-  useEffect(() => {
-    if (!selectedTerminalFollowPaused) {
-      return;
-    }
-    cancelPendingStatefulTerminalResync();
-  }, [cancelPendingStatefulTerminalResync, selectedTerminalFollowPaused]);
-
-  useEffect(() => {
-    cancelPendingStatefulTerminalResync();
-  }, [
-    cancelPendingStatefulTerminalResync,
-    isSelectedThreadStarting,
-    selectedSessionId,
-    selectedThread?.id,
-    selectedTerminalLooksStateful
-  ]);
-
-  const flushVisibleOutputGuardState = useCallback(() => {
-    if (!visibleOutputGuardDirtyRef.current) {
-      return;
-    }
-    visibleOutputGuardDirtyRef.current = false;
-    persistThreadVisibleOutputGuardMap(THREAD_VISIBLE_OUTPUT_GUARD_KEY, visibleOutputGuardByThreadRef.current);
-  }, []);
-
-  const rememberThreadVisibleOutputTail = useCallback((threadId: string, tail: string, seenAtMs = Date.now()) => {
-    const normalizedTail = trimMeaningfulOutputTail(tail);
-    if (!normalizedTail) {
-      return false;
-    }
-    visibleOutputGuardByThreadRef.current[threadId] = {
-      seenAtMs,
-      baselineUserInputAtMs: lastUserInputAtMsByThreadRef.current[threadId] ?? 0,
-      tail: normalizedTail
-    };
-    visibleOutputGuardDirtyRef.current = true;
-    return true;
-  }, []);
-
-  const flushThreadJsonlCompletionAttentionState = useCallback(() => {
-    if (!threadJsonlCompletionAttentionDirtyRef.current) {
-      return;
-    }
-    threadJsonlCompletionAttentionDirtyRef.current = false;
-    persistThreadJsonlCompletionAttentionStateMap(
-      THREAD_JSONL_COMPLETION_ATTENTION_V1_KEY,
-      threadJsonlCompletionAttentionByThreadRef.current
-    );
-  }, []);
-
-  const flushThreadAttentionState = useCallback(() => {
-    if (!threadAttentionDirtyRef.current) {
-      return;
-    }
-    threadAttentionDirtyRef.current = false;
-    persistThreadAttentionStateMap(THREAD_ATTENTION_STATE_V2_KEY, threadAttentionByThreadRef.current);
-  }, []);
-
-  const commitThreadJsonlCompletionAttentionState = useCallback(
-    (
-      threadId: string,
-      nextState: ThreadJsonlCompletionAttentionState | null,
-      { persistNow = false }: { persistNow?: boolean } = {}
-    ) => {
-      const currentState = threadJsonlCompletionAttentionByThreadRef.current[threadId] ?? null;
-      if (!areThreadJsonlCompletionAttentionStatesEqual(currentState, nextState)) {
-        if (!nextState) {
-          delete threadJsonlCompletionAttentionByThreadRef.current[threadId];
-        } else {
-          threadJsonlCompletionAttentionByThreadRef.current[threadId] = nextState;
-        }
-        threadJsonlCompletionAttentionDirtyRef.current = true;
-        setThreadJsonlCompletionAttentionVersion((current) => current + 1);
-      }
-      if (persistNow) {
-        flushThreadJsonlCompletionAttentionState();
-      }
-      return nextState;
-    },
-    [flushThreadJsonlCompletionAttentionState]
-  );
-
-  const commitThreadAttentionState = useCallback(
-    (
-      threadId: string,
-      nextState: ThreadAttentionState,
-      { persistNow = false }: { persistNow?: boolean } = {}
-    ) => {
-      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      if (!areThreadAttentionStatesEqual(currentState, nextState)) {
-        if (isDefaultThreadAttentionState(nextState)) {
-          delete threadAttentionByThreadRef.current[threadId];
-        } else {
-          threadAttentionByThreadRef.current[threadId] = nextState;
-        }
-        threadAttentionDirtyRef.current = true;
-      }
-      if (persistNow) {
-        flushThreadAttentionState();
-      }
-      return nextState;
-    },
-    [flushThreadAttentionState]
-  );
-
-  const resetThreadJsonlCompletionAttentionForSession = useCallback(
-    (threadId: string, codexSessionId: string | null | undefined) => {
-      const normalizedSessionId = codexSessionId?.trim() ?? '';
-      const currentState = threadJsonlCompletionAttentionByThreadRef.current[threadId] ?? null;
-      if (!currentState) {
-        return null;
-      }
-      if (!normalizedSessionId) {
-        return commitThreadJsonlCompletionAttentionState(threadId, null, { persistNow: true });
-      }
-      if (currentState.codexSessionId === normalizedSessionId) {
-        return currentState;
-      }
-      return commitThreadJsonlCompletionAttentionState(threadId, null, { persistNow: true });
-    },
-    [commitThreadJsonlCompletionAttentionState]
-  );
-
-  const isThreadVisibleToUser = useCallback((threadId: string) => {
-    if (!threadId || selectedThreadIdRef.current !== threadId) {
-      return false;
-    }
-    return typeof document === 'undefined' || document.visibilityState === 'visible';
-  }, []);
-
-  const readLatestCodexTurnCompletion = useCallback(async (workspacePath: string, codexSessionId: string) => {
-    if (typeof api.latestCodexTurnCompletion !== 'function') {
-      return null;
-    }
-    try {
-      return await api.latestCodexTurnCompletion(workspacePath, codexSessionId);
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const resolveJsonlCompletionAttentionContext = useCallback(
-    (threadId: string, sessionId?: string | null) => {
-      const activeSessionId = sessionId ?? activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
-      const sessionMeta = activeSessionId ? sessionMetaBySessionIdRef.current[activeSessionId] ?? null : null;
-      const thread = findThreadById(threadByIdRef.current, threadId);
-      const workspaceId = sessionMeta?.workspaceId ?? thread?.workspaceId ?? '';
-      const workspace = workspaceId ? workspaceById[workspaceId] ?? null : null;
-      const codexSessionId =
-        sessionMeta?.codexSessionId?.trim() ||
-        thread?.codexSessionId?.trim() ||
-        '';
-      const workspaceKind =
-        sessionMeta?.workspaceKind ??
-        threadWorkspaceKindByThreadIdRef.current[threadId] ??
-        workspace?.kind ??
-        null;
-      const usesJsonlAttention =
-        Boolean(thread) &&
-        workspaceKind === 'local' &&
-        codexSessionId.length > 0;
-
-      return {
-        thread,
-        workspace,
-        sessionMeta,
-        codexSessionId,
-        workspaceKind,
-        usesJsonlAttention
-      };
-    },
-    [workspaceById]
-  );
-
-  const resolveTrackedThreadJsonlCompletionAttention = useCallback(
-    (thread: ThreadMetadata) => {
-      const activeSessionId =
-        activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
-      const activeSessionMeta = activeSessionId ? sessionMetaBySessionIdRef.current[activeSessionId] ?? null : null;
-      const activeJsonlCodexSessionId =
-        activeSessionMeta &&
-        activeSessionMeta.workspaceKind === 'local' &&
-        activeSessionMeta.turnCompletionMode === 'jsonl'
-          ? activeSessionMeta.codexSessionId?.trim() ?? ''
-          : '';
-
-      if (activeJsonlCodexSessionId) {
-        return {
-          codexSessionId: activeJsonlCodexSessionId,
-          workspaceKind: activeSessionMeta?.workspaceKind ?? null
-        };
-      }
-
-      return {
-        codexSessionId: thread.codexSessionId?.trim() ?? '',
-        workspaceKind: workspaceById[thread.workspaceId]?.kind ?? null
-      };
-    },
-    [runStore, workspaceById]
-  );
-
-  const markThreadJsonlCompletionSeen = useCallback(
-    (threadId: string, persistNow = true) => {
-      const currentState = threadJsonlCompletionAttentionByThreadRef.current[threadId] ?? null;
-      if (!currentState || currentState.latestCompletionIndex <= currentState.lastSeenCompletionIndex) {
-        return currentState;
-      }
-      return commitThreadJsonlCompletionAttentionState(
-        threadId,
-        {
-          ...currentState,
-          lastSeenCompletionIndex: currentState.latestCompletionIndex
-        },
-        { persistNow }
-      );
-    },
-    [commitThreadJsonlCompletionAttentionState]
-  );
-
-  const shouldSeedHistoricalJsonlCompletionAsSeen = useCallback(
-    (threadId: string, completion: CodexTurnCompletionSummary) => {
-      const visibleOutputGuard = visibleOutputGuardByThreadRef.current[threadId];
-      if (visibleOutputGuard && visibleOutputGuard.seenAtMs >= completion.completedAtMs) {
-        return true;
-      }
-
-      const attentionState = threadAttentionByThreadRef.current[threadId];
-      if (!hasSeenCompletedAttentionTurn(attentionState)) {
-        return false;
-      }
-
-      const strongestSeenAtMs = Math.max(
-        attentionState?.activeTurnSeenOutputAtMs ?? 0,
-        attentionState?.lastCompletedTurnAtMs ?? 0,
-        attentionState?.lastCompletedTurnLastOutputAtMs ?? 0
-      );
-      return strongestSeenAtMs >= completion.completedAtMs;
-    },
-    []
-  );
-
-  const observeThreadJsonlCompletion = useCallback(
-    (
-      threadId: string,
-      codexSessionId: string,
-      completion: CodexTurnCompletionSummary,
-      {
-        persistNow = true,
-        allowNotify = true,
-        allowHistoricalSeenBootstrap = false
-      }: {
-        persistNow?: boolean;
-        allowNotify?: boolean;
-        allowHistoricalSeenBootstrap?: boolean;
-      } = {}
-    ) => {
-      const normalizedSessionId = codexSessionId.trim();
-      if (!normalizedSessionId || completion.completionIndex <= 0) {
-        return null;
-      }
-
-      const currentState = threadJsonlCompletionAttentionByThreadRef.current[threadId];
-      const baseState =
-        currentState && currentState.codexSessionId === normalizedSessionId
-          ? currentState
-          : null;
-      const latestCompletionIndex = baseState?.latestCompletionIndex ?? 0;
-      const latestCompletedAtMs = baseState?.latestCompletedAtMs ?? 0;
-      if (
-        completion.completionIndex < latestCompletionIndex ||
-        (completion.completionIndex === latestCompletionIndex &&
-          completion.completedAtMs <= latestCompletedAtMs)
-      ) {
-        if (isThreadVisibleToUser(threadId)) {
-          return markThreadJsonlCompletionSeen(threadId, persistNow);
-        }
-        return baseState ?? null;
-      }
-
-      const isVisible = isThreadVisibleToUser(threadId);
-      const seedHistoricalCompletionAsSeen =
-        allowHistoricalSeenBootstrap &&
-        !baseState &&
-        !isVisible &&
-        shouldSeedHistoricalJsonlCompletionAsSeen(threadId, completion);
-
-      let nextState: ThreadJsonlCompletionAttentionState = {
-        codexSessionId: normalizedSessionId,
-        latestCompletionIndex: completion.completionIndex,
-        lastSeenCompletionIndex: seedHistoricalCompletionAsSeen
-          ? completion.completionIndex
-          : Math.min(baseState?.lastSeenCompletionIndex ?? 0, completion.completionIndex),
-        lastNotifiedCompletionIndex: seedHistoricalCompletionAsSeen
-          ? completion.completionIndex
-          : Math.min(baseState?.lastNotifiedCompletionIndex ?? 0, completion.completionIndex),
-        latestStatus: completion.status,
-        latestCompletedAtMs: completion.completedAtMs
-      };
-
-      if (isVisible) {
-        nextState = {
-          ...nextState,
-          lastSeenCompletionIndex: completion.completionIndex
-        };
-      }
-
-      const shouldNotify =
-        allowNotify &&
-        !isVisible &&
-        settings.taskCompletionAlerts &&
-        completion.completionIndex > (baseState?.lastNotifiedCompletionIndex ?? 0);
-      if (shouldNotify) {
-        nextState = {
-          ...nextState,
-          lastNotifiedCompletionIndex: completion.completionIndex
-        };
-      }
-
-      const committedState = commitThreadJsonlCompletionAttentionState(threadId, nextState, {
-        persistNow
-      });
-
-      if (shouldNotify) {
-        const thread = findThreadById(threadByIdRef.current, threadId);
-        void sendTaskCompletionAlert({
-          threadTitle: thread?.title ?? 'Current thread',
-          status: completion.status
-        });
-      }
-
-      return committedState;
-    },
-    [
-      commitThreadJsonlCompletionAttentionState,
-      isThreadVisibleToUser,
-      settings.taskCompletionAlerts,
-      shouldSeedHistoricalJsonlCompletionAsSeen
-    ]
-  );
-
-  const reconcileThreadJsonlCompletionAttention = useCallback(
-    async (
-      threadId: string,
-      workspacePath: string,
-      codexSessionId: string,
-      {
-        allowNotify = true,
-        allowHistoricalSeenBootstrap = false
-      }: { allowNotify?: boolean; allowHistoricalSeenBootstrap?: boolean } = {}
-    ) => {
-      const normalizedSessionId = codexSessionId.trim();
-      if (!threadId || !workspacePath || !normalizedSessionId) {
-        return null;
-      }
-
-      const requestId = (jsonlCompletionReconcileRequestIdByThreadRef.current[threadId] ?? 0) + 1;
-      jsonlCompletionReconcileRequestIdByThreadRef.current[threadId] = requestId;
-      const completion = await readLatestCodexTurnCompletion(workspacePath, normalizedSessionId);
-      if (jsonlCompletionReconcileRequestIdByThreadRef.current[threadId] !== requestId) {
-        return null;
-      }
-
-      const activeSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
-      const currentSessionId =
-        (activeSessionId
-          ? sessionMetaBySessionIdRef.current[activeSessionId]?.codexSessionId?.trim()
-          : '') ||
-        findThreadById(threadByIdRef.current, threadId)?.codexSessionId?.trim() ||
-        '';
-      if (currentSessionId && currentSessionId !== normalizedSessionId) {
-        return null;
-      }
-
-      if (!completion) {
-        return null;
-      }
-
-      return observeThreadJsonlCompletion(threadId, normalizedSessionId, completion, {
-        persistNow: true,
-        allowNotify,
-        allowHistoricalSeenBootstrap
-      });
-    },
-    [observeThreadJsonlCompletion, readLatestCodexTurnCompletion]
-  );
-
-  const beginTurn = useCallback(
-    (threadId: string) => {
-      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      const startedAtMs = Date.now();
-      delete lastMeaningfulOutputByThreadRef.current[threadId];
-      delete outputControlCarryByThreadRef.current[threadId];
-      const nextState: ThreadAttentionState = {
-        ...currentState,
-        activeTurnId: nextTurnIdForAttentionState(currentState),
-        activeTurnStatus: 'running',
-        activeTurnStartedAtMs: startedAtMs,
-        activeTurnHasMeaningfulOutput: false,
-        activeTurnLastOutputAtMs: null,
-        activeTurnSeenOutputAtMs: null
-      };
-      return commitThreadAttentionState(threadId, nextState);
-    },
-    [commitThreadAttentionState]
-  );
-
-  const recordThreadVisibleOutputTail = useCallback(
-    (threadId: string, tail: string, persistNow = false, seenAtMs = Date.now()) => {
-      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      const hasVisibleMeaningfulOutput = rememberThreadVisibleOutputTail(threadId, tail, seenAtMs);
-      const shouldPersistActiveTurnSeenOutput =
-        hasVisibleMeaningfulOutput &&
-        currentState.activeTurnId !== null &&
-        currentState.activeTurnSeenOutputAtMs === null;
-
-      let nextState = currentState;
-      if (hasVisibleMeaningfulOutput && currentState.activeTurnId !== null) {
-        const nextSeenOutputAtMs = Math.max(currentState.activeTurnSeenOutputAtMs ?? 0, seenAtMs);
-        if (nextSeenOutputAtMs !== (currentState.activeTurnSeenOutputAtMs ?? 0)) {
-          nextState = commitThreadAttentionState(
-            threadId,
-            {
-              ...currentState,
-              activeTurnSeenOutputAtMs: nextSeenOutputAtMs
-            },
-            {
-              persistNow: persistNow || shouldPersistActiveTurnSeenOutput
-            }
-          );
-        } else if (persistNow) {
-          flushThreadAttentionState();
-        }
-      } else if (persistNow) {
-        flushThreadAttentionState();
-      }
-
-      if (persistNow || shouldPersistActiveTurnSeenOutput) {
-        flushVisibleOutputGuardState();
-      }
-      return nextState;
-    },
-    [
-      commitThreadAttentionState,
-      flushThreadAttentionState,
-      flushVisibleOutputGuardState,
-      rememberThreadVisibleOutputTail
-    ]
-  );
-
-  const recordThreadVisibleOutput = useCallback(
-    (threadId: string, persistNow = false, seenAtMs = Date.now(), visibleOutputText?: string | null) => {
-      const outputText = visibleOutputText ?? lastTerminalLogByThreadRef.current[threadId] ?? '';
-      const tail = extractMeaningfulOutputTail(outputText);
-      return recordThreadVisibleOutputTail(threadId, tail, persistNow, seenAtMs);
-    },
-    [recordThreadVisibleOutputTail]
-  );
-
-  const recordThreadVisibleOutputChunk = useCallback(
-    (threadId: string, persistNow = false, seenAtMs = Date.now(), normalizedChunk: string) => {
-      const currentTail = visibleOutputGuardByThreadRef.current[threadId]?.tail ?? '';
-      const nextTail = appendMeaningfulOutputTail(currentTail, normalizedChunk);
-      return recordThreadVisibleOutputTail(threadId, nextTail, persistNow, seenAtMs);
-    },
-    [recordThreadVisibleOutputTail]
-  );
-
-  const noteTurnOutput = useCallback(
-    (threadId: string, chunk: string) => {
-      const previousCarry = outputControlCarryByThreadRef.current[threadId] ?? '';
-      const stripped = stripTerminalControlSequences(chunk, previousCarry);
-      outputControlCarryByThreadRef.current[threadId] = stripped.carry;
-      const normalized = normalizeMeaningfulOutputText(stripped.text);
-      if (!normalized) {
-        return false;
-      }
-
-      const looksLikeRedrawChunk = chunk.includes('\r') || chunk.includes('\u001b') || chunk.includes('\u009b');
-      const lastMeaningfulOutput = lastMeaningfulOutputByThreadRef.current[threadId] ?? '';
-      if (looksLikeRedrawChunk && lastMeaningfulOutput === normalized) {
-        return false;
-      }
-
-      const lastUserInputAtMs = lastUserInputAtMsByThreadRef.current[threadId] ?? 0;
-      const visibleOutputGuard = visibleOutputGuardByThreadRef.current[threadId];
-      const isReplayOfVisibleReadOutput =
-        Boolean(visibleOutputGuard) &&
-        lastUserInputAtMs <= visibleOutputGuard.baselineUserInputAtMs &&
-        matchesVisibleOutputTail(normalized, visibleOutputGuard.tail);
-      if (isReplayOfVisibleReadOutput) {
-        return false;
-      }
-
-      const attentionState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      if (attentionState.activeTurnId === null) {
-        return false;
-      }
-
-      if (looksLikeShellPromptText(normalized)) {
-        return false;
-      }
-
-      const nowMs = Date.now();
-      lastMeaningfulOutputByThreadRef.current[threadId] = normalized;
-      const isCompletedTurn = attentionState.activeTurnStatus === 'completed';
-      const nextAttentionState: ThreadAttentionState = {
-        ...attentionState,
-        activeTurnStatus: isCompletedTurn ? 'completed' : 'running',
-        activeTurnHasMeaningfulOutput: true,
-        activeTurnLastOutputAtMs: nowMs
-      };
-      if (isCompletedTurn && attentionState.lastCompletedTurnStatus) {
-        nextAttentionState.lastCompletedTurnIdWithOutput = Math.max(
-          attentionState.lastCompletedTurnIdWithOutput,
-          attentionState.activeTurnId
-        );
-        nextAttentionState.lastCompletedTurnAtMs = attentionState.lastCompletedTurnAtMs ?? nowMs;
-        nextAttentionState.lastCompletedTurnLastOutputAtMs = nowMs;
-      }
-      commitThreadAttentionState(threadId, nextAttentionState);
-
-      if (isThreadVisibleToUser(threadId)) {
-        recordThreadVisibleOutputChunk(threadId, false, nowMs, normalized);
-      }
-      return true;
-    },
-    [commitThreadAttentionState, isThreadVisibleToUser, recordThreadVisibleOutputChunk]
-  );
-
-  const completeTurn = useCallback(
-    (threadId: string, status: RunStatus, completedAtMs = Date.now()) => {
-      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      if (currentState.activeTurnId === null) {
-        return currentState;
-      }
-
-      const completedStatus: ThreadAttentionCompletionStatus | null =
-        status === 'Succeeded' || status === 'Failed' ? status : null;
-      const didTurnProduceOutput =
-        currentState.activeTurnHasMeaningfulOutput ||
-        currentState.activeTurnLastOutputAtMs !== null ||
-        Boolean(lastMeaningfulOutputByThreadRef.current[threadId]);
-      const shouldPersistCompletion = didTurnProduceOutput && completedStatus !== null;
-      const nextState: ThreadAttentionState = {
-        ...currentState,
-        activeTurnStatus: 'completed',
-        activeTurnHasMeaningfulOutput: didTurnProduceOutput,
-        activeTurnLastOutputAtMs:
-          currentState.activeTurnLastOutputAtMs ??
-          (didTurnProduceOutput ? completedAtMs : null)
-      };
-
-      if (shouldPersistCompletion) {
-        nextState.lastCompletedTurnIdWithOutput = currentState.activeTurnId;
-        nextState.lastCompletedTurnStatus = completedStatus;
-        nextState.lastCompletedTurnAtMs = completedAtMs;
-        nextState.lastCompletedTurnLastOutputAtMs = nextState.activeTurnLastOutputAtMs;
-      }
-
-      return commitThreadAttentionState(threadId, nextState, {
-        persistNow: true
-      });
-    },
-    [commitThreadAttentionState]
-  );
-
-  const markTurnNotified = useCallback(
-    (threadId: string, turnId: number, status: ThreadAttentionCompletionStatus | null) => {
-      if (turnId <= 0 || !status) {
-        return;
-      }
-      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      if (
-        turnId < currentState.lastNotifiedTurnId ||
-        (turnId === currentState.lastNotifiedTurnId && currentState.lastNotifiedTurnStatus === status)
-      ) {
-        return;
-      }
-      commitThreadAttentionState(
-        threadId,
-        {
-          ...currentState,
-          lastNotifiedTurnId: turnId,
-          lastNotifiedTurnStatus: status
-        },
-        { persistNow: true }
-      );
-    },
-    [commitThreadAttentionState]
-  );
-
-  const notifyCompletedTurnIfNeeded = useCallback(
-    (threadId: string, attentionState: ThreadAttentionState) => {
-      if (!settings.taskCompletionAlerts || !shouldNotifyAttentionTurn(attentionState) || !attentionState.lastCompletedTurnStatus) {
-        return;
-      }
-
-      markTurnNotified(threadId, attentionState.lastCompletedTurnIdWithOutput, attentionState.lastCompletedTurnStatus);
-      const thread = findThreadById(threadByIdRef.current, threadId);
-
-      void sendTaskCompletionAlert({
-        threadTitle: thread?.title ?? 'Current thread',
-        status: attentionState.lastCompletedTurnStatus
-      });
-    },
-    [markTurnNotified, settings.taskCompletionAlerts]
-  );
-
-  const deleteThreadAttentionState = useCallback(
-    (threadId: string) => {
-      if (threadId in visibleOutputGuardByThreadRef.current) {
-        delete visibleOutputGuardByThreadRef.current[threadId];
-        visibleOutputGuardDirtyRef.current = true;
-      }
-      if (threadId in threadJsonlCompletionAttentionByThreadRef.current) {
-        delete threadJsonlCompletionAttentionByThreadRef.current[threadId];
-        threadJsonlCompletionAttentionDirtyRef.current = true;
-        setThreadJsonlCompletionAttentionVersion((current) => current + 1);
-      }
-      if (!(threadId in threadAttentionByThreadRef.current)) {
-        return;
-      }
-      delete threadAttentionByThreadRef.current[threadId];
-      threadAttentionDirtyRef.current = true;
-    },
-    []
-  );
-
-  selectedWorkspaceIdRef.current = selectedWorkspaceId;
-  selectedThreadIdRef.current = selectedThreadId;
-  selectedSessionIdRef.current = selectedSessionId ?? null;
-  focusedTerminalKindRef.current = focusedTerminalKind;
-  shellTerminalSessionIdRef.current = shellTerminalSessionId;
-  shellTerminalWorkspaceIdRef.current = shellTerminalWorkspaceId;
-  readyByThreadRef.current = readyByThread;
-  sshStartupBlockedByThreadRef.current = sshStartupBlockedByThread;
-  sshStartupBlockedShellByWorkspaceRef.current = sshStartupBlockedShellByWorkspace;
-
-  const setWorkspaceCreatingThread = useCallback((workspaceId: string, creating: boolean) => {
-    if (!workspaceId) {
-      return;
-    }
-    if (creating) {
-      creatingThreadByWorkspaceRef.current[workspaceId] = true;
-      setCreatingThreadByWorkspace((current) =>
-        current[workspaceId] ? current : { ...current, [workspaceId]: true }
-      );
-      return;
-    }
-
-    delete creatingThreadByWorkspaceRef.current[workspaceId];
-    setCreatingThreadByWorkspace((current) => removeThreadFlag(current, workspaceId));
-  }, []);
-
-  const setShellSessionBinding = useCallback((sessionId: string | null, workspaceId: string | null) => {
-    shellTerminalSessionIdRef.current = sessionId;
-    shellTerminalWorkspaceIdRef.current = workspaceId;
-    setShellTerminalSessionId(sessionId);
-    setShellTerminalWorkspaceId(workspaceId);
-    if (sessionId) {
-      setShellTerminalStream((current) => bindLiveTerminalSessionStream(current, sessionId));
-    }
-  }, []);
-
-  const bumpShellSessionStartRequestId = useCallback(() => {
-    const next = shellSessionStartRequestIdRef.current + 1;
-    shellSessionStartRequestIdRef.current = next;
-    return next;
-  }, []);
-
-  const invalidatePendingShellSessionStart = useCallback(
-    (workspaceId?: string | null) => {
-      if (
-        workspaceId &&
-        pendingShellSessionStartRef.current &&
-        pendingShellSessionStartRef.current.workspaceId !== workspaceId
-      ) {
-        return;
-      }
-      bumpShellSessionStartRequestId();
-      pendingShellSessionStartRef.current = null;
-      setShellTerminalStarting(false);
-    },
-    [bumpShellSessionStartRequestId]
-  );
-
-  useEffect(() => {
-    persistSkillUsageMap(skillUsageMap);
-  }, [skillUsageMap]);
-
-  useEffect(() => {
-    window.localStorage.removeItem('atcontroller:last-read-at');
-  }, []);
-
-  const flushSelectedTerminalStreamRevision = useCallback(() => {
-    if (selectedTerminalStreamRevisionTimerRef.current !== null) {
-      window.clearTimeout(selectedTerminalStreamRevisionTimerRef.current);
-      selectedTerminalStreamRevisionTimerRef.current = null;
-    }
-    if (selectedTerminalStreamRevisionSafetyTimerRef.current !== null) {
-      window.clearTimeout(selectedTerminalStreamRevisionSafetyTimerRef.current);
-      selectedTerminalStreamRevisionSafetyTimerRef.current = null;
-    }
-    setSelectedTerminalStreamRevision((current) => current + 1);
-  }, []);
-
-  const scheduleSelectedTerminalStreamRevision = useCallback(() => {
-    if (selectedTerminalStreamRevisionTimerRef.current !== null) {
-      return;
-    }
-    selectedTerminalStreamRevisionTimerRef.current = window.setTimeout(
-      flushSelectedTerminalStreamRevision,
-      TERMINAL_LOG_FLUSH_INTERVAL_MS
-    );
-    selectedTerminalStreamRevisionSafetyTimerRef.current = window.setTimeout(
-      flushSelectedTerminalStreamRevision,
-      TERMINAL_LOG_FLUSH_SAFETY_MS
-    );
-  }, [flushSelectedTerminalStreamRevision]);
-
-  const pruneTerminalStreamCache = useCallback(() => {
-    const protectedThreadIds = new Set<string>();
-    const selectedThreadId = selectedThreadIdRef.current;
-    if (selectedThreadId) {
-      protectedThreadIds.add(selectedThreadId);
-    }
-    for (const threadId of Object.keys(activeRunsByThreadRef.current)) {
-      protectedThreadIds.add(threadId);
-    }
-    for (const threadId of Object.keys(startingSessionByThreadRef.current)) {
-      protectedThreadIds.add(threadId);
-    }
-
-    const evictedThreadIds = selectTerminalStreamCacheEvictions(
-      Object.entries(terminalStreamsByThreadRef.current).map(([threadId, stream]) => ({
-        threadId,
-        stream,
-        lastAccessedAtMs: terminalStreamAccessedAtByThreadRef.current[threadId] ?? 0,
-        isProtected: protectedThreadIds.has(threadId)
-      })),
-      {
-        maxThreads: TERMINAL_STREAM_CACHE_MAX_THREADS,
-        maxChars: TERMINAL_STREAM_CACHE_MAX_CHARS
-      }
-    );
-    if (evictedThreadIds.length === 0) {
-      return;
-    }
-
-    let evictedSelectedThread = false;
-    for (const threadId of evictedThreadIds) {
-      delete terminalStreamsByThreadRef.current[threadId];
-      delete lastTerminalLogByThreadRef.current[threadId];
-      clearThreadSearchText(threadSearchTextByThreadRef.current, threadId);
-      delete terminalHydrationRequestIdByThreadRef.current[threadId];
-      delete terminalStreamAccessedAtByThreadRef.current[threadId];
-      evictedSelectedThread = evictedSelectedThread || selectedThreadId === threadId;
-    }
-    if (evictedSelectedThread) {
-      scheduleSelectedTerminalStreamRevision();
-    }
-  }, [scheduleSelectedTerminalStreamRevision]);
-
-  const scheduleTerminalStreamCachePrune = useCallback(() => {
-    if (terminalStreamCachePruneTimerRef.current !== null) {
-      return;
-    }
-    terminalStreamCachePruneTimerRef.current = window.setTimeout(() => {
-      terminalStreamCachePruneTimerRef.current = null;
-      pruneTerminalStreamCache();
-    }, TERMINAL_STREAM_CACHE_PRUNE_DELAY_MS);
-  }, [pruneTerminalStreamCache]);
-
-  const queuePendingTerminalDataEvent = useCallback((event: TerminalDataEvent) => {
-    const existing = pendingTerminalDataBySessionRef.current[event.sessionId] ?? [];
-    if (existing.length === 0) {
-      const pendingSessionIds = Object.keys(pendingTerminalDataBySessionRef.current);
-      while (pendingSessionIds.length >= MAX_PENDING_TERMINAL_DATA_SESSIONS) {
-        const oldestSessionId = pendingSessionIds.shift();
-        if (!oldestSessionId) {
-          break;
-        }
-        delete pendingTerminalDataBySessionRef.current[oldestSessionId];
-      }
-    }
-    const next = [...existing, event];
-    let totalChars = next.reduce((total, item) => total + item.data.length, 0);
-    while (
-      next.length > MAX_PENDING_TERMINAL_DATA_EVENTS_PER_SESSION ||
-      totalChars > MAX_PENDING_TERMINAL_DATA_CHARS_PER_SESSION
-    ) {
-      const removed = next.shift();
-      if (!removed) {
-        break;
-      }
-      totalChars = Math.max(0, totalChars - removed.data.length);
-    }
-    pendingTerminalDataBySessionRef.current[event.sessionId] = next;
-  }, []);
-
-  const drainPendingTerminalDataEvents = useCallback((sessionId: string) => {
-    const pendingEvents = pendingTerminalDataBySessionRef.current[sessionId];
-    if (!pendingEvents || pendingEvents.length === 0) {
-      return;
-    }
-    delete pendingTerminalDataBySessionRef.current[sessionId];
-    for (const event of pendingEvents) {
-      terminalDataEventHandlerRef.current(event);
-    }
-  }, []);
-
-  const bindSession = useCallback(
-    (threadId: string, sessionId: string, startedAt: string) => {
-      const previousSessionId = activeRunsByThreadRef.current[threadId]?.sessionId;
-      if (previousSessionId && previousSessionId !== sessionId) {
-        delete threadIdBySessionIdRef.current[previousSessionId];
-      }
-      activeRunsByThreadRef.current = {
-        ...activeRunsByThreadRef.current,
-        [threadId]: {
-          threadId,
-          sessionId,
-          startedAt
-        }
-      };
-      threadIdBySessionIdRef.current[sessionId] = threadId;
-      runStore.bindSession(threadId, sessionId, startedAt);
-      lastSessionStartAtMsByThreadRef.current[threadId] = Date.now();
-      delete lastMeaningfulOutputByThreadRef.current[threadId];
-      delete outputControlCarryByThreadRef.current[threadId];
-      const nextStream = bindTerminalSessionStream(
-        terminalStreamsByThreadRef.current[threadId] ?? createTerminalSessionStreamState(),
-        sessionId
-      );
-      terminalStreamsByThreadRef.current[threadId] = nextStream;
-      terminalStreamAccessedAtByThreadRef.current[threadId] = Date.now();
-      lastTerminalLogByThreadRef.current[threadId] = nextStream.text;
-      rememberThreadSearchText(threadSearchTextByThreadRef.current, threadId, nextStream.text);
-      scheduleTerminalStreamCachePrune();
-      if (selectedThreadIdRef.current === threadId) {
-        flushSelectedTerminalStreamRevision();
-      }
-      runLifecycleByThreadRef.current[threadId] = createRunLifecycleState();
-      drainPendingTerminalDataEvents(sessionId);
-    },
-    [drainPendingTerminalDataEvents, flushSelectedTerminalStreamRevision, runStore, scheduleTerminalStreamCachePrune]
-  );
-
-  const startThreadWorking = useCallback(
-    (threadId: string, startedAt = new Date().toISOString()) => {
-      workingByThreadRef.current = {
-        ...workingByThreadRef.current,
-        [threadId]: { startedAt }
-      };
-      runStore.startWorking(threadId, startedAt);
-      const startedAtMs = Number.isFinite(Date.parse(startedAt)) ? Date.parse(startedAt) : Date.now();
-      runLifecycleByThreadRef.current[threadId] = markRunStreaming(
-        runLifecycleByThreadRef.current[threadId],
-        startedAtMs
-      );
-    },
-    [runStore]
-  );
-
-  const stopThreadWorking = useCallback(
-    (threadId: string) => {
-      if (workingByThreadRef.current[threadId]) {
-        const next = { ...workingByThreadRef.current };
-        delete next[threadId];
-        workingByThreadRef.current = next;
-      }
-      runStore.stopWorking(threadId);
-      const lifecycle = runLifecycleByThreadRef.current[threadId];
-      if (lifecycle?.phase === 'streaming') {
-        runLifecycleByThreadRef.current[threadId] = markRunReady(lifecycle);
-      }
-    },
-    [runStore]
-  );
-
-  const finishSessionBinding = useCallback(
-    (sessionId: string): string | null => {
-      const mappedThreadId = threadIdBySessionIdRef.current[sessionId] ?? null;
-      const removedThreadId =
-        mappedThreadId && activeRunsByThreadRef.current[mappedThreadId]?.sessionId === sessionId
-          ? mappedThreadId
-          : null;
-      if (removedThreadId) {
-        const next = { ...activeRunsByThreadRef.current };
-        delete next[removedThreadId];
-        activeRunsByThreadRef.current = next;
-      }
-      delete threadIdBySessionIdRef.current[sessionId];
-      const removedFromStore = runStore.finishSession(sessionId);
-      const removed = removedThreadId ?? removedFromStore;
-      if (removed && workingByThreadRef.current[removed]) {
-        const nextWorking = { ...workingByThreadRef.current };
-        delete nextWorking[removed];
-        workingByThreadRef.current = nextWorking;
-      }
-      return removed;
-    },
-    [runStore]
-  );
-
-  useEffect(() => {
-    const onBeforeUnload = () => {
-      flushVisibleOutputGuardState();
-      flushThreadJsonlCompletionAttentionState();
-      flushThreadAttentionState();
-    };
-    const onPageHide = () => {
-      flushVisibleOutputGuardState();
-      flushThreadJsonlCompletionAttentionState();
-      flushThreadAttentionState();
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        flushVisibleOutputGuardState();
-        flushThreadJsonlCompletionAttentionState();
-        flushThreadAttentionState();
-      }
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    window.addEventListener('pagehide', onPageHide);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    const id = window.setInterval(() => {
-      flushVisibleOutputGuardState();
-      flushThreadJsonlCompletionAttentionState();
-      flushThreadAttentionState();
-    }, 2000);
-    return () => {
-      window.clearInterval(id);
-      window.removeEventListener('beforeunload', onBeforeUnload);
-      window.removeEventListener('pagehide', onPageHide);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-      flushVisibleOutputGuardState();
-      flushThreadJsonlCompletionAttentionState();
-      flushThreadAttentionState();
-    };
-  }, [
-    flushThreadAttentionState,
-    flushThreadJsonlCompletionAttentionState,
-    flushVisibleOutputGuardState
-  ]);
-
-  useEffect(() => {
-    draftAttachmentsByThreadRef.current = draftAttachmentsByThread;
-  }, [draftAttachmentsByThread]);
-
-  useEffect(() => {
-    threadsByWorkspaceRef.current = threadsByWorkspace;
-    const nextThreadWorkspaceKinds: Record<string, Workspace['kind']> = {};
-    const nextThreadById: Record<string, ThreadMetadata> = {};
-    const currentThreads = Object.values(threadsByWorkspace).flat();
-
-    for (const workspace of workspaces) {
-      for (const thread of threadsByWorkspace[workspace.id] ?? []) {
-        nextThreadWorkspaceKinds[thread.id] = workspace.kind;
-      }
-    }
-
-    threadWorkspaceKindByThreadIdRef.current = nextThreadWorkspaceKinds;
-
-    for (const thread of currentThreads) {
-      nextThreadById[thread.id] = thread;
-      if (!isDefaultThreadTitle(thread.title)) {
-        threadTitleInitializedRef.current[thread.id] = true;
-      }
-    }
-    threadByIdRef.current = nextThreadById;
-
-    const nextSeededJsonlSessions: Record<string, string> = {};
-    let removedStaleJsonlCompletionAttention = false;
-    for (const thread of currentThreads) {
-      const trackedJsonlAttention = resolveTrackedThreadJsonlCompletionAttention(thread);
-      if (
-        !shouldTrackThreadJsonlCompletionAttention(
-          {
-            isArchived: thread.isArchived,
-            codexSessionId: trackedJsonlAttention.codexSessionId
-          },
-          trackedJsonlAttention.workspaceKind
-        )
-      ) {
-        if (thread.id in threadJsonlCompletionAttentionByThreadRef.current) {
-          delete threadJsonlCompletionAttentionByThreadRef.current[thread.id];
-          removedStaleJsonlCompletionAttention = true;
-        }
-        continue;
-      }
-      const workspace = workspaces.find((candidate) => candidate.id === thread.workspaceId);
-      if (!workspace || workspace.kind !== 'local') {
-        continue;
-      }
-      const codexSessionId = trackedJsonlAttention.codexSessionId;
-      nextSeededJsonlSessions[thread.id] = codexSessionId;
-      if (jsonlCompletionSeededSessionIdByThreadRef.current[thread.id] === codexSessionId) {
-        continue;
-      }
-      jsonlCompletionSeededSessionIdByThreadRef.current[thread.id] = codexSessionId;
-      resetThreadJsonlCompletionAttentionForSession(thread.id, codexSessionId);
-      void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, codexSessionId, {
-        allowNotify: false,
-        allowHistoricalSeenBootstrap: true
-      });
-    }
-    if (removedStaleJsonlCompletionAttention) {
-      threadJsonlCompletionAttentionDirtyRef.current = true;
-      setThreadJsonlCompletionAttentionVersion((current) => current + 1);
-    }
-    jsonlCompletionSeededSessionIdByThreadRef.current = nextSeededJsonlSessions;
-
-    const deletedThreadIds = deletedThreadIdsRef.current;
-    if (Object.keys(deletedThreadIds).length === 0) {
-      return;
-    }
-
-    for (const thread of currentThreads) {
-      if (!deletedThreadIds[thread.id]) {
-        continue;
-      }
-      applyThreadUpdate({
-        ...thread,
-        isArchived: true
-      });
-    }
-  }, [
-    applyThreadUpdate,
-    reconcileThreadJsonlCompletionAttention,
-    resolveTrackedThreadJsonlCompletionAttention,
-    resetThreadJsonlCompletionAttentionForSession,
-    threadsByWorkspace,
-    workspaces
-  ]);
-
-  useEffect(() => {
-    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
-  }, [sidebarWidth]);
-
-  useEffect(() => {
-    window.localStorage.setItem(SHELL_DRAWER_HEIGHT_KEY, String(shellDrawerHeight));
-  }, [shellDrawerHeight]);
-
-  useEffect(() => {
-    if (!isSidebarResizing) {
-      return;
-    }
-
-    const onMove = (clientX: number) => {
-      const state = sidebarResizeStateRef.current;
-      if (!state) {
-        return;
-      }
-      const safeClientX = Number.isFinite(clientX) ? clientX : state.startX;
-      const nextWidth = clampSidebarWidth(state.startWidth + (safeClientX - state.startX));
-      if (!Number.isFinite(nextWidth)) {
-        return;
-      }
-      setSidebarWidth(nextWidth);
-    };
-
-    const onPointerMove = (event: PointerEvent) => {
-      onMove(event.clientX);
-    };
-
-    const onMouseMove = (event: MouseEvent) => {
-      onMove(event.clientX);
-    };
-
-    const finishResize = () => {
-      sidebarResizeStateRef.current = null;
-      setIsSidebarResizing(false);
-    };
-
-    document.body.classList.add('sidebar-resizing');
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('pointerup', finishResize);
-    window.addEventListener('pointercancel', finishResize);
-    window.addEventListener('mouseup', finishResize);
-
-    return () => {
-      document.body.classList.remove('sidebar-resizing');
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('pointerup', finishResize);
-      window.removeEventListener('pointercancel', finishResize);
-      window.removeEventListener('mouseup', finishResize);
-    };
-  }, [isSidebarResizing]);
-
-  useEffect(() => {
-    if (!isShellDrawerResizing) {
-      return;
-    }
-
-    const onMove = (clientY: number) => {
-      const state = shellDrawerResizeStateRef.current;
-      if (!state) {
-        return;
-      }
-      const safeClientY = Number.isFinite(clientY) ? clientY : state.startY;
-      const nextHeight = clampShellDrawerHeight(state.startHeight + (state.startY - safeClientY));
-      if (!Number.isFinite(nextHeight)) {
-        return;
-      }
-      setShellDrawerHeight(nextHeight);
-    };
-
-    const onPointerMove = (event: PointerEvent) => {
-      onMove(event.clientY);
-    };
-
-    const finishResize = () => {
-      shellDrawerResizeStateRef.current = null;
-      setIsShellDrawerResizing(false);
-    };
-
-    document.body.classList.add('shell-drawer-resizing');
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', finishResize);
-    window.addEventListener('pointercancel', finishResize);
-
-    return () => {
-      document.body.classList.remove('shell-drawer-resizing');
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerup', finishResize);
-      window.removeEventListener('pointercancel', finishResize);
-    };
-  }, [isShellDrawerResizing]);
-
-  useEffect(() => {
-    const clampToViewport = () => {
-      setShellDrawerHeight((current) => clampShellDrawerHeight(current));
-    };
-
-    window.addEventListener('resize', clampToViewport);
-    return () => window.removeEventListener('resize', clampToViewport);
-  }, []);
-
-  const pushToast = useCallback((message: string, type: 'error' | 'info' = 'error') => {
-    const id = todayId();
-    setToasts((current) => [...current, { id, type, message }]);
+    const unreadCount = Object.values(metadata).filter((item) => item.unread).length;
+    void api.setAppBadgeCount(unreadCount > 0 ? unreadCount : null).catch(() => undefined);
+  }, [metadata]);
+
+  const showToast = useCallback((message: string, tone: Toast['tone'] = 'neutral') => {
+    const id = crypto.randomUUID();
+    setToasts((current) => [...current, { id, message, tone }].slice(-4));
     window.setTimeout(() => {
       setToasts((current) => current.filter((toast) => toast.id !== id));
-    }, 4500);
+    }, 3_500);
   }, []);
 
-  const refreshAppUpdateInfo = useCallback(async () => {
-    try {
-      const updateInfo = await api.checkForUpdate();
-      setAppUpdateInfo(updateInfo);
-    } catch {
-      setAppUpdateInfo(null);
-    }
-  }, []);
+  const copyText = useCallback(
+    async (value: string, label: string) => {
+      if (!value) return;
+      try {
+        await api.writeTextToClipboard(value);
+        showToast(`${label} copied`, 'success');
+      } catch {
+        await navigator.clipboard.writeText(value);
+        showToast(`${label} copied`, 'success');
+      }
+    },
+    [showToast]
+  );
 
-  useEffect(() => {
-    void refreshAppUpdateInfo();
-    const handle = window.setInterval(() => {
-      void refreshAppUpdateInfo();
-    }, 10 * 60 * 1000);
-    return () => {
-      window.clearInterval(handle);
-    };
-  }, [refreshAppUpdateInfo]);
-
-  const registerHiddenInjectedPrompt = useCallback((threadId: string, prompt: string) => {
-    const normalized = prompt.trimEnd();
-    if (!normalized.trim()) {
+  const refreshGit = useCallback(async (workspace?: Workspace) => {
+    const target = workspace ?? selectedWorkspaceRef.current;
+    if (!target) {
+      setGitInfo(null);
+      setGitStatus(null);
+      setGitBranches([]);
       return;
     }
-    const existing = hiddenInjectedPromptsByThreadRef.current[threadId] ?? [];
-    hiddenInjectedPromptsByThreadRef.current[threadId] =
-      existing.length >= MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD
-        ? [...existing.slice(-(MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD - 1)), normalized]
-        : [...existing, normalized];
+    try {
+      const [info, status, branches] = await Promise.all([
+        api.getGitInfo(target.path),
+        api.gitWorkspaceStatus(target.path),
+        api.gitListBranches(target.path)
+      ]);
+      if (selectedWorkspaceRef.current?.id === target.id) {
+        setGitInfo(info);
+        setGitStatus(status);
+        setGitBranches(branches);
+      }
+    } catch {
+      if (selectedWorkspaceRef.current?.id === target.id) {
+        setGitInfo(null);
+        setGitStatus(null);
+        setGitBranches([]);
+      }
+    }
   }, []);
 
-  const stripThreadHiddenInjectedPrompts = useCallback((threadId: string, text: string) => {
-    const prompts = hiddenInjectedPromptsByThreadRef.current[threadId] ?? [];
-    return stripHiddenPromptEchoes(text, prompts);
-  }, []);
+  const scheduleGitRefresh = useCallback(() => {
+    if (gitRefreshTimer.current != null) window.clearTimeout(gitRefreshTimer.current);
+    gitRefreshTimer.current = window.setTimeout(() => {
+      void refreshGit();
+      gitRefreshTimer.current = null;
+    }, 250);
+  }, [refreshGit]);
 
-  const presentThreadTerminalText = useCallback(
-    (threadId: string, text: string) =>
-      presentTerminalText(text, {
-        currentText: terminalStreamsByThreadRef.current[threadId]?.text ?? '',
-        maxChars: TERMINAL_LOG_BUFFER_CHARS,
-        stripHiddenPrompts: (value) => stripThreadHiddenInjectedPrompts(threadId, value)
-      }),
-    [stripThreadHiddenInjectedPrompts]
-  );
-
-  const updateThreadTerminalStream = useCallback(
-    (threadId: string, updater: (current: TerminalSessionStreamState) => TerminalSessionStreamState) => {
-      const previous = terminalStreamsByThreadRef.current[threadId] ?? createTerminalSessionStreamState();
-      const next = updater(previous);
-      if (next === previous) {
-        return;
-      }
-      terminalStreamsByThreadRef.current[threadId] = next;
-      terminalStreamAccessedAtByThreadRef.current[threadId] = Date.now();
-      lastTerminalLogByThreadRef.current[threadId] = next.text;
-      rememberThreadSearchText(threadSearchTextByThreadRef.current, threadId, next.text);
-      scheduleTerminalStreamCachePrune();
-      if (selectedThreadIdRef.current === threadId) {
-        scheduleSelectedTerminalStreamRevision();
+  const persistMetadata = useCallback(
+    async (next: CodexThreadUiMetadata) => {
+      setMetadata((current) => ({ ...current, [next.threadId]: next }));
+      try {
+        const saved = await api.saveCodexThreadUiMetadata(next);
+        setMetadata((current) => ({ ...current, [saved.threadId]: saved }));
+      } catch (error) {
+        showToast(`Could not save thread UI state: ${String(error)}`, 'error');
       }
     },
-    [scheduleSelectedTerminalStreamRevision, scheduleTerminalStreamCachePrune]
+    [showToast]
   );
 
-  const normalizeThreadTerminalSnapshot = useCallback(
-    (threadId: string, snapshot: TerminalOutputSnapshot | null | undefined): TerminalOutputSnapshot => {
-      const rawText = snapshot?.text ?? '';
-      const presented = presentTerminalWindow(rawText, {
-        currentText: terminalStreamsByThreadRef.current[threadId]?.text ?? '',
-        maxChars: TERMINAL_LOG_BUFFER_CHARS,
-        stripHiddenPrompts: (value) => stripThreadHiddenInjectedPrompts(threadId, value)
-      });
-      return {
-        text: presented.text,
-        startPosition: (snapshot?.startPosition ?? 0) + presented.startOffset,
-        endPosition: snapshot?.endPosition ?? rawText.length,
-        truncated: snapshot?.truncated ?? false
-      };
-    },
-    [stripThreadHiddenInjectedPrompts]
-  );
-
-  const presentThreadTerminalSnapshot = useCallback(
+  const updateMetadata = useCallback(
     (
       threadId: string,
-      snapshot: TerminalOutputSnapshot | null | undefined,
-      sessionId: string | null = null
+      update: (current: CodexThreadUiMetadata) => CodexThreadUiMetadata
     ) => {
-      const nextSnapshot = normalizeThreadTerminalSnapshot(threadId, snapshot);
-      const previousText = lastTerminalLogByThreadRef.current[threadId] ?? '';
-
-      updateThreadTerminalStream(threadId, (current) => {
-        const boundState =
-          current.sessionId === sessionId ? current : bindTerminalSessionStream(current, sessionId);
-        return presentTerminalSnapshot(boundState, nextSnapshot, TERMINAL_LOG_BUFFER_CHARS);
-      });
-
-      if (
-        threadId === selectedThreadIdRef.current &&
-        nextSnapshot.text &&
-        nextSnapshot.text !== previousText &&
-        isThreadVisibleToUser(threadId)
-      ) {
-        recordThreadVisibleOutput(threadId, false, Date.now(), nextSnapshot.text);
-      }
+      const current = metadataRef.current[threadId];
+      if (!current) return;
+      const next = update(current);
+      metadataRef.current = { ...metadataRef.current, [threadId]: next };
+      void persistMetadata(next);
     },
-    [isThreadVisibleToUser, normalizeThreadTerminalSnapshot, recordThreadVisibleOutput, updateThreadTerminalStream]
+    [persistMetadata]
   );
 
-  const clearThreadTerminalStream = useCallback((threadId: string) => {
-    const hadTerminalStream = threadId in terminalStreamsByThreadRef.current;
-    const hadTerminalLog = threadId in lastTerminalLogByThreadRef.current;
-    const hadSearchText = threadId in threadSearchTextByThreadRef.current;
-    if (!hadTerminalStream && !hadTerminalLog && !hadSearchText) {
-      return;
-    }
-    delete terminalStreamsByThreadRef.current[threadId];
-    delete lastTerminalLogByThreadRef.current[threadId];
-    clearThreadSearchText(threadSearchTextByThreadRef.current, threadId);
-    delete terminalHydrationRequestIdByThreadRef.current[threadId];
-    delete terminalStreamAccessedAtByThreadRef.current[threadId];
-    if (selectedThreadIdRef.current === threadId) {
-      flushSelectedTerminalStreamRevision();
-    }
-  }, [flushSelectedTerminalStreamRevision]);
-
-  const clearThreadTerminalStreams = useCallback((threadIds: string[]) => {
-    let changed = false;
-    let clearedSelectedThread = false;
-    for (const threadId of threadIds) {
-      if (threadId in terminalStreamsByThreadRef.current) {
-        delete terminalStreamsByThreadRef.current[threadId];
-        changed = true;
-      }
-      if (threadId in lastTerminalLogByThreadRef.current) {
-        delete lastTerminalLogByThreadRef.current[threadId];
-      }
-      if (threadId in threadSearchTextByThreadRef.current) {
-        clearThreadSearchText(threadSearchTextByThreadRef.current, threadId);
-      }
-      if (threadId in terminalHydrationRequestIdByThreadRef.current) {
-        delete terminalHydrationRequestIdByThreadRef.current[threadId];
-      }
-      if (threadId in terminalStreamAccessedAtByThreadRef.current) {
-        delete terminalStreamAccessedAtByThreadRef.current[threadId];
-      }
-      if (selectedThreadIdRef.current === threadId) {
-        clearedSelectedThread = true;
-      }
-    }
-    if (changed || clearedSelectedThread) {
-      flushSelectedTerminalStreamRevision();
-    }
-  }, [flushSelectedTerminalStreamRevision]);
-
-  const clearThreadWorkingStopTimer = useCallback((threadId: string) => {
-    const handle = workingStopTimerByThreadRef.current[threadId];
-    if (typeof handle === 'number') {
-      window.clearTimeout(handle);
-    }
-    delete workingStopTimerByThreadRef.current[threadId];
-  }, []);
-
-  const clearAllThreadWorkingStopTimers = useCallback(() => {
-    for (const handle of Object.values(workingStopTimerByThreadRef.current)) {
-      window.clearTimeout(handle);
-    }
-    workingStopTimerByThreadRef.current = {};
-  }, []);
-
-  const rememberThreadRuntimeCwd = useCallback((threadId: string, cwd: string | null | undefined) => {
-    const normalized = cwd?.trim() ?? '';
-    if (!threadId) {
-      return;
-    }
-    const current = threadRuntimeCwdByThreadRef.current;
-    const next = !normalized
-      ? (current[threadId] ? removeRecordEntry(current, threadId) : current)
-      : current[threadId] === normalized
-        ? current
-        : {
-            ...current,
-            [threadId]: normalized
-          };
-    threadRuntimeCwdByThreadRef.current = next;
-    setThreadRuntimeCwdByThread(next);
-  }, []);
-  const clearThreadRuntimeCwd = useCallback((threadId: string) => {
-    rememberThreadRuntimeCwd(threadId, null);
-  }, [rememberThreadRuntimeCwd]);
-
-  const bootstrapThreadRuntimeCwdFromCodexSession = useCallback(
-    async (threadId: string, sessionId: string) => {
-      if (!threadId || !sessionId) {
-        return;
-      }
-
-      const sessionMeta = sessionMetaBySessionIdRef.current[sessionId];
-      if (!sessionMeta || sessionMeta.workspaceKind !== 'local') {
-        return;
-      }
-
-      const thread = findThreadById(threadByIdRef.current, threadId);
-      if (!thread) {
-        return;
-      }
-      const codexSessionId = sessionMeta.codexSessionId?.trim() || thread.codexSessionId?.trim() || '';
-      if (!codexSessionId) {
-        return;
-      }
-
-      const workspace = workspaces.find((candidate) => candidate.id === sessionMeta.workspaceId);
-      if (!workspace || workspace.kind !== 'local') {
-        return;
-      }
-
+  const refreshThreads = useCallback(
+    async (workspace: Workspace, searchTerm?: string) => {
+      const refreshSequence = ++threadRefreshSequence.current;
+      setLoadingThreads(true);
+      setThreadError(null);
       try {
-        const cwd = await api.latestCodexSessionCwd(workspace.path, codexSessionId);
-        if (!cwd?.trim()) {
-          return;
-        }
-        if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
-          return;
-        }
-        const latestSessionMeta = sessionMetaBySessionIdRef.current[sessionId];
-        if (!latestSessionMeta) {
-          return;
-        }
-        latestSessionMeta.codexSessionId = codexSessionId;
-        latestSessionMeta.currentCwd = cwd;
-        rememberThreadRuntimeCwd(threadId, cwd);
-      } catch {
-        // best effort
-      }
-    },
-    [rememberThreadRuntimeCwd, workspaces]
-  );
-
-  const resolveInitialThreadCwd = useCallback(
-    async (thread: ThreadMetadata, workspace: Workspace): Promise<string | null> => {
-      if (workspace.kind !== 'local') {
-        return null;
-      }
-
-      const remembered = threadRuntimeCwdByThreadRef.current[thread.id]?.trim() ?? '';
-      if (remembered) {
-        return remembered;
-      }
-
-      const pendingForkSourceSessionId = thread.pendingForkSourceCodexSessionId?.trim() ?? '';
-      const codexSessionId =
-        !thread.pendingForkLaunchConsumed && isUuidLike(pendingForkSourceSessionId)
-          ? pendingForkSourceSessionId
-          : thread.codexSessionId?.trim() ?? '';
-      if (!codexSessionId) {
-        return workspace.path;
-      }
-
-      try {
-        const latestCwd = await api.latestCodexSessionCwd(workspace.path, codexSessionId);
-        return latestCwd?.trim() || workspace.path;
-      } catch {
-        return workspace.path;
-      }
-    },
-    []
-  );
-
-  const clearTerminalSessionTracking = useCallback(
-    (sessionId: string) => {
-      delete threadIdBySessionIdRef.current[sessionId];
-      delete sessionMetaBySessionIdRef.current[sessionId];
-      delete lastSentTerminalSizeBySessionRef.current[sessionId];
-      delete pendingSshStartupAuthStatusBySessionIdRef.current[sessionId];
-      delete pendingTerminalDataBySessionRef.current[sessionId];
-      if (pendingTerminalResizeRef.current?.sessionId === sessionId) {
-        pendingTerminalResizeRef.current = null;
-        if (pendingTerminalResizeTimerRef.current !== null) {
-          window.clearTimeout(pendingTerminalResizeTimerRef.current);
-          pendingTerminalResizeTimerRef.current = null;
-        }
-      }
-    },
-    []
-  );
-
-  // Returns true only if the user sent at least one message in the current session
-  // (i.e. after the most recent session bind). Prevents Codex's startup prompt from
-  // being treated as fresh output on non-selected threads.
-  const hasUserSentMessageInCurrentSession = useCallback((threadId: string) => {
-    const sessionStart = lastSessionStartAtMsByThreadRef.current[threadId] ?? 0;
-    const lastUserInput = lastUserInputAtMsByThreadRef.current[threadId] ?? 0;
-    return lastUserInput > sessionStart;
-  }, []);
-
-  const resolveThreadTurnCompletionMode = useCallback((threadId: string): TerminalTurnCompletionMode => {
-    const activeSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
-    if (!activeSessionId) {
-      return 'idle';
-    }
-    return sessionMetaBySessionIdRef.current[activeSessionId]?.turnCompletionMode ?? 'idle';
-  }, []);
-
-  const usesStructuredCompletionForThread = useCallback(
-    (threadId: string) => resolveJsonlCompletionAttentionContext(threadId).usesJsonlAttention,
-    [resolveJsonlCompletionAttentionContext]
-  );
-
-  const threadStatusById = useMemo(() => {
-    const statusById: Record<string, { isWorking: boolean }> = {};
-    for (const thread of allThreads) {
-      statusById[thread.id] = {
-        isWorking: runStore.isThreadWorking(thread.id)
-      };
-    }
-    return statusById;
-  }, [allThreads, runStore]);
-
-  const isThreadWorking = useCallback(
-    (threadId: string) => threadStatusById[threadId]?.isWorking ?? false,
-    [threadStatusById]
-  );
-
-  const unreadCompletedTurnByThread = useMemo(() => {
-    const unreadByThread: Record<string, true> = {};
-    for (const thread of allThreads) {
-      const trackedJsonlAttention = resolveTrackedThreadJsonlCompletionAttention(thread);
-      if (
-        !shouldTrackThreadJsonlCompletionAttention(
-          {
-            isArchived: thread.isArchived,
-            codexSessionId: trackedJsonlAttention.codexSessionId
-          },
-          trackedJsonlAttention.workspaceKind
-        )
-      ) {
-        continue;
-      }
-      const state = threadJsonlCompletionAttentionByThreadRef.current[thread.id];
-      const codexSessionId = trackedJsonlAttention.codexSessionId;
-      if (!state || state.codexSessionId !== codexSessionId) {
-        continue;
-      }
-      if (!isUnreadJsonlCompletionAttention(state)) {
-        continue;
-      }
-      unreadByThread[thread.id] = true;
-    }
-    return unreadByThread;
-  }, [allThreads, resolveTrackedThreadJsonlCompletionAttention, threadJsonlCompletionAttentionVersion]);
-
-  const unreadCompletedTurnCount = useMemo(
-    () => Object.keys(unreadCompletedTurnByThread).length,
-    [unreadCompletedTurnByThread]
-  );
-
-  const scheduleThreadWorkingStop = useCallback(
-    (threadId: string, delayMs = THREAD_WORKING_IDLE_TIMEOUT_MS) => {
-      if (usesStructuredCompletionForThread(threadId)) {
-        clearThreadWorkingStopTimer(threadId);
-        return;
-      }
-      clearThreadWorkingStopTimer(threadId);
-      workingStopTimerByThreadRef.current[threadId] = window.setTimeout(() => {
-        delete workingStopTimerByThreadRef.current[threadId];
-        stopThreadWorking(threadId);
-        if (resolveThreadTurnCompletionMode(threadId) === 'jsonl') {
-          return;
-        }
-        const runCompletion = () => {
-          // Skip if re-entered working state since the visual stop.
-          if (workingByThreadRef.current[threadId]) {
-            return;
-          }
-          const previousAttentionState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-          if (hasCompletedAttentionTurn(previousAttentionState)) {
-            return;
-          }
-          const completedAttentionState = completeTurn(threadId, 'Succeeded');
-          if (
-            completedAttentionState.lastCompletedTurnIdWithOutput > previousAttentionState.lastCompletedTurnIdWithOutput ||
-            (
-              completedAttentionState.lastCompletedTurnIdWithOutput === previousAttentionState.lastCompletedTurnIdWithOutput &&
-              completedAttentionState.lastCompletedTurnStatus === 'Succeeded' &&
-              shouldNotifyAttentionTurn(completedAttentionState)
-            )
-          ) {
-            notifyCompletedTurnIfNeeded(threadId, completedAttentionState);
-          }
-        };
-        runCompletion();
-      }, delayMs);
-    },
-    [
-      clearThreadWorkingStopTimer,
-      completeTurn,
-      notifyCompletedTurnIfNeeded,
-      resolveThreadTurnCompletionMode,
-      stopThreadWorking,
-      usesStructuredCompletionForThread
-    ]
-  );
-
-  useEffect(() => {
-    return () => {
-      clearAllThreadWorkingStopTimers();
-      if (selectedTerminalStreamRevisionTimerRef.current !== null) {
-        window.clearTimeout(selectedTerminalStreamRevisionTimerRef.current);
-        selectedTerminalStreamRevisionTimerRef.current = null;
-      }
-      if (selectedTerminalStreamRevisionSafetyTimerRef.current !== null) {
-        window.clearTimeout(selectedTerminalStreamRevisionSafetyTimerRef.current);
-        selectedTerminalStreamRevisionSafetyTimerRef.current = null;
-      }
-      if (terminalStreamCachePruneTimerRef.current !== null) {
-        window.clearTimeout(terminalStreamCachePruneTimerRef.current);
-        terminalStreamCachePruneTimerRef.current = null;
-      }
-      outputControlCarryByThreadRef.current = {};
-      runLifecycleByThreadRef.current = {};
-    };
-  }, [clearAllThreadWorkingStopTimers]);
-
-  const beginSidebarResize = useCallback(
-    (clientX: number) => {
-      const safeClientX = Number.isFinite(clientX) ? clientX : 0;
-      sidebarResizeStateRef.current = {
-        startX: safeClientX,
-        startWidth: sidebarWidth
-      };
-      setIsSidebarResizing(true);
-    },
-    [sidebarWidth]
-  );
-
-  const beginShellDrawerResize = useCallback(
-    (clientY: number) => {
-      const safeClientY = Number.isFinite(clientY) ? clientY : 0;
-      shellDrawerResizeStateRef.current = {
-        startY: safeClientY,
-        startHeight: shellDrawerHeight
-      };
-      setIsShellDrawerResizing(true);
-    },
-    [shellDrawerHeight]
-  );
-
-  const startSidebarResize = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (typeof event.button === 'number' && event.button !== 0) {
-        return;
-      }
-      event.preventDefault();
-      beginSidebarResize(event.clientX);
-    },
-    [beginSidebarResize]
-  );
-
-  const startSidebarResizeWithMouse = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      if (typeof event.button === 'number' && event.button !== 0) {
-        return;
-      }
-      event.preventDefault();
-      beginSidebarResize(event.clientX);
-    },
-    [beginSidebarResize]
-  );
-
-  const refreshWorkspaces = useCallback(async () => {
-    const all = await api.listWorkspaces();
-    setWorkspaces((prev) => {
-      if (JSON.stringify(prev) === JSON.stringify(all)) {
-        return prev;
-      }
-      return all;
-    });
-    if (all.length === 0) {
-      setSelectedWorkspace(undefined);
-      setSelectedThread(undefined);
-      return;
-    }
-
-    const persisted = window.localStorage.getItem(SELECTED_WORKSPACE_KEY) ?? '';
-    const current = selectedWorkspaceIdRef.current;
-
-    const nextWorkspaceId =
-      (current && all.some((workspace) => workspace.id === current) && current) ||
-      (persisted && all.some((workspace) => workspace.id === persisted) && persisted) ||
-      all[0].id;
-
-    setSelectedWorkspace(nextWorkspaceId);
-  }, [setSelectedThread, setSelectedWorkspace]);
-
-  const refreshRecentCodexThreads = useCallback(async () => {
-    recentCodexRefreshRequestIdRef.current += 1;
-    if (recentCodexRefreshRunningRef.current) {
-      return;
-    }
-    recentCodexRefreshRunningRef.current = true;
-    try {
-      while (true) {
-        const requestId = recentCodexRefreshRequestIdRef.current;
-        try {
-          const recent = await api.listRecentCodexThreads();
-          if (
-            requestId === recentCodexRefreshRequestIdRef.current &&
-            !appUnmountedRef.current
-          ) {
-            const suppressed = suppressedRecentCodexSessionIdsRef.current;
-            setRecentCodexThreads(
-              recent.filter((thread) => !suppressed.has(thread.sessionId))
-            );
-          }
-        } catch {
-          // History discovery is additive. Keep existing rows when Codex is
-          // unavailable or a local session file cannot be read.
-        }
-        if (requestId === recentCodexRefreshRequestIdRef.current) {
-          break;
-        }
-      }
-    } finally {
-      recentCodexRefreshRunningRef.current = false;
-    }
-  }, []);
-
-  const primeRemoteThreadStartupOnSelection = useCallback(
-    (thread: ThreadMetadata | undefined, workspaceOverride?: Workspace | null) => {
-      if (!thread) {
-        return;
-      }
-
-      const workspace =
-        workspaceOverride ?? workspaces.find((candidate) => candidate.id === thread.workspaceId) ?? null;
-      if (!workspace || !isRemoteWorkspaceKind(workspace.kind)) {
-        return;
-      }
-      if ((sessionFailCountByThreadRef.current[thread.id] ?? 0) >= 3) {
-        return;
-      }
-      if (workspace.kind === 'ssh' && sshStartupBlockedByThreadRef.current[thread.id]) {
-        return;
-      }
-      if (activeRunsByThreadRef.current[thread.id]?.sessionId || startingSessionByThreadRef.current[thread.id]) {
-        return;
-      }
-
-      setStartingByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
-      setReadyByThread((current) => removeThreadFlag(current, thread.id));
-    },
-    [workspaces]
-  );
-
-  const refreshThreadsForWorkspace = useCallback(
-    async (workspaceId: string) => {
-      const threads = await listThreads(workspaceId);
-
-      if (selectedWorkspaceIdRef.current !== workspaceId) {
-        return threads;
-      }
-
-      const persistedThreadId = window.localStorage.getItem(threadSelectionKey(workspaceId)) ?? '';
-      const currentThreadId = selectedThreadIdRef.current;
-
-      const nextThreadId =
-        (currentThreadId && threads.some((thread) => thread.id === currentThreadId) && currentThreadId) ||
-        (persistedThreadId && threads.some((thread) => thread.id === persistedThreadId) && persistedThreadId) ||
-        threads[0]?.id;
-
-      const nextThread = threads.find((thread) => thread.id === nextThreadId);
-      primeRemoteThreadStartupOnSelection(nextThread);
-      setSelectedThread(nextThreadId);
-      return threads;
-    },
-    [listThreads, primeRemoteThreadStartupOnSelection, setSelectedThread]
-  );
-
-  const resolvePendingThreadFork = useCallback(
-    async (threadId: string, options?: { notifyOnTimeout?: boolean }) => {
-      const existing = forkResolutionByThreadRef.current[threadId];
-      if (existing) {
-        return existing;
-      }
-
-      const promise = (async () => {
-        const initialThread = findThreadById(threadByIdRef.current, threadId);
-        if (!initialThread || deletedThreadIdsRef.current[threadId]) {
-          return;
-        }
-
-        const workspace = workspaces.find((candidate) => candidate.id === initialThread.workspaceId);
-        if (!workspace || isRemoteWorkspaceKind(workspace.kind)) {
-          return;
-        }
-
-        const sourceCodexSessionId = initialThread.pendingForkSourceCodexSessionId?.trim() ?? '';
-        if (!isUuidLike(sourceCodexSessionId)) {
-          return;
-        }
-
-        const excludedChildSessionIds = new Set(
-          (initialThread.pendingForkKnownChildSessionIds ?? []).filter((sessionId) => isUuidLike(sessionId))
-        );
-        let deadlineAtMs: number | null = null;
-        const hardDeadlineAtMs = Date.now() + THREAD_FORK_RESOLUTION_HARD_TIMEOUT_MS;
-
-        while (Date.now() < hardDeadlineAtMs) {
-          if (deletedThreadIdsRef.current[threadId]) {
-            return;
-          }
-
-          const latestThread = findThreadById(threadByIdRef.current, threadId);
-          if (!latestThread) {
-            return;
-          }
-          if ((latestThread.pendingForkSourceCodexSessionId?.trim() ?? '') !== sourceCodexSessionId) {
-            return;
-          }
-
-          const activeSessionId = activeRunsByThreadRef.current[latestThread.id]?.sessionId ?? null;
-          const activeSessionMode =
-            activeSessionId ? sessionMetaBySessionIdRef.current[activeSessionId]?.mode ?? null : null;
-          const waitingForFirstForkTurn =
-            activeSessionMode === 'forked' && !hasUserSentMessageInCurrentSession(latestThread.id);
-
-          if (waitingForFirstForkTurn) {
-            deadlineAtMs = null;
-          } else if (deadlineAtMs === null) {
-            deadlineAtMs = Date.now() + THREAD_FORK_RESOLUTION_TIMEOUT_MS;
-          } else if (Date.now() >= deadlineAtMs) {
-            break;
-          }
-
-          if (!waitingForFirstForkTurn) {
-            const childCodexSessionId = (await api.resolveThreadForkCandidate(
-              sourceCodexSessionId,
-              [...excludedChildSessionIds],
-              latestThread.pendingForkRequestedAt ?? null
-            ))?.trim();
-            if (
-              childCodexSessionId &&
-              isUuidLike(childCodexSessionId) &&
-              childCodexSessionId !== sourceCodexSessionId
-            ) {
-              try {
-                delete forkResolutionTimeoutNotifiedByThreadRef.current[threadId];
-                const updatedThread = await api.setThreadCodexSessionId(
-                  latestThread.workspaceId,
-                  latestThread.id,
-                  childCodexSessionId
-                );
-                applyThreadUpdate(updatedThread);
-                setForkResolutionFailureBlockedByThread((current) =>
-                  removeRecordEntry(current, updatedThread.id)
-                );
-                setForkResolutionFailureModal((current) =>
-                  current?.threadId === updatedThread.id ? null : current
-                );
-                delete allowFreshStartAfterForkFailureByThreadRef.current[updatedThread.id];
-
-                if (activeSessionId) {
-                  const activeSessionMeta = sessionMetaBySessionIdRef.current[activeSessionId];
-                  if (activeSessionMeta) {
-                    activeSessionMeta.codexSessionId = childCodexSessionId;
-                  }
-                  void api.terminalRebindCodexSession(activeSessionId, childCodexSessionId);
-                }
-                if (activeSessionMode !== 'forked') {
-                  clearThreadWorkingStopTimer(updatedThread.id);
-                  stopThreadWorking(updatedThread.id);
-                  completeTurn(updatedThread.id, 'Succeeded');
-                }
-
-                await refreshThreadsForWorkspace(latestThread.workspaceId);
-                return;
-              } catch (error) {
-                if (isForkSessionAlreadyClaimedError(error)) {
-                  excludedChildSessionIds.add(childCodexSessionId);
-                  continue;
-                }
-                throw error;
-              }
-            }
-          }
-
-          await new Promise<void>((resolve) => {
-            window.setTimeout(() => resolve(), THREAD_FORK_RESOLUTION_POLL_INTERVAL_MS);
-          });
-        }
-
-        const timedOutThread = findThreadById(threadByIdRef.current, threadId);
-        if (
-          timedOutThread &&
-          (timedOutThread.pendingForkSourceCodexSessionId?.trim() ?? '') === sourceCodexSessionId
-        ) {
-          try {
-            const clearedThread = await api.clearThreadPendingFork(
-              timedOutThread.workspaceId,
-              timedOutThread.id
-            );
-            applyThreadUpdate(clearedThread);
-            await refreshThreadsForWorkspace(timedOutThread.workspaceId);
-            if (!allowFreshStartAfterForkFailureByThreadRef.current[timedOutThread.id]) {
-              setForkResolutionFailureBlockedByThread((current) =>
-                current[timedOutThread.id] ? current : { ...current, [timedOutThread.id]: true }
-              );
-              setForkResolutionFailureModal((current) =>
-                current?.threadId === timedOutThread.id
-                  ? current
-                  : {
-                      threadId: timedOutThread.id,
-                      workspaceId: timedOutThread.workspaceId
-                    }
-              );
-            }
-          } catch {
-            // Leave the pending state in place if cleanup fails so the user can retry later.
-          }
-        }
-
-        if (options?.notifyOnTimeout && !forkResolutionTimeoutNotifiedByThreadRef.current[threadId]) {
-          forkResolutionTimeoutNotifiedByThreadRef.current[threadId] = true;
-          pushToast(
-            'ATController could not confirm the forked child session, so fork tracking was cleared for this thread.',
-            'error'
-          );
-        }
-      })().finally(() => {
-        delete forkResolutionByThreadRef.current[threadId];
-      });
-
-      forkResolutionByThreadRef.current[threadId] = promise;
-      return promise;
-    },
-    [
-      applyThreadUpdate,
-      clearThreadWorkingStopTimer,
-      completeTurn,
-      hasUserSentMessageInCurrentSession,
-      pushToast,
-      refreshThreadsForWorkspace,
-      stopThreadWorking,
-      workspaces
-    ]
-  );
-
-  const commitPreparedNativeForkForThread = useCallback(
-    async (threadId: string, preparedNativeFork: PreparedNativeFork) => {
-      const latestThread = findThreadById(threadByIdRef.current, threadId);
-      if (!latestThread || deletedThreadIdsRef.current[threadId]) {
-        return;
-      }
-
-      suppressAutoForkResolutionByThreadRef.current[threadId] = true;
-      try {
-        const consumedThread = await api.commitPreparedThreadPendingFork(
-          latestThread.workspaceId,
-          latestThread.id,
-          preparedNativeFork
-        );
-        applyThreadUpdate(consumedThread);
-        const wsId = consumedThread.workspaceId;
-        const wsThreads = threadsByWorkspaceRef.current[wsId] ?? [];
-        threadsByWorkspaceRef.current = {
-          ...threadsByWorkspaceRef.current,
-          [wsId]: wsThreads.map((thread) => (thread.id === consumedThread.id ? consumedThread : thread))
-        };
-        threadByIdRef.current = {
-          ...threadByIdRef.current,
-          [consumedThread.id]: consumedThread
-        };
-        await refreshThreadsForWorkspace(consumedThread.workspaceId);
-        delete suppressAutoForkResolutionByThreadRef.current[threadId];
-        void resolvePendingThreadFork(consumedThread.id, { notifyOnTimeout: true });
-      } catch (error) {
-        delete suppressAutoForkResolutionByThreadRef.current[threadId];
-        pushToast(`Fork tracking failed: ${String(error)}`, 'error');
-      }
-    },
-    [applyThreadUpdate, pushToast, refreshThreadsForWorkspace, resolvePendingThreadFork]
-  );
-
-  const refreshSkillsForWorkspace = useCallback(async (workspace: Workspace) => {
-    if (isRemoteWorkspaceKind(workspace.kind)) {
-      setSkillsByWorkspaceId((current) => {
-        if ((current[workspace.id] ?? []).length === 0) {
-          return current;
-        }
-        return {
-          ...current,
-          [workspace.id]: []
-        };
-      });
-      setSkillsLoadingByWorkspaceId((current) => ({
-        ...current,
-        [workspace.id]: false
-      }));
-      setSkillErrorsByWorkspaceId((current) => ({
-        ...current,
-        [workspace.id]: null
-      }));
-      return [];
-    }
-
-    const requestId = (skillListRequestIdByWorkspaceRef.current[workspace.id] ?? 0) + 1;
-    skillListRequestIdByWorkspaceRef.current[workspace.id] = requestId;
-    setSkillsLoadingByWorkspaceId((current) => ({
-      ...current,
-      [workspace.id]: true
-    }));
-    setSkillErrorsByWorkspaceId((current) => ({
-      ...current,
-      [workspace.id]: null
-    }));
-
-    try {
-      const skills = await api.listSkills(workspace.path);
-      if (skillListRequestIdByWorkspaceRef.current[workspace.id] !== requestId) {
-        return skills;
-      }
-      setSkillsByWorkspaceId((current) => ({
-        ...current,
-        [workspace.id]: skills
-      }));
-      return skills;
-    } catch (error) {
-      if (skillListRequestIdByWorkspaceRef.current[workspace.id] !== requestId) {
-        return [];
-      }
-      setSkillErrorsByWorkspaceId((current) => ({
-        ...current,
-        [workspace.id]: String(error)
-      }));
-      return [];
-    } finally {
-      if (skillListRequestIdByWorkspaceRef.current[workspace.id] === requestId) {
-        setSkillsLoadingByWorkspaceId((current) => ({
-          ...current,
-          [workspace.id]: false
-        }));
-      }
-    }
-  }, []);
-
-  const refreshGitInfo = useCallback(async () => {
-    const requestId = gitInfoRequestIdRef.current + 1;
-    gitInfoRequestIdRef.current = requestId;
-    const requestedPath = selectedGitContextPath?.trim() ?? '';
-    if (!requestedPath) {
-      setGitInfo(null);
-      return;
-    }
-    try {
-      const info = await api.getGitInfo(requestedPath);
-      if (gitInfoRequestIdRef.current !== requestId) {
-        return;
-      }
-      if (selectedGitContextPathRef.current !== requestedPath) {
-        return;
-      }
-      setGitInfo(info);
-    } catch (error) {
-      if (gitInfoRequestIdRef.current === requestId && selectedGitContextPathRef.current === requestedPath) {
-        setGitInfo(null);
-      }
-    }
-  }, [selectedGitContextPath]);
-
-  const clearThreadSkillsAfterSend = useCallback(
-    async (threadId: string) => {
-      delete pendingSkillClearByThreadRef.current[threadId];
-      const thread = findThreadById(threadByIdRef.current, threadId);
-      if (!thread || (thread.enabledSkills?.length ?? 0) === 0) {
-        return;
-      }
-
-      setSkillsUpdating(true);
-      try {
-        const updated = await setThreadSkills(thread.workspaceId, thread.id, []);
-        applyThreadUpdate(updated);
-      } catch (error) {
-        pushToast(`Failed to update skills: ${String(error)}`, 'error');
-      } finally {
-        setSkillsUpdating(false);
-      }
-    },
-    [applyThreadUpdate, pushToast, setThreadSkills]
-  );
-
-  const flushPendingThreadInput = useCallback(async (threadId: string, sessionId: string) => {
-    const pending = pendingInputByThreadRef.current[threadId];
-    if (!pending) {
-      return;
-    }
-    const shouldClearSkills = Boolean(pendingSkillClearByThreadRef.current[threadId]);
-    const shouldStartWorking = Boolean(pendingSubmittedInputByThreadRef.current[threadId]);
-    const shouldTrackNativeFork = Boolean(pendingNativeForkCommandByThreadRef.current[threadId]);
-    delete pendingInputByThreadRef.current[threadId];
-    delete pendingSubmittedInputByThreadRef.current[threadId];
-    delete pendingNativeForkCommandByThreadRef.current[threadId];
-    lastUserInputAtMsByThreadRef.current[threadId] = Date.now();
-    let preparedNativeFork: PreparedNativeFork | null = null;
-    if (shouldTrackNativeFork) {
-      const thread = findThreadById(threadByIdRef.current, threadId);
-      const workspace = thread ? workspaces.find((candidate) => candidate.id === thread.workspaceId) : null;
-      if (thread && workspace && !isRemoteWorkspaceKind(workspace.kind)) {
-        try {
-          preparedNativeFork = await api.prepareThreadNativeFork(thread.workspaceId, thread.id, sessionId);
-        } catch (error) {
-          pushToast(`Fork tracking failed: ${String(error)}`, 'error');
-        }
-      }
-    }
-    let wrote = false;
-    try {
-      wrote = await api.terminalWrite(sessionId, pending);
-    } catch (error) {
-      if (shouldClearSkills) {
-        delete pendingSkillClearByThreadRef.current[threadId];
-      }
-      throw error;
-    }
-    if (wrote && preparedNativeFork) {
-      await commitPreparedNativeForkForThread(threadId, preparedNativeFork);
-    }
-    if (shouldStartWorking) {
-      clearThreadWorkingStopTimer(threadId);
-      startThreadWorking(threadId);
-      scheduleThreadWorkingStop(threadId, THREAD_WORKING_STUCK_TIMEOUT_MS);
-    }
-    if (shouldClearSkills) {
-      await clearThreadSkillsAfterSend(threadId);
-    }
-  }, [
-    clearThreadSkillsAfterSend,
-    clearThreadWorkingStopTimer,
-    commitPreparedNativeForkForThread,
-    pushToast,
-    scheduleThreadWorkingStop,
-    startThreadWorking,
-    workspaces
-  ]);
-
-  const getThreadDraftInput = useCallback((threadId: string) => inputBufferByThreadRef.current[threadId] ?? '', []);
-
-  const replayThreadDraftInput = useCallback(async (sessionId: string | null, draftInput: string) => {
-    if (!sessionId || draftInput.length === 0) {
-      return;
-    }
-    await api.terminalWrite(sessionId, draftInput).catch(() => undefined);
-  }, []);
-
-  const waitForThreadReplayWindow = useCallback(
-    async (threadId: string, sessionId: string | null, timeoutMs = 2500) => {
-      if (!sessionId) {
-        return false;
-      }
-
-      const startedAtMs = Date.now();
-      let hydrationSettledAtMs: number | null = null;
-      while (Date.now() - startedAtMs < timeoutMs) {
-        if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
-          return false;
-        }
-
-        const hydrationPending =
-          terminalStreamsByThreadRef.current[threadId]?.sessionId === sessionId &&
-          terminalStreamsByThreadRef.current[threadId]?.phase === 'hydrating';
-        if (!hydrationPending && hydrationSettledAtMs === null) {
-          hydrationSettledAtMs = Date.now();
-        }
-
-        const cached = lastTerminalLogByThreadRef.current[threadId] ?? '';
-        if (!hydrationPending && looksLikeCodexUiReadyText(cached)) {
-          return true;
-        }
-
-        const snapshot = await api.terminalReadOutput(sessionId).catch(() => null);
-        if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
-          return false;
-        }
-
-        const hydrationStillPending =
-          terminalStreamsByThreadRef.current[threadId]?.sessionId === sessionId &&
-          terminalStreamsByThreadRef.current[threadId]?.phase === 'hydrating';
-        if (!hydrationStillPending && hydrationSettledAtMs === null) {
-          hydrationSettledAtMs = Date.now();
-        }
-
-        if (!hydrationStillPending && looksLikeCodexUiReadyText(snapshot?.text ?? '')) {
-          return true;
-        }
-
-        if (hydrationSettledAtMs !== null && Date.now() - hydrationSettledAtMs >= 180) {
-          return true;
-        }
-
-        await new Promise<void>((resolve) => {
-          window.setTimeout(() => resolve(), 70);
-        });
-      }
-
-      return (
-        activeRunsByThreadRef.current[threadId]?.sessionId === sessionId &&
-        terminalStreamsByThreadRef.current[threadId]?.phase !== 'hydrating'
-      );
-    },
-    []
-  );
-
-  const setAttachmentDraftForThread = useCallback((threadId: string, paths: string[]) => {
-    setDraftAttachmentsByThread((current) => {
-      const next = { ...current };
-      if (paths.length === 0) {
-        if (!(threadId in next)) {
-          return current;
-        }
-        delete next[threadId];
-        return next;
-      }
-      const existing = current[threadId] ?? [];
-      if (existing.length === paths.length && existing.every((item, index) => item === paths[index])) {
-        return current;
-      }
-      next[threadId] = paths;
-      return next;
-    });
-  }, []);
-
-  const addAttachmentDraftPaths = useCallback(
-    (threadId: string, rawPaths: string[]) => {
-      const incoming = normalizeAttachmentPaths(rawPaths);
-      if (incoming.length === 0) {
-        return 0;
-      }
-      const existing = draftAttachmentsByThreadRef.current[threadId] ?? [];
-      const merged = mergeAttachmentPaths(existing, incoming);
-      setAttachmentDraftForThread(threadId, merged);
-      return merged.length - existing.length;
-    },
-    [setAttachmentDraftForThread]
-  );
-
-  const clearAttachmentDraftForThread = useCallback(
-    (threadId: string) => {
-      setAttachmentDraftForThread(threadId, []);
-    },
-    [setAttachmentDraftForThread]
-  );
-
-  const removeAttachmentDraftPath = useCallback(
-    (threadId: string, path: string) => {
-      const existing = draftAttachmentsByThreadRef.current[threadId] ?? [];
-      if (existing.length === 0) {
-        return;
-      }
-      const next = existing.filter((item) => item !== path);
-      setAttachmentDraftForThread(threadId, next);
-    },
-    [setAttachmentDraftForThread]
-  );
-
-  const togglePinnedSkillForSelectedWorkspace = useCallback((skillId: string) => {
-    if (!selectedWorkspace) {
-      return;
-    }
-    setSkillUsageMap((current) => toggleSkillPinned(current, selectedWorkspace.path, skillId));
-  }, [selectedWorkspace]);
-
-  const updateSelectedThreadSkills = useCallback(
-    async (nextSkillIds: string[]) => {
-      if (!selectedThread) {
-        return;
-      }
-      const normalizedSkillIds = Array.from(new Set(nextSkillIds.filter((skillId) => skillId.trim().length > 0)));
-      setSkillsUpdating(true);
-      try {
-        const updated = await setThreadSkills(selectedThread.workspaceId, selectedThread.id, normalizedSkillIds);
-        applyThreadUpdate(updated);
-      } catch (error) {
-        pushToast(`Failed to update skills: ${String(error)}`, 'error');
-      } finally {
-        setSkillsUpdating(false);
-      }
-    },
-    [applyThreadUpdate, pushToast, selectedThread, setThreadSkills]
-  );
-
-  const toggleSelectedThreadSkill = useCallback(
-    async (skillId: string) => {
-      if (!selectedThread) {
-        return;
-      }
-      const selectedIds = selectedThread.enabledSkills ?? [];
-      const nextSkillIds = selectedIds.includes(skillId)
-        ? selectedIds.filter((currentSkillId) => currentSkillId !== skillId)
-        : [...selectedIds, skillId];
-      await updateSelectedThreadSkills(nextSkillIds);
-    },
-    [selectedThread, updateSelectedThreadSkills]
-  );
-
-  const removeMissingSelectedThreadSkill = useCallback(
-    async (skillId: string) => {
-      if (!selectedThread) {
-        return;
-      }
-      const nextSkillIds = (selectedThread.enabledSkills ?? []).filter((currentSkillId) => currentSkillId !== skillId);
-      await updateSelectedThreadSkills(nextSkillIds);
-    },
-    [selectedThread, updateSelectedThreadSkills]
-  );
-
-  const appendTerminalLogChunk = useCallback((threadId: string, event: TerminalDataEvent) => {
-    const visibleChunk = presentTerminalEventData(event.data, {
-      currentText: terminalStreamsByThreadRef.current[threadId]?.text ?? '',
-      stripHiddenPrompts: (value) => stripThreadHiddenInjectedPrompts(threadId, value)
-    });
-    if (!visibleChunk) {
-      updateThreadTerminalStream(threadId, (current) =>
-        appendTerminalStreamChunk(
-          current,
-          {
-            sessionId: event.sessionId,
-            startPosition: event.startPosition,
-            endPosition: event.endPosition,
-            data: ''
-          },
-          TERMINAL_LOG_BUFFER_CHARS
-        )
-      );
-      return;
-    }
-    updateThreadTerminalStream(threadId, (current) =>
-      appendTerminalStreamChunk(
-        current,
-        {
-          sessionId: event.sessionId,
-          startPosition: event.startPosition,
-          endPosition: event.endPosition,
-          data: visibleChunk
-        },
-        TERMINAL_LOG_BUFFER_CHARS
-      )
-    );
-  }, [stripThreadHiddenInjectedPrompts, updateThreadTerminalStream]);
-
-  const hasCachedTerminalLog = useCallback((threadId: string) => {
-    const stream = terminalStreamsByThreadRef.current[threadId];
-    return Boolean(stream && (stream.text.length > 0 || stream.chunks.length > 0));
-  }, []);
-
-  const hydrateSessionSnapshot = useCallback(
-    async (
-      threadId: string,
-      sessionId: string,
-      options: {
-        forceFreshReadySnapshot?: boolean;
-        keepSelectedStatefulHydrationOverlayOnFailure?: boolean;
-        rebindReadyStatefulStream?: boolean;
-        requestId?: number;
-        retryDelaysMs?: readonly number[];
-      } = {}
-    ) => {
-      if (appUnmountedRef.current) {
-        return;
-      }
-      const requestId =
-        options.requestId ?? (terminalHydrationRequestIdByThreadRef.current[threadId] ?? 0) + 1;
-      if (options.requestId === undefined) {
-        terminalHydrationRequestIdByThreadRef.current[threadId] = requestId;
-      } else if (terminalHydrationRequestIdByThreadRef.current[threadId] !== requestId) {
-        return;
-      }
-      if (threadId === selectedThreadIdRef.current && sessionId === selectedSessionIdRef.current) {
-        setSelectedStatefulHydrationFailedSessionId((current) => (current === sessionId ? null : current));
-      }
-      const scheduleRetry = (remainingRetryDelays: readonly number[]) => {
-        const [nextDelayMs, ...restRetryDelays] = remainingRetryDelays;
-        if (nextDelayMs === undefined) {
-          return false;
-        }
-        window.setTimeout(() => {
-          if (appUnmountedRef.current) {
-            return;
-          }
-          if (terminalHydrationRequestIdByThreadRef.current[threadId] !== requestId) {
-            return;
-          }
-          if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
-            return;
-          }
-          void hydrateSessionSnapshot(threadId, sessionId, {
-            ...options,
-            requestId,
-            retryDelaysMs: restRetryDelays
-          });
-        }, nextDelayMs);
-        return true;
-      };
-      void bootstrapThreadRuntimeCwdFromCodexSession(threadId, sessionId);
-      if (appUnmountedRef.current) {
-        return;
-      }
-      const snapshot = await api.terminalReadOutput(sessionId).catch(() => null);
-      if (appUnmountedRef.current) {
-        return;
-      }
-      if (terminalHydrationRequestIdByThreadRef.current[threadId] !== requestId) {
-        return;
-      }
-      if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
-        return;
-      }
-      if (!snapshot) {
-        if (scheduleRetry(options.retryDelaysMs ?? [])) {
-          return;
-        }
-        if (
-          threadId === selectedThreadIdRef.current &&
-          sessionId === selectedSessionIdRef.current
-        ) {
-          if (options.keepSelectedStatefulHydrationOverlayOnFailure) {
-            updateThreadTerminalStream(threadId, (current) => ({
-              ...bindLiveTerminalSessionStream(current, sessionId),
-              rawEndPosition: current.rawEndPosition,
-              startPosition: current.rawEndPosition,
-              endPosition: current.rawEndPosition
-            }));
-            setSelectedStatefulHydrationFailedSessionId((current) =>
-              current === sessionId ? current : sessionId
-            );
-          }
-          setSelectedStatefulHydrationSessionId((current) => (current === sessionId ? null : current));
-        }
-        return;
-      }
-      const sessionMeta = sessionMetaBySessionIdRef.current[sessionId];
-      const requiresReadySignal = requiresExplicitSshReadySignal(sessionMeta?.workspaceKind);
-      const nextSnapshot = normalizeThreadTerminalSnapshot(threadId, snapshot);
-      updateThreadTerminalStream(threadId, (current) => {
-        const hydrationState =
-          options.rebindReadyStatefulStream &&
-          current.sessionId === sessionId &&
-          current.phase === 'ready' &&
-          shouldPreserveRawTerminalPresentation(current.text)
-            ? bindTerminalSessionStream(current, sessionId)
-            : current;
-        if (options.forceFreshReadySnapshot) {
-          return presentTerminalSnapshot(
-            bindLiveTerminalSessionStream(hydrationState, sessionId),
-            nextSnapshot,
-            TERMINAL_LOG_BUFFER_CHARS
-          );
-        }
-        return hydrateTerminalSessionStream(hydrationState, sessionId, nextSnapshot, TERMINAL_LOG_BUFFER_CHARS);
-      });
-      if (
-        threadId === selectedThreadIdRef.current &&
-        nextSnapshot.text &&
-        isThreadVisibleToUser(threadId)
-      ) {
-        recordThreadVisibleOutput(threadId, false, Date.now(), nextSnapshot.text);
-      }
-      if (threadId === selectedThreadIdRef.current && sessionId === selectedSessionIdRef.current) {
-        setSelectedStatefulHydrationSessionId((current) => (current === sessionId ? null : current));
-        setSelectedStatefulHydrationFailedSessionId((current) => (current === sessionId ? null : current));
-      }
-      scheduleRetry(options.retryDelaysMs ?? []);
-      if (!requiresReadySignal) {
-        runLifecycleByThreadRef.current[threadId] = markRunReady(runLifecycleByThreadRef.current[threadId]);
-        setStartingByThread((current) => removeThreadFlag(current, threadId));
-        setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-      }
-    },
-    [
-      bootstrapThreadRuntimeCwdFromCodexSession,
-      isThreadVisibleToUser,
-      recordThreadVisibleOutput,
-      normalizeThreadTerminalSnapshot,
-      updateThreadTerminalStream
-    ]
-  );
-
-  const requestSelectedStatefulTerminalRepair = useCallback(() => {
-    const threadId = selectedThread?.id;
-    const sessionId = selectedSessionId;
-    if (
-      !threadId ||
-      !sessionId ||
-      !selectedTerminalLooksStateful ||
-      isSelectedThreadStarting ||
-      selectedTerminalFollowPaused
-    ) {
-      return;
-    }
-    const requestToken = statefulRedrawRequestTokenRef.current + 1;
-    statefulRedrawRequestTokenRef.current = requestToken;
-
-    if (statefulTerminalResyncTimerRef.current !== null) {
-      window.clearTimeout(statefulTerminalResyncTimerRef.current);
-    }
-    statefulTerminalResyncTimerRef.current = window.setTimeout(() => {
-      statefulTerminalResyncTimerRef.current = null;
-      if (statefulRedrawRequestTokenRef.current !== requestToken) {
-        return;
-      }
-      if (selectedThreadIdRef.current !== threadId) {
-        return;
-      }
-      if (selectedSessionIdRef.current !== sessionId) {
-        return;
-      }
-      void hydrateSessionSnapshot(threadId, sessionId, {
-        forceFreshReadySnapshot: true,
-        retryDelaysMs: STATEFUL_TERMINAL_REFRESH_RETRY_DELAYS_MS
-      });
-    }, STATEFUL_TERMINAL_RESYNC_DEBOUNCE_MS);
-  }, [
-    hydrateSessionSnapshot,
-    isSelectedThreadStarting,
-    selectedThread,
-    selectedSessionId,
-    selectedTerminalFollowPaused,
-    selectedTerminalLooksStateful
-  ]);
-
-  const bumpSessionStartRequestId = useCallback((threadId: string) => {
-    const next = (sessionStartRequestIdByThreadRef.current[threadId] ?? 0) + 1;
-    sessionStartRequestIdByThreadRef.current[threadId] = next;
-    return next;
-  }, []);
-
-  const invalidatePendingSessionStart = useCallback(
-    (threadId: string) => {
-      bumpSessionStartRequestId(threadId);
-      delete startingSessionByThreadRef.current[threadId];
-      delete pendingInputByThreadRef.current[threadId];
-      delete pendingSubmittedInputByThreadRef.current[threadId];
-      delete pendingSkillClearByThreadRef.current[threadId];
-      setStartingByThread((current) => removeThreadFlag(current, threadId));
-    },
-    [bumpSessionStartRequestId]
-  );
-
-  const pruneIgnoredSshAuthStatusSessions = useCallback((nowMs: number, force = false) => {
-    if (
-      !force &&
-      nowMs - ignoredSshAuthStatusSessionLastPrunedAtMsRef.current < IGNORED_SSH_AUTH_STATUS_SESSION_PRUNE_INTERVAL_MS
-    ) {
-      return;
-    }
-    pruneIgnoredSshAuthStatusSessionsInPlace(ignoredSshAuthStatusSessionIdsRef.current, nowMs);
-    ignoredSshAuthStatusSessionLastPrunedAtMsRef.current = nowMs;
-  }, []);
-
-  const ignoreSshAuthStatusSession = useCallback((sessionId: string | null | undefined) => {
-    if (!sessionId) {
-      return;
-    }
-    const nowMs = Date.now();
-    ignoredSshAuthStatusSessionIdsRef.current[sessionId] = nowMs;
-    pruneIgnoredSshAuthStatusSessions(nowMs, true);
-  }, [pruneIgnoredSshAuthStatusSessions]);
-
-  const isIgnoredSshAuthStatusSession = useCallback((sessionId: string | null | undefined): boolean => {
-    if (!sessionId) {
-      return false;
-    }
-    const nowMs = Date.now();
-    const ignoredAtMs = ignoredSshAuthStatusSessionIdsRef.current[sessionId];
-    if (!Number.isFinite(ignoredAtMs) || ignoredAtMs <= 0) {
-      pruneIgnoredSshAuthStatusSessions(nowMs, false);
-      return false;
-    }
-    if (nowMs - ignoredAtMs > IGNORED_SSH_AUTH_STATUS_SESSION_TTL_MS) {
-      delete ignoredSshAuthStatusSessionIdsRef.current[sessionId];
-      return false;
-    }
-    pruneIgnoredSshAuthStatusSessions(nowMs, false);
-    return true;
-  }, [pruneIgnoredSshAuthStatusSessions]);
-
-  const stagePendingSshStartupAuthStatus = useCallback((event: TerminalSshAuthStatusEvent) => {
-    pendingSshStartupAuthStatusBySessionIdRef.current = {
-      ...pendingSshStartupAuthStatusBySessionIdRef.current,
-      [event.sessionId]: event
-    };
-  }, []);
-
-  const takePendingSshStartupAuthStatus = useCallback(
-    (sessionId: string | null | undefined): TerminalSshAuthStatusEvent | null => {
-      if (!sessionId) {
-        return null;
-      }
-      const event = pendingSshStartupAuthStatusBySessionIdRef.current[sessionId] ?? null;
-      if (!event) {
-        return null;
-      }
-      pendingSshStartupAuthStatusBySessionIdRef.current = removeRecordEntry(
-        pendingSshStartupAuthStatusBySessionIdRef.current,
-        sessionId
-      );
-      return event;
-    },
-    []
-  );
-
-  const applyThreadSshStartupBlock = useCallback(
-    (threadId: string, event: TerminalSshAuthStatusEvent) => {
-      setSshStartupBlockModal({
-        sessionId: event.sessionId,
-        workspaceId: event.workspaceId,
-        threadId,
-        reason: event.reason
-      });
-      setSshStartupBlockedByThread((current) =>
-        current[threadId] === event.reason ? current : { ...current, [threadId]: event.reason }
-      );
-      setStartingByThread((current) => removeThreadFlag(current, threadId));
-      setReadyByThread((current) => removeThreadFlag(current, threadId));
-    },
-    []
-  );
-
-  const applyWorkspaceShellSshStartupBlock = useCallback((event: TerminalSshAuthStatusEvent) => {
-    setSshStartupBlockModal({
-      sessionId: event.sessionId,
-      workspaceId: event.workspaceId,
-      threadId: null,
-      reason: event.reason
-    });
-    setSshStartupBlockedShellByWorkspace((current) =>
-      current[event.workspaceId] === event.reason
-        ? current
-        : { ...current, [event.workspaceId]: event.reason }
-    );
-    setShellTerminalStarting(false);
-  }, []);
-
-  const ensureSessionForThread = useCallback(
-    async (thread: ThreadMetadata): Promise<string> => {
-      if (deletedThreadIdsRef.current[thread.id]) {
-        return '';
-      }
-      if (sshStartupBlockedByThreadRef.current[thread.id]) {
-        setStartingByThread((current) => removeThreadFlag(current, thread.id));
-        setReadyByThread((current) => removeThreadFlag(current, thread.id));
-        return '';
-      }
-      if (
-        !allowFreshStartAfterForkFailureByThreadRef.current[thread.id] &&
-        isThreadMissingClaimedForkSession(thread)
-      ) {
-        setForkResolutionFailureBlockedByThread((current) =>
-          current[thread.id] ? current : { ...current, [thread.id]: true }
-        );
-        setForkResolutionFailureModal((current) =>
-          current?.threadId === thread.id
-            ? current
-            : {
-                threadId: thread.id,
-                workspaceId: thread.workspaceId
-              }
-        );
-        setStartingByThread((current) => removeThreadFlag(current, thread.id));
-        setReadyByThread((current) => removeThreadFlag(current, thread.id));
-        return '';
-      }
-      if (
-        isThreadAwaitingConsumedForkResolution(thread)
-      ) {
-        setStartingByThread((current) => removeThreadFlag(current, thread.id));
-        setReadyByThread((current) => removeThreadFlag(current, thread.id));
-        return '';
-      }
-
-      const existing = activeRunsByThreadRef.current[thread.id]?.sessionId ?? null;
-      if (existing) {
-        const existingStream = terminalStreamsByThreadRef.current[thread.id];
-        const streamMatchesSession = existingStream?.sessionId === existing;
-        const pendingHydration = streamMatchesSession && existingStream?.phase === 'hydrating';
-        const sessionMeta = sessionMetaBySessionIdRef.current[existing];
-        void bootstrapThreadRuntimeCwdFromCodexSession(thread.id, existing);
-        const requiresReadySignal = requiresExplicitSshReadySignal(sessionMeta?.workspaceKind);
-        if (!runLifecycleByThreadRef.current[thread.id]) {
-          runLifecycleByThreadRef.current[thread.id] = createRunLifecycleState();
-        }
-        if (
-          (!requiresReadySignal && (!pendingHydration || hasCachedTerminalLog(thread.id))) ||
-          (requiresReadySignal && readyByThreadRef.current[thread.id])
-        ) {
-          setStartingByThread((current) => removeThreadFlag(current, thread.id));
-        }
-        if (streamMatchesSession && existingStream?.phase === 'ready' && !requiresReadySignal) {
-          runLifecycleByThreadRef.current[thread.id] = markRunReady(runLifecycleByThreadRef.current[thread.id]);
-          setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
-        } else {
-          if (!streamMatchesSession) {
-            updateThreadTerminalStream(thread.id, (current) => bindTerminalSessionStream(current, existing));
-          }
-          if (!requiresReadySignal) {
-            setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
-          }
-          if (!pendingHydration) {
-            void hydrateSessionSnapshot(thread.id, existing);
-          }
-        }
-        await flushPendingThreadInput(thread.id, existing);
-        return existing;
-      }
-
-      const inFlight = startingSessionByThreadRef.current[thread.id];
-      if (inFlight) {
-        return inFlight.promise;
-      }
-
-      const workspace = workspaces.find((item) => item.id === thread.workspaceId);
-      if (!workspace) {
-        throw new Error('Workspace not found for thread.');
-      }
-      const requestId = bumpSessionStartRequestId(thread.id);
-      setStartingByThread((current) => ({
-        ...current,
-        [thread.id]: true
-      }));
-      setReadyByThread((current) => removeThreadFlag(current, thread.id));
-
-      const startPromise = (async () => {
-        await waitForTerminalDataListenerReady();
-        const initialThreadCwd = await resolveInitialThreadCwd(thread, workspace);
-        if ((sessionStartRequestIdByThreadRef.current[thread.id] ?? 0) !== requestId) {
-          return '';
-        }
-        const response = await api.terminalStartSession({
-          workspacePath: workspace.path,
-          initialCwd: initialThreadCwd,
-          fullAccessFlag: thread.fullAccess,
-          threadId: thread.id
-        });
-
-        const sessionId = response.sessionId;
-        const discardStartedSession = async () => {
-          setStartingByThread((current) => removeThreadFlag(current, thread.id));
-          takePendingSshStartupAuthStatus(sessionId);
-          ignoreSshAuthStatusSession(sessionId);
-          try {
-            await api.terminalKill(sessionId);
-          } catch {
-            // best effort
-          }
-          return '';
-        };
-
-        if ((sessionStartRequestIdByThreadRef.current[thread.id] ?? 0) !== requestId) {
-          return discardStartedSession();
-        }
-
-        if (deletedThreadIdsRef.current[thread.id]) {
-          return discardStartedSession();
-        }
-
-        const threadStillExists =
-          findThreadById(threadByIdRef.current, thread.id)?.workspaceId === thread.workspaceId;
-        if (!threadStillExists) {
-          return discardStartedSession();
-        }
-
-        const pendingSshStartupAuthStatus = takePendingSshStartupAuthStatus(sessionId);
-        if (pendingSshStartupAuthStatus) {
-          applyThreadSshStartupBlock(thread.id, pendingSshStartupAuthStatus);
-          ignoreSshAuthStatusSession(sessionId);
-          try {
-            await api.terminalKill(sessionId);
-          } catch {
-            // best effort
-          }
-          return '';
-        }
-
-        if (isIgnoredSshAuthStatusSession(sessionId)) {
-          return discardStartedSession();
-        }
-        applyThreadUpdate(response.thread);
-
-        const startedAt = new Date().toISOString();
-        const sessionCurrentCwd = response.currentCwd?.trim() || initialThreadCwd;
-        const codexSessionId =
-          response.thread.codexSessionId?.trim() ||
-          response.resumeSessionId?.trim() ||
-          thread.codexSessionId?.trim() ||
-          null;
-        sessionMetaBySessionIdRef.current[sessionId] = {
-          threadId: thread.id,
-          workspaceId: thread.workspaceId,
-          workspaceKind: workspace.kind,
-          codexSessionId,
-          currentCwd: sessionCurrentCwd,
-          mode: response.sessionMode,
-          turnCompletionMode: response.turnCompletionMode ?? 'idle',
-          startedAtMs: Date.now()
-        };
-        rememberThreadRuntimeCwd(thread.id, sessionCurrentCwd);
-        bindSession(thread.id, sessionId, startedAt);
-        if ((response.turnCompletionMode ?? 'idle') === 'jsonl' && workspace.kind === 'local') {
-          resetThreadJsonlCompletionAttentionForSession(thread.id, codexSessionId);
-          if (codexSessionId) {
-            void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, codexSessionId);
-          }
-        }
-        setHasInteractedByThread((current) => removeThreadFlag(current, thread.id));
-
-        scheduleTerminalResize(sessionId, terminalSize.cols, terminalSize.rows, true);
-        await flushPendingThreadInput(thread.id, sessionId);
-        void hydrateSessionSnapshot(thread.id, sessionId);
-        return sessionId;
-      })()
-        .catch((error) => {
-          sessionFailCountByThreadRef.current[thread.id] =
-            (sessionFailCountByThreadRef.current[thread.id] ?? 0) + 1;
-          setStartingByThread((current) => removeThreadFlag(current, thread.id));
-          throw error;
-        })
-        .finally(() => {
-          if (startingSessionByThreadRef.current[thread.id]?.requestId === requestId) {
-            delete startingSessionByThreadRef.current[thread.id];
-          }
-        });
-
-      startingSessionByThreadRef.current[thread.id] = { requestId, promise: startPromise };
-      return startPromise;
-    },
-    [
-      applyThreadUpdate,
-      bindSession,
-      bootstrapThreadRuntimeCwdFromCodexSession,
-      bumpSessionStartRequestId,
-      flushPendingThreadInput,
-      hasCachedTerminalLog,
-      hydrateSessionSnapshot,
-      resolveInitialThreadCwd,
-      rememberThreadRuntimeCwd,
-      scheduleTerminalResize,
-      applyThreadSshStartupBlock,
-      isIgnoredSshAuthStatusSession,
-      ignoreSshAuthStatusSession,
-      reconcileThreadJsonlCompletionAttention,
-      resetThreadJsonlCompletionAttentionForSession,
-      terminalSize.cols,
-      terminalSize.rows,
-      takePendingSshStartupAuthStatus,
-      updateThreadTerminalStream,
-      waitForTerminalDataListenerReady,
-      workspaces
-    ]
-  );
-
-  const addAttachmentPathsForSelectedThread = useCallback(
-    (rawPaths: string[]) => {
-      if (!selectedThread) {
-        return 0;
-      }
-      return addAttachmentDraftPaths(selectedThread.id, rawPaths);
-    },
-    [addAttachmentDraftPaths, selectedThread]
-  );
-
-  const queueAttachmentPathsForSelectedThread = useCallback(
-    (rawPaths: string[], showMissingThreadToast = true) => {
-      if (!selectedThread) {
-        if (showMissingThreadToast) {
-          pushToast('Select a thread before adding attachments.', 'error');
-        }
-        return 0;
-      }
-      const added = addAttachmentPathsForSelectedThread(rawPaths);
-      if (added > 0) {
-        pushToast(`Queued ${added} attachment${added === 1 ? '' : 's'} for the next prompt.`, 'info');
-      }
-      return added;
-    },
-    [addAttachmentPathsForSelectedThread, pushToast, selectedThread]
-  );
-
-  const stopShellSessionForWorkspace = useCallback(
-    async (
-      workspaceId: string,
-      options?: {
-        closeDrawer?: boolean;
-        clearContent?: boolean;
-      }
-    ) => {
-      if (!workspaceId) {
-        return;
-      }
-
-      const ownsVisibleShellWorkspace = shellTerminalWorkspaceIdRef.current === workspaceId;
-      const ownsPendingShellStart = pendingShellSessionStartRef.current?.workspaceId === workspaceId;
-      const shouldCloseDrawer = Boolean(options?.closeDrawer) && ownsVisibleShellWorkspace;
-      invalidatePendingShellSessionStart(workspaceId);
-
-      const sessionId = ownsVisibleShellWorkspace ? shellTerminalSessionIdRef.current : null;
-
-      if (sessionId) {
-        ignoreSshAuthStatusSession(sessionId);
-        try {
-          await withTimeout(api.terminalKill(sessionId), 900);
-        } catch {
-          // best effort
-        }
-      }
-
-      if (ownsVisibleShellWorkspace || sessionId) {
-        setShellSessionBinding(null, null);
-      }
-
-      if (ownsVisibleShellWorkspace || ownsPendingShellStart) {
-        setShellTerminalStarting(false);
-      }
-
-      if (ownsVisibleShellWorkspace) {
-        setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
-      }
-
-      if ((options?.clearContent ?? true) && ownsVisibleShellWorkspace) {
-        setShellTerminalStream((current) =>
-          presentTerminalSnapshot(
-            current,
-            {
-              text: '',
-              startPosition: 0,
-              endPosition: 0,
-              truncated: false
-            },
-            TERMINAL_LOG_BUFFER_CHARS
-          )
-        );
-      }
-
-      if (shouldCloseDrawer) {
-        setShellDrawerOpen(false);
-      }
-    },
-    [ignoreSshAuthStatusSession, invalidatePendingShellSessionStart, setShellSessionBinding]
-  );
-
-  const startWorkspaceShellSession = useCallback(
-    async (workspace: Workspace): Promise<string | null> => {
-      if (workspace.kind === 'ssh' && sshStartupBlockedShellByWorkspaceRef.current[workspace.id]) {
-        setShellTerminalStarting(false);
-        return null;
-      }
-      const requestId = bumpShellSessionStartRequestId();
-      pendingShellSessionStartRef.current = {
-        requestId,
-        workspaceId: workspace.id
-      };
-      const isCurrentRequest = () =>
-        pendingShellSessionStartRef.current?.requestId === requestId &&
-        pendingShellSessionStartRef.current?.workspaceId === workspace.id;
-
-      const existingSessionId = shellTerminalSessionIdRef.current;
-      const existingWorkspaceId = shellTerminalWorkspaceIdRef.current;
-      if (existingSessionId && existingWorkspaceId === workspace.id) {
-        const stillAlive =
-          (await api
-          .terminalResize(existingSessionId, shellTerminalSize.cols, shellTerminalSize.rows)
-          .catch(() => false)) === true;
-        if (!isCurrentRequest()) {
-          return null;
-        }
-        if (stillAlive) {
-          pendingShellSessionStartRef.current = null;
-          setShellTerminalStarting(false);
-          return existingSessionId;
-        }
-        setShellSessionBinding(null, workspace.id);
-      }
-
-      if (existingSessionId && existingWorkspaceId && existingWorkspaceId !== workspace.id) {
-        ignoreSshAuthStatusSession(existingSessionId);
-        try {
-          await withTimeout(api.terminalKill(existingSessionId), 900);
-        } catch {
-          // best effort
-        }
-        if (shellTerminalSessionIdRef.current === existingSessionId) {
-          setShellSessionBinding(null, null);
-        }
-      }
-
-      setShellTerminalStarting(true);
-      if (existingWorkspaceId !== workspace.id) {
-        setShellTerminalStream((current) =>
-          presentTerminalSnapshot(
-            current,
-            {
-              text: '',
-              startPosition: 0,
-              endPosition: 0,
-              truncated: false
-            },
-            TERMINAL_LOG_BUFFER_CHARS
-          )
-        );
-      }
-      setShellSessionBinding(null, workspace.id);
-
-      try {
-        await waitForTerminalDataListenerReady();
-        const response = await api.workspaceShellStartSession({
-          workspacePath: workspace.path,
-          initialCwd: workspace.kind === 'local' ? workspace.path : null
-        });
-
-        if (!isCurrentRequest()) {
-          if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
-            console.debug('[workspace-shell] dropped stale session start', {
-              workspaceId: workspace.id,
-              sessionId: response.sessionId
+        const listAll = async (archived: boolean) => {
+          const data: CodexThread[] = [];
+          let cursor: string | null = null;
+          for (let pageIndex = 0; pageIndex < 10; pageIndex += 1) {
+            const page = await api.listCodexThreads({
+              workspacePath: workspace.path,
+              archived,
+              searchTerm: searchTerm || null,
+              cursor,
+              limit: 100
             });
+            data.push(...page.data);
+            cursor = page.nextCursor ?? null;
+            if (!cursor) break;
           }
-          takePendingSshStartupAuthStatus(response.sessionId);
-          ignoreSshAuthStatusSession(response.sessionId);
-          try {
-            await withTimeout(api.terminalKill(response.sessionId), 900);
-          } catch {
-            // best effort
-          }
-          return null;
+          return data;
+        };
+        const [activePage, archivedPage, uiMetadata] = await Promise.all([
+          listAll(false),
+          listAll(true),
+          api.listCodexThreadUiMetadata(workspace.id)
+        ]);
+        if (
+          refreshSequence !== threadRefreshSequence.current ||
+          selectedWorkspaceRef.current?.id !== workspace.id
+        ) {
+          return;
         }
-
-        const pendingSshStartupAuthStatus = takePendingSshStartupAuthStatus(response.sessionId);
-        if (pendingSshStartupAuthStatus) {
-          pendingShellSessionStartRef.current = null;
-          applyWorkspaceShellSshStartupBlock(pendingSshStartupAuthStatus);
-          ignoreSshAuthStatusSession(response.sessionId);
-          try {
-            await withTimeout(api.terminalKill(response.sessionId), 900);
-          } catch {
-            // best effort
-          }
-          return null;
-        }
-
-        if (isIgnoredSshAuthStatusSession(response.sessionId)) {
-          pendingShellSessionStartRef.current = null;
-          setShellTerminalStarting(false);
-          try {
-            await withTimeout(api.terminalKill(response.sessionId), 900);
-          } catch {
-            // best effort
-          }
-          return null;
-        }
-
-        pendingShellSessionStartRef.current = null;
-        setShellSessionBinding(response.sessionId, workspace.id);
-        setShellTerminalStarting(false);
-        void api.terminalResize(response.sessionId, shellTerminalSize.cols, shellTerminalSize.rows);
-        return response.sessionId;
+        codexStore.replaceWorkspaceThreads(workspace.path, false, activePage);
+        codexStore.replaceWorkspaceThreads(workspace.path, true, archivedPage);
+        const uiMap = Object.fromEntries(uiMetadata.map((item) => [item.threadId, item]));
+        metadataRef.current = { ...metadataRef.current, ...uiMap };
+        setMetadata((current) => ({ ...current, ...uiMap }));
+        setVisibleThreadIds([...activePage, ...archivedPage].map((thread) => thread.id));
       } catch (error) {
-        if (!isCurrentRequest()) {
-          return null;
+        if (refreshSequence === threadRefreshSequence.current) {
+          setThreadError(String(error));
         }
-        pendingShellSessionStartRef.current = null;
-        setShellTerminalStarting(false);
-        if (shellTerminalWorkspaceIdRef.current === workspace.id && shellTerminalSessionIdRef.current === null) {
-          setShellSessionBinding(null, workspace.id);
+      } finally {
+        if (refreshSequence === threadRefreshSequence.current) {
+          setLoadingThreads(false);
         }
-        throw error;
       }
     },
-    [
-      bumpShellSessionStartRequestId,
-      applyWorkspaceShellSshStartupBlock,
-      isIgnoredSshAuthStatusSession,
-      ignoreSshAuthStatusSession,
-      setShellSessionBinding,
-      shellTerminalSize.cols,
-      shellTerminalSize.rows,
-      takePendingSshStartupAuthStatus,
-      waitForTerminalDataListenerReady
-    ]
+    []
   );
 
-  const closeWorkspaceShellDrawer = useCallback(() => {
-    invalidatePendingShellSessionStart(shellTerminalWorkspaceIdRef.current);
-    setShellDrawerOpen(false);
-    setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
-  }, [invalidatePendingShellSessionStart]);
+  const ensureMetadata = useCallback(
+    async (
+      workspace: Workspace,
+      thread: CodexThread,
+      preferences: ThreadPreferences
+    ): Promise<CodexThreadUiMetadata> => {
+      const existing = metadataRef.current[thread.id];
+      if (existing) return existing;
+      const created = createUiMetadata(workspace, thread, preferences);
+      metadataRef.current = { ...metadataRef.current, [thread.id]: created };
+      setMetadata((current) => ({ ...current, [thread.id]: created }));
+      try {
+        const saved = await api.saveCodexThreadUiMetadata(created);
+        metadataRef.current = { ...metadataRef.current, [thread.id]: saved };
+        setMetadata((current) => ({ ...current, [thread.id]: saved }));
+        return saved;
+      } catch {
+        return created;
+      }
+    },
+    []
+  );
 
-  const toggleWorkspaceShellDrawer = useCallback(() => {
-    if (!selectedWorkspace) {
+  const openThread = useCallback(
+    async (threadId: string) => {
+      const workspace = selectedWorkspaceRef.current;
+      if (!workspace) return;
+      setSelectedThreadId(threadId);
+      selectedThreadIdRef.current = threadId;
+      codexStore.setActiveThread(threadId);
+      window.localStorage.setItem(
+        SELECTED_THREAD_KEY,
+        JSON.stringify({ workspaceId: workspace.id, threadId })
+      );
+      setRecoveringThread(true);
+      setThreadError(null);
+      const existing = codexStore.getSnapshot().threads[threadId];
+      const archived = existing?.archived === true;
+      const preferences = preferencesFromMetadata(metadataRef.current[threadId], settings);
+      try {
+        const read = await api.readCodexThread(threadId, true);
+        const hydrated = archived ? { ...read, archived: true } : read;
+        codexStore.upsertThreads([hydrated]);
+        const ui = await ensureMetadata(workspace, hydrated, preferences);
+        if (ui.unread || !ui.lastViewedAt) {
+          void persistMetadata({
+            ...ui,
+            unread: false,
+            lastViewedAt: nowIso(),
+            updatedAt: nowIso()
+          });
+        }
+        if (!archived) {
+          const session = await api.resumeCodexThread(workspace.path, threadId, preferences);
+          codexStore.setSession(session);
+        }
+      } catch (error) {
+        if (existing) codexStore.upsertThreads([existing]);
+        setThreadError(`Unable to resume this Codex thread: ${String(error)}`);
+      } finally {
+        setRecoveringThread(false);
+      }
+    },
+    [ensureMetadata, persistMetadata, settings]
+  );
+
+  const createThread = useCallback(async () => {
+    const workspace = selectedWorkspaceRef.current;
+    if (!workspace) {
+      showToast('Add a local project first', 'error');
       return;
     }
-
-    if (shellDrawerOpen && shellTerminalWorkspaceId === selectedWorkspace.id) {
-      closeWorkspaceShellDrawer();
-      return;
+    setThreadError(null);
+    setRecoveringThread(true);
+    try {
+      const preferences = preferencesFromSettings(settings);
+      const session = await api.startCodexThread(workspace.path, preferences, false);
+      codexStore.setSession(session);
+      setVisibleThreadIds((current) =>
+        current.includes(session.thread.id) ? current : [session.thread.id, ...current]
+      );
+      await ensureMetadata(workspace, session.thread, preferences);
+      setSelectedThreadId(session.thread.id);
+      selectedThreadIdRef.current = session.thread.id;
+      codexStore.setActiveThread(session.thread.id);
+      window.localStorage.setItem(
+        SELECTED_THREAD_KEY,
+        JSON.stringify({ workspaceId: workspace.id, threadId: session.thread.id })
+      );
+      window.dispatchEvent(new Event('atcontroller:focus-composer'));
+    } catch (error) {
+      setThreadError(`Could not create a Codex thread: ${String(error)}`);
+    } finally {
+      setRecoveringThread(false);
     }
+  }, [ensureMetadata, settings, showToast]);
 
-    setShellDrawerOpen(true);
-    setShellTerminalFocusRequestId((current) => current + 1);
-    if (selectedWorkspace.kind === 'ssh' && selectedShellSshStartupBlockReason) {
-      setShellTerminalStarting(false);
-      return;
-    }
-    void startWorkspaceShellSession(selectedWorkspace).catch((error) => {
-      pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.allSettled([
+      api.getSettings(),
+      api.listWorkspaces(),
+      api.getCodexDiagnostics(),
+      api.getAppStorageRoot(),
+      api.getCodexCatalog()
+    ]).then((results) => {
+      if (cancelled) return;
+      const [settingsResult, workspacesResult, diagnosticsResult, rootResult, catalogResult] = results;
+      if (settingsResult.status === 'fulfilled') {
+        setSettings(settingsResult.value);
+        const appearance = normalizeAppearanceMode(settingsResult.value.appearanceMode);
+        applyAppearanceMode(appearance);
+        persistAppearanceMode(appearance);
+      }
+      if (workspacesResult.status === 'fulfilled') {
+        const locals = workspacesResult.value;
+        setWorkspaces(locals);
+        setSelectedWorkspaceId((current) => {
+          const next = locals.some((workspace) => workspace.id === current)
+            ? current
+            : locals[0]?.id ?? null;
+          if (next) window.localStorage.setItem(SELECTED_WORKSPACE_KEY, next);
+          return next;
+        });
+      } else {
+        setFatalError(`Could not read ATController projects: ${String(workspacesResult.reason)}`);
+      }
+      if (diagnosticsResult.status === 'fulfilled') {
+        codexStore.setDiagnostics(diagnosticsResult.value);
+      }
+      if (rootResult.status === 'fulfilled') setDataRoot(rootResult.value);
+      if (catalogResult.status === 'fulfilled') {
+        setCatalog(catalogResult.value);
+      } else {
+        setFatalError(`Codex app server is unavailable: ${String(catalogResult.reason)}`);
+      }
+      setLoading(false);
     });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisten: Array<() => void> = [];
+    void apiModule.onCodexEvent((event: CodexEvent) => {
+      codexStore.queueEvent(event);
+      const workspace = selectedWorkspaceRef.current;
+      if (event.thread && workspace && workspaceMatchesThread(workspace, event.thread, metadataRef.current[event.thread.id])) {
+        setVisibleThreadIds((current) =>
+          current.includes(event.thread!.id) ? current : [event.thread!.id, ...current]
+        );
+      }
+      if (
+        event.kind === 'turnCompleted' &&
+        event.threadId &&
+        (event.threadId !== selectedThreadIdRef.current || document.hidden)
+      ) {
+        const completedThread =
+          event.thread ?? codexStore.getSnapshot().threads[event.threadId];
+        const workspace = selectedWorkspaceRef.current;
+        const markUnread = async () => {
+          const existing = metadataRef.current[event.threadId!];
+          if (existing) {
+            updateMetadata(event.threadId!, (current) => ({
+              ...current,
+              unread: true,
+              updatedAt: nowIso()
+            }));
+          } else if (
+            workspace &&
+            completedThread &&
+            workspaceMatchesThread(workspace, completedThread)
+          ) {
+            const created = await ensureMetadata(
+              workspace,
+              completedThread,
+              preferencesFromSettings(settingsRef.current)
+            );
+            await persistMetadata({ ...created, unread: true, updatedAt: nowIso() });
+          }
+        };
+        void markUnread();
+        if (settingsRef.current.taskCompletionAlerts !== false) {
+          const title = completedThread?.title || 'Codex thread';
+          const location = workspace?.name ? ` in ${workspace.name}` : '';
+          void api
+            .sendDesktopNotification('Codex finished', `${title} completed${location}.`)
+            .catch(() => undefined);
+        }
+      }
+      if (
+        event.kind === 'fileChangeUpdated' ||
+        event.kind === 'turnDiffUpdated' ||
+        event.item?.kind === 'fileChange'
+      ) {
+        scheduleGitRefresh();
+      }
+      if (
+        event.kind === 'accountUpdated' ||
+        event.kind === 'rateLimitsUpdated' ||
+        event.kind === 'accountLoginCompleted'
+      ) {
+        void api.getCodexCatalog().then(setCatalog).catch(() => undefined);
+      }
+    }).then((stop) => (disposed ? releaseTauriListener(stop) : unlisten.push(stop)));
+    void apiModule.onCodexRuntimeState((diagnostics) => {
+      const previous = connectionStateRef.current;
+      connectionStateRef.current = diagnostics.connectionState;
+      codexStore.setDiagnostics(diagnostics);
+      if (diagnostics.connectionState === 'ready') {
+        setFatalError(null);
+        void api.getCodexCatalog().then(setCatalog).catch(() => undefined);
+        if (
+          ['degraded', 'restarting', 'failed'].includes(previous) &&
+          selectedThreadIdRef.current
+        ) {
+          void openThread(selectedThreadIdRef.current);
+        }
+      }
+    }).then((stop) => (disposed ? releaseTauriListener(stop) : unlisten.push(stop)));
+    return () => {
+      disposed = true;
+      unlisten.forEach(releaseTauriListener);
+    };
   }, [
-    closeWorkspaceShellDrawer,
-    pushToast,
-    selectedShellSshStartupBlockReason,
-    selectedWorkspace,
-    shellDrawerOpen,
-    shellTerminalWorkspaceId,
-    startWorkspaceShellSession
+    ensureMetadata,
+    openThread,
+    persistMetadata,
+    scheduleGitRefresh,
+    updateMetadata
   ]);
 
   useEffect(() => {
-    if (!shellDrawerOpen) {
-      return;
-    }
-    if (!selectedWorkspace) {
-      invalidatePendingShellSessionStart();
-      setShellDrawerOpen(false);
-      setShellTerminalStarting(false);
-      return;
-    }
-    if (pendingShellSessionStartRef.current?.workspaceId === selectedWorkspace.id) {
-      return;
-    }
-    if (shellTerminalWorkspaceId === selectedWorkspace.id && shellTerminalSessionId) {
-      return;
-    }
-    if (selectedWorkspace.kind === 'ssh' && selectedShellSshStartupBlockReason) {
-      setShellTerminalStarting(false);
-      return;
-    }
-    void startWorkspaceShellSession(selectedWorkspace).catch((error) => {
-      pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
-    });
-  }, [
-    invalidatePendingShellSessionStart,
-    pushToast,
-    selectedShellSshStartupBlockReason,
-    selectedWorkspace,
-    shellDrawerOpen,
-    shellTerminalSessionId,
-    shellTerminalWorkspaceId,
-    startWorkspaceShellSession
-  ]);
+    const refreshVisibleProject = () => {
+      const workspace = selectedWorkspaceRef.current;
+      if (!workspace) return;
+      void refreshThreads(workspace);
+      void refreshGit(workspace);
+    };
+    window.addEventListener('focus', refreshVisibleProject);
+    return () => window.removeEventListener('focus', refreshVisibleProject);
+  }, [refreshGit, refreshThreads]);
 
-  const attemptAutoRecoverSelectedThread = useCallback(async () => {
-    const workspaceId = selectedWorkspaceIdRef.current;
-    const threadId = selectedThreadIdRef.current;
-    if (!workspaceId || !threadId) {
-      return;
-    }
-    const workspace = workspaces.find((item) => item.id === workspaceId);
-    if (!workspace || !isRemoteWorkspaceKind(workspace.kind)) {
-      return;
-    }
+  useEffect(() => {
+    if (!selectedWorkspace) return;
+    window.localStorage.setItem(SELECTED_WORKSPACE_KEY, selectedWorkspace.id);
+    setSelectedThreadId(null);
+    selectedThreadIdRef.current = null;
+    codexStore.setActiveThread(null);
+    setVisibleThreadIds([]);
+    restoredWorkspace.current = null;
+    void refreshThreads(selectedWorkspace);
+    void refreshGit(selectedWorkspace);
+    void api
+      .listCodexRuntimeSkills(selectedWorkspace.path)
+      .then((skills) => setRuntimeSkills(skills.filter((skill) => skill.enabled)))
+      .catch(() => setRuntimeSkills([]));
+  }, [refreshGit, refreshThreads, selectedWorkspace?.id]);
 
-    if (autoRecoverInFlightRef.current) {
-      return;
-    }
-    const now = Date.now();
-    if (now - lastAutoRecoverAttemptAtRef.current < AUTO_RECOVER_RETRY_COOLDOWN_MS) {
-      return;
-    }
-    lastAutoRecoverAttemptAtRef.current = now;
+  useEffect(() => {
+    if (!selectedWorkspace) return;
+    const query = filter.trim();
+    if (!query && !runtimeThreadFilter.current) return;
+    const workspace = selectedWorkspace;
+    const timer = window.setTimeout(() => {
+      runtimeThreadFilter.current = query;
+      void refreshThreads(workspace, query || undefined);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [filter, refreshThreads, selectedWorkspace?.id]);
 
-    const thread = findThreadById(threadByIdRef.current, threadId);
-    if (
-      !thread ||
-      thread.workspaceId !== workspaceId ||
-      deletedThreadIdsRef.current[thread.id] ||
-      startingSessionByThreadRef.current[thread.id]
-    ) {
-      return;
-    }
-    if ((sessionFailCountByThreadRef.current[thread.id] ?? 0) >= 3) {
-      return;
-    }
-
-    autoRecoverInFlightRef.current = true;
-    let sessionId = activeRunsByThreadRef.current[thread.id]?.sessionId ?? null;
+  useEffect(() => {
+    if (!selectedWorkspace || loadingThreads || restoredWorkspace.current === selectedWorkspace.id) return;
+    restoredWorkspace.current = selectedWorkspace.id;
+    let restoredId: string | null = null;
     try {
-      if (!sessionId) {
-        if (selectedThreadIdRef.current === thread.id) {
-          await ensureSessionForThread(thread);
-        }
-        return;
+      const stored = JSON.parse(window.localStorage.getItem(SELECTED_THREAD_KEY) ?? 'null') as {
+        workspaceId?: string;
+        threadId?: string;
+      } | null;
+      if (stored?.workspaceId === selectedWorkspace.id && stored.threadId && visibleThreadIds.includes(stored.threadId)) {
+        restoredId = stored.threadId;
       }
+    } catch {
+      // Invalid local UI state is non-fatal.
+    }
+    const firstActive = visibleThreads.find((thread) => !thread.archived)?.id;
+    const target = restoredId ?? firstActive ?? null;
+    if (target) void openThread(target);
+  }, [loadingThreads, openThread, selectedWorkspace, visibleThreadIds.join('|')]);
 
-      const hasCachedLog = hasCachedTerminalLog(thread.id);
-      const snapshot = await withTimeout(api.terminalReadOutput(sessionId), AUTO_RECOVER_SESSION_TIMEOUT_MS);
-      if (snapshot) {
-        const requiresReadySignal = requiresExplicitSshReadySignal(workspace.kind);
-        if (snapshot.text.length > 0 && !hasCachedLog) {
-          const presentedSnapshot = normalizeThreadTerminalSnapshot(thread.id, snapshot);
-          updateThreadTerminalStream(thread.id, (current) =>
-            current.sessionId === sessionId && current.phase === 'hydrating'
-              ? hydrateTerminalSessionStream(current, sessionId, presentedSnapshot, TERMINAL_LOG_BUFFER_CHARS)
-              : presentTerminalSnapshot(current, presentedSnapshot, TERMINAL_LOG_BUFFER_CHARS)
+  useEffect(() => {
+    window.localStorage.setItem(INSPECTOR_OPEN_KEY, String(inspectorOpen));
+  }, [inspectorOpen]);
+
+  const updateDraft = useCallback(
+    (value: string) => {
+      if (!selectedThread || !selectedWorkspace) return;
+      const current =
+        metadataRef.current[selectedThread.id] ??
+        createUiMetadata(selectedWorkspace, selectedThread, selectedPreferences);
+      const next = { ...current, draft: value, updatedAt: nowIso() };
+      metadataRef.current = { ...metadataRef.current, [selectedThread.id]: next };
+      setMetadata((all) => ({ ...all, [selectedThread.id]: next }));
+    },
+    [selectedPreferences, selectedThread, selectedWorkspace]
+  );
+
+  useEffect(() => {
+    if (!selectedMetadata) return;
+    const timer = window.setTimeout(() => {
+      void api.saveCodexThreadUiMetadata(selectedMetadata).catch(() => undefined);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [selectedMetadata?.draft]);
+
+  const updatePreferences = useCallback(
+    (preferences: ThreadPreferences) => {
+      if (!selectedThread || !selectedWorkspace) return;
+      const current =
+        metadataRef.current[selectedThread.id] ??
+        createUiMetadata(selectedWorkspace, selectedThread, preferences);
+      void persistMetadata({
+        ...current,
+        permissionMode: preferences.permissionMode,
+        requestedModel: preferences.model ?? null,
+        requestedReasoningEffort: preferences.reasoningEffort ?? null,
+        requestedServiceTier: preferences.serviceTier ?? null,
+        updatedAt: nowIso()
+      });
+    },
+    [persistMetadata, selectedThread, selectedWorkspace]
+  );
+
+  const submitInputs = useCallback(
+    async (inputs: ComposerInput[]) => {
+      if (!selectedThread || !selectedWorkspace) return;
+      setSubmitting(true);
+      setThreadError(null);
+      const text = inputs.find((input): input is Extract<ComposerInput, { type: 'text' }> => input.type === 'text')?.text;
+      try {
+        if (selectedRunningTurn) {
+          await api.steerCodexTurn(
+            selectedWorkspace.path,
+            selectedThread.id,
+            selectedRunningTurn.id,
+            inputs
+          );
+        } else {
+          await api.startCodexTurn(
+            selectedWorkspace.path,
+            selectedThread.id,
+            inputs,
+            selectedPreferences
           );
         }
-        if (!requiresReadySignal || readyByThreadRef.current[thread.id]) {
-          setStartingByThread((current) => removeThreadFlag(current, thread.id));
-        }
-        if (!requiresReadySignal && (snapshot.text.length > 0 || hasCachedLog)) {
-          setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
-        }
-        if (!hasCachedLog || snapshot.text.length === 0) {
-          void hydrateSessionSnapshot(thread.id, sessionId);
-        }
-      }
-      return;
-    } catch (error) {
-      if (!sessionId || !isTerminalSessionUnavailableError(error)) {
-        return;
-      }
-
-      clearThreadWorkingStopTimer(thread.id);
-      finishSessionBinding(sessionId);
-      clearTerminalSessionTracking(sessionId);
-      setStartingByThread((current) => removeThreadFlag(current, thread.id));
-      setReadyByThread((current) => removeThreadFlag(current, thread.id));
-
-      if (selectedThreadIdRef.current !== thread.id) {
-        return;
-      }
-
-      try {
-        await ensureSessionForThread(thread);
-      } catch (startError) {
-        pushToast(`Failed to recover terminal session: ${String(startError)}`, 'error');
-      }
-    } finally {
-      autoRecoverInFlightRef.current = false;
-    }
-  }, [
-    clearTerminalSessionTracking,
-    clearThreadWorkingStopTimer,
-    ensureSessionForThread,
-    finishSessionBinding,
-    hasCachedTerminalLog,
-    hydrateSessionSnapshot,
-    normalizeThreadTerminalSnapshot,
-    pushToast,
-    updateThreadTerminalStream,
-    workspaces
-  ]);
-
-  const pickAttachmentFiles = useCallback(async () => {
-    if (!selectedThread) {
-      pushToast('Select a thread before adding attachments.', 'error');
-      return;
-    }
-
-    try {
-      const picked = await open({
-        title: 'Add attachments',
-        directory: false,
-        multiple: true,
-        defaultPath: selectedWorkspace?.path
-      });
-
-      if (!picked) {
-        return;
-      }
-
-      queueAttachmentPathsForSelectedThread((Array.isArray(picked) ? picked : [picked]).filter(Boolean), false);
-    } catch (error) {
-      pushToast(`Attach failed: ${String(error)}`, 'error');
-    }
-  }, [pushToast, queueAttachmentPathsForSelectedThread, selectedThread, selectedWorkspace?.path]);
-
-  const addAttachmentPathsFromDrop = useCallback(
-    (paths: string[]) => {
-      return queueAttachmentPathsForSelectedThread(paths) > 0;
-    },
-    [queueAttachmentPathsForSelectedThread]
-  );
-
-  const removeSelectedThreadAttachmentPath = useCallback(
-    (path: string) => {
-      if (!selectedThread) {
-        return;
-      }
-      removeAttachmentDraftPath(selectedThread.id, path);
-    },
-    [removeAttachmentDraftPath, selectedThread]
-  );
-
-  const clearSelectedThreadAttachmentDraft = useCallback(() => {
-    if (!selectedThread) {
-      return;
-    }
-    clearAttachmentDraftForThread(selectedThread.id);
-  }, [clearAttachmentDraftForThread, selectedThread]);
-
-  const ensureLocalWorkspaceByPath = useCallback(
-    async (path: string, options?: { select?: boolean }) => {
-      const normalized = path.trim();
-      if (!normalized) {
-        throw new Error('Please enter a workspace path.');
-      }
-
-      const existingWorkspace = workspaces.find(
-        (workspace) => workspace.kind === 'local' && workspace.path === normalized
-      );
-      const workspace = existingWorkspace ?? (await api.addWorkspace(normalized));
-      setWorkspaces((current) => {
-        if (current.some((item) => item.id === workspace.id)) {
-          return current;
-        }
-        return [...current, workspace];
-      });
-      if (options?.select !== false) {
-        setSelectedWorkspace(workspace.id);
-        setSelectedThread(undefined);
-      }
-      await refreshThreadsForWorkspace(workspace.id);
-      return workspace;
-    },
-    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace, workspaces]
-  );
-
-  const addWorkspaceByPath = useCallback(
-    async (path: string) => {
-      return ensureLocalWorkspaceByPath(path, { select: true });
-    },
-    [ensureLocalWorkspaceByPath]
-  );
-
-  const addRdevWorkspaceByCommand = useCallback(
-    async (rdevSshCommand: string, displayName: string) => {
-      const command = rdevSshCommand.trim();
-      if (!command) {
-        throw new Error('Please enter an rdev ssh command.');
-      }
-
-      const workspace = await api.addRdevWorkspace(command, displayName.trim() || null);
-      setWorkspaces((current) => {
-        if (current.some((item) => item.id === workspace.id)) {
-          return current;
-        }
-        return [...current, workspace];
-      });
-      setSelectedWorkspace(workspace.id);
-      setSelectedThread(undefined);
-      await refreshThreadsForWorkspace(workspace.id);
-      return workspace;
-    },
-    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
-  );
-
-  const addSshWorkspaceByCommand = useCallback(
-    async (sshCommand: string, displayName: string, remotePath: string) => {
-      const command = sshCommand.trim();
-      if (!command) {
-        throw new Error('Please enter an ssh command.');
-      }
-
-      const workspace = await api.addSshWorkspace(
-        command,
-        displayName.trim() || null,
-        remotePath.trim() || null
-      );
-      setWorkspaces((current) => {
-        if (current.some((item) => item.id === workspace.id)) {
-          return current;
-        }
-        return [...current, workspace];
-      });
-      setSelectedWorkspace(workspace.id);
-      setSelectedThread(undefined);
-      await refreshThreadsForWorkspace(workspace.id);
-      return workspace;
-    },
-    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
-  );
-
-  const openWorkspacePicker = useCallback(() => {
-    setAddWorkspaceMode('local');
-    setAddWorkspacePath('');
-    setAddWorkspaceRdevCommand('');
-    setAddWorkspaceSshCommand('');
-    setAddWorkspaceSshRemotePath('');
-    setAddWorkspaceDisplayName('');
-    setAddWorkspaceError(null);
-    setAddWorkspaceOpen(true);
-  }, []);
-
-  const pickWorkspaceDirectory = useCallback(async () => {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: 'Select workspace folder'
-      });
-
-      if (!selected) {
-        return;
-      }
-
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (!path) {
-        return;
-      }
-
-      setAddWorkspacePath(path);
-    } catch (error) {
-      const message = `Add workspace failed: ${String(error)}`;
-      pushToast(message, 'error');
-      setAddWorkspaceError(message);
-      setAddWorkspaceOpen(true);
-    }
-  }, [pushToast]);
-
-  const confirmManualWorkspace = useCallback(
-    async (path: string) => {
-      setAddingWorkspace(true);
-      setAddWorkspaceError(null);
-      setAddWorkspaceMode('local');
-      setAddWorkspacePath(path);
-      setAddWorkspaceRdevCommand('');
-      setAddWorkspaceSshCommand('');
-      setAddWorkspaceSshRemotePath('');
-      try {
-        await addWorkspaceByPath(path);
-        setAddWorkspaceOpen(false);
-        setAddWorkspacePath('');
-        setAddWorkspaceRdevCommand('');
-        setAddWorkspaceSshCommand('');
-        setAddWorkspaceSshRemotePath('');
-        setAddWorkspaceError(null);
-      } catch (error) {
-        const message = String(error);
-        setAddWorkspaceError(message);
-        pushToast(message, 'error');
-      } finally {
-        setAddingWorkspace(false);
-      }
-    },
-    [addWorkspaceByPath, pushToast]
-  );
-
-  const confirmRdevWorkspace = useCallback(
-    async (rdevSshCommand: string, displayName: string) => {
-      setAddingWorkspace(true);
-      setAddWorkspaceError(null);
-      setAddWorkspaceMode('rdev');
-      setAddWorkspaceRdevCommand(rdevSshCommand);
-      setAddWorkspaceSshCommand('');
-      setAddWorkspaceSshRemotePath('');
-      setAddWorkspaceDisplayName(displayName);
-      try {
-        await addRdevWorkspaceByCommand(rdevSshCommand, displayName);
-        setAddWorkspaceOpen(false);
-        setAddWorkspaceRdevCommand('');
-        setAddWorkspaceSshCommand('');
-        setAddWorkspaceSshRemotePath('');
-        setAddWorkspaceDisplayName('');
-        setAddWorkspaceError(null);
-      } catch (error) {
-        const message = String(error);
-        setAddWorkspaceError(message);
-        pushToast(message, 'error');
-      } finally {
-        setAddingWorkspace(false);
-      }
-    },
-    [addRdevWorkspaceByCommand, pushToast]
-  );
-
-  const confirmSshWorkspace = useCallback(
-    async (sshCommand: string, displayName: string, remotePath: string) => {
-      setAddingWorkspace(true);
-      setAddWorkspaceError(null);
-      setAddWorkspaceMode('ssh');
-      setAddWorkspaceSshCommand(sshCommand);
-      setAddWorkspaceSshRemotePath(remotePath);
-      setAddWorkspaceDisplayName(displayName);
-      try {
-        await addSshWorkspaceByCommand(sshCommand, displayName, remotePath);
-        setAddWorkspaceOpen(false);
-        setAddWorkspaceSshCommand('');
-        setAddWorkspaceSshRemotePath('');
-        setAddWorkspaceDisplayName('');
-        setAddWorkspaceError(null);
-      } catch (error) {
-        const message = String(error);
-        setAddWorkspaceError(message);
-        pushToast(message, 'error');
-      } finally {
-        setAddingWorkspace(false);
-      }
-    },
-    [addSshWorkspaceByCommand, pushToast]
-  );
-
-  const onNewThreadInWorkspace = useCallback(
-    async (workspaceId: string, options?: CreateThreadOptions) => {
-      if (creatingThreadByWorkspaceRef.current[workspaceId]) {
-        return;
-      }
-
-      const resolvedOptions: CreateThreadOptions = {
-        ...(settings.defaultNewThreadFullAccess ? { fullAccess: true } : {}),
-        ...options
-      };
-
-      setWorkspaceCreatingThread(workspaceId, true);
-
-      try {
-        const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
-        if (workspace?.kind === 'local' && workspace.gitPullOnMasterForNewThreads) {
-          try {
-            const pullResult = await api.gitPullMasterForNewThread(workspace.path);
-            if (pullResult.outcome === 'pulled') {
-              pushToast(pullResult.message, 'info');
-              if (selectedWorkspaceIdRef.current === workspaceId) {
-                await refreshGitInfo();
-              }
-            } else {
-              pushToast(pullResult.message, 'error');
-            }
-          } catch (error) {
-            pushToast(`Git pull pre-step failed: ${String(error)}`, 'error');
-          }
-        }
-
-        if (selectedWorkspaceIdRef.current !== workspaceId) {
-          setSelectedWorkspace(workspaceId);
-        }
-        const thread = await createThread(workspaceId, resolvedOptions);
-        markThreadUserInput(workspaceId, thread.id);
-        delete deletedThreadIdsRef.current[thread.id];
-        primeRemoteThreadStartupOnSelection(thread, workspace ?? null);
-        setSelectedThread(thread.id);
-        setTerminalFocusRequestId((current) => current + 1);
-        await refreshThreadsForWorkspace(workspaceId);
-      } finally {
-        setWorkspaceCreatingThread(workspaceId, false);
-      }
-    },
-    [
-      createThread,
-      markThreadUserInput,
-      primeRemoteThreadStartupOnSelection,
-      pushToast,
-      refreshGitInfo,
-      refreshThreadsForWorkspace,
-      settings.defaultNewThreadFullAccess,
-      setWorkspaceCreatingThread,
-      setSelectedThread,
-      setSelectedWorkspace,
-      workspaces
-    ]
-  );
-
-  const onSetWorkspaceGitPullOnMasterForNewThreads = useCallback(
-    async (workspaceId: string, enabled: boolean) => {
-      setWorkspaces((current) =>
-        current.map((workspace) =>
-          workspace.id === workspaceId
-            ? {
-                ...workspace,
-                gitPullOnMasterForNewThreads: enabled,
-                updatedAt: new Date().toISOString()
-              }
-            : workspace
-        )
-      );
-      try {
-        const updatedWorkspace = await api.setWorkspaceGitPullOnMasterForNewThreads(workspaceId, enabled);
-        setWorkspaces((current) =>
-          current.map((workspace) => (workspace.id === updatedWorkspace.id ? updatedWorkspace : workspace))
-        );
-      } catch (error) {
-        pushToast(`Workspace setting update failed: ${String(error)}`, 'error');
-        await refreshWorkspaces();
-      }
-    },
-    [pushToast, refreshWorkspaces]
-  );
-
-  const onReorderWorkspaces = useCallback(
-    async (workspaceIds: string[]) => {
-      setWorkspaces((current) => reorderWorkspacesByIds(current, workspaceIds));
-      try {
-        const reordered = await api.setWorkspaceOrder(workspaceIds);
-        setWorkspaces(reordered);
-      } catch (error) {
-        pushToast(`Workspace reorder failed: ${String(error)}`, 'error');
-        await refreshWorkspaces();
-      }
-    },
-    [pushToast, refreshWorkspaces]
-  );
-
-  const onRenameThread = useCallback(
-    async (workspaceId: string, threadId: string, title: string) => {
-      try {
-        await renameThread(workspaceId, threadId, title);
-        await refreshThreadsForWorkspace(workspaceId);
-      } catch (error) {
-        pushToast(`Rename failed: ${String(error)}`, 'error');
-      }
-    },
-    [pushToast, refreshThreadsForWorkspace, renameThread]
-  );
-
-  const onDeleteThread = useCallback(
-    async (workspaceId: string, threadId: string) => {
-      const threadToDelete = findThreadById(threadByIdRef.current, threadId);
-      const threadName = threadToDelete?.title?.trim() || 'this thread';
-      const message =
-        `Delete "${threadName}" from ATController?\n\n` +
-        'This removes its saved ATController metadata and terminal logs. The source Codex session history remains in Codex.';
-      const confirmed = await confirm(message, {
-        title: 'ATController',
-        kind: 'warning',
-        okLabel: 'Delete',
-        cancelLabel: 'Cancel'
-      }).catch(() => window.confirm(message));
-      if (!confirmed) {
-        return;
-      }
-
-      deletedThreadIdsRef.current[threadId] = true;
-      invalidatePendingSessionStart(threadId);
-      clearThreadWorkingStopTimer(threadId);
-      stopThreadWorking(threadId);
-      const existingSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? runStore.sessionForThread(threadId);
-      if (existingSessionId) {
-        try {
-          await withTimeout(api.terminalSendSignal(existingSessionId, 'SIGINT'), 700);
-        } catch {
-          // best effort
-        }
-        await new Promise<void>((resolve) => {
-          window.setTimeout(() => resolve(), 80);
+        const current =
+          metadataRef.current[selectedThread.id] ??
+          createUiMetadata(selectedWorkspace, selectedThread, selectedPreferences);
+        const history = text?.trim()
+          ? [...current.promptHistory.filter((prompt) => prompt !== text.trim()), text.trim()].slice(-50)
+          : current.promptHistory;
+        await persistMetadata({
+          ...current,
+          draft: '',
+          promptHistory: history,
+          unread: false,
+          updatedAt: nowIso()
         });
-        try {
-          await withTimeout(api.terminalKill(existingSessionId), 900);
-        } catch {
-          // best effort
-        }
-        finishSessionBinding(existingSessionId);
-        clearTerminalSessionTracking(existingSessionId);
-      }
-
-      try {
-        await deleteThread(workspaceId, threadId);
+        setAttachmentsByThread((all) => ({ ...all, [selectedThread.id]: [] }));
+        setSkillsByThread((all) => ({ ...all, [selectedThread.id]: [] }));
       } catch (error) {
-        delete deletedThreadIdsRef.current[threadId];
-        pushToast(`Delete failed: ${String(error)}`, 'error');
-        return;
-      }
-      const deletedCodexSessionId = threadToDelete?.codexSessionId?.trim();
-      if (deletedCodexSessionId) {
-        suppressedRecentCodexSessionIdsRef.current.add(deletedCodexSessionId);
-        setRecentCodexThreads((current) =>
-          current.filter((thread) => thread.sessionId !== deletedCodexSessionId)
-        );
-        void refreshRecentCodexThreads();
-      }
-      const deletedThread = findThreadById(threadByIdRef.current, threadId);
-      if (deletedThread) {
-        applyThreadUpdate({
-          ...deletedThread,
-          isArchived: true
-        });
-      }
-      for (const [sessionId, meta] of Object.entries(sessionMetaBySessionIdRef.current)) {
-        if (meta.threadId !== threadId) {
-          continue;
-        }
-        clearTerminalSessionTracking(sessionId);
-      }
-      for (const [sessionId, pendingEvent] of Object.entries(pendingSshStartupAuthStatusBySessionIdRef.current)) {
-        if (pendingEvent.threadId === threadId) {
-          delete pendingSshStartupAuthStatusBySessionIdRef.current[sessionId];
-        }
-      }
-      for (const [sessionId, mappedThreadId] of Object.entries(threadIdBySessionIdRef.current)) {
-        if (mappedThreadId === threadId) {
-          delete threadIdBySessionIdRef.current[sessionId];
-        }
-      }
-      delete startingSessionByThreadRef.current[threadId];
-      delete pendingInputByThreadRef.current[threadId];
-      delete pendingSubmittedInputByThreadRef.current[threadId];
-      delete pendingSkillClearByThreadRef.current[threadId];
-      delete inputBufferByThreadRef.current[threadId];
-      delete inputControlCarryByThreadRef.current[threadId];
-      delete forkResolutionByThreadRef.current[threadId];
-      delete forkResolutionTimeoutNotifiedByThreadRef.current[threadId];
-      delete allowFreshStartAfterForkFailureByThreadRef.current[threadId];
-      delete threadTitleInitializedRef.current[threadId];
-      delete hiddenInjectedPromptsByThreadRef.current[threadId];
-      delete outputControlCarryByThreadRef.current[threadId];
-      delete sessionStartRequestIdByThreadRef.current[threadId];
-      delete threadWorkspaceKindByThreadIdRef.current[threadId];
-      delete jsonlCompletionSeededSessionIdByThreadRef.current[threadId];
-      delete draftAttachmentsByThreadRef.current[threadId];
-      deleteThreadAttentionState(threadId);
-      delete lastMeaningfulOutputByThreadRef.current[threadId];
-      delete lastSessionStartAtMsByThreadRef.current[threadId];
-      delete lastUserInputAtMsByThreadRef.current[threadId];
-      delete sessionFailCountByThreadRef.current[threadId];
-      delete runLifecycleByThreadRef.current[threadId];
-      setSshStartupBlockedByThread((current) => removeRecordEntry(current, threadId));
-      setSshStartupBlockModal((current) =>
-        current && current.threadId === threadId ? null : current
-      );
-      setForkResolutionFailureBlockedByThread((current) => removeRecordEntry(current, threadId));
-      setForkResolutionFailureModal((current) => (current?.threadId === threadId ? null : current));
-      setResumeFailureBlockedByThread((current) => removeRecordEntry(current, threadId));
-      setResumeFailureModal((current) => (current?.threadId === threadId ? null : current));
-      setHasInteractedByThread((current) => removeThreadFlag(current, threadId));
-      clearThreadTerminalStream(threadId);
-      setDraftAttachmentsByThread((current) => removeRecordEntry(current, threadId));
-      setStartingByThread((current) => removeThreadFlag(current, threadId));
-      setReadyByThread((current) => removeThreadFlag(current, threadId));
-
-      if (selectedThreadIdRef.current === threadId) {
-        setSelectedThread(undefined);
-      }
-
-      let refreshed = false;
-      try {
-        await refreshThreadsForWorkspace(workspaceId);
-        refreshed = true;
+        setThreadError(`Codex could not start this turn: ${String(error)}`);
       } finally {
-        if (refreshed) {
-          releaseRemovedThread(threadId);
-        }
-        delete deletedThreadIdsRef.current[threadId];
+        setSubmitting(false);
       }
     },
     [
-      applyThreadUpdate,
-      deleteThread,
-      finishSessionBinding,
-      invalidatePendingSessionStart,
-      pushToast,
-      refreshRecentCodexThreads,
-      refreshThreadsForWorkspace,
-      releaseRemovedThread,
-      runStore,
-      clearTerminalSessionTracking,
-      clearThreadWorkingStopTimer,
-      deleteThreadAttentionState,
-      stopThreadWorking,
-      setSelectedThread,
-      setHasInteractedByThread,
-      clearThreadTerminalStream
-    ]
-  );
-
-  const stopThreadSession = useCallback(
-    async (threadId: string) => {
-      invalidatePendingSessionStart(threadId);
-      const sessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? runStore.sessionForThread(threadId);
-      if (!sessionId) {
-        clearThreadRuntimeCwd(threadId);
-        return;
-      }
-
-      ignoreSshAuthStatusSession(sessionId);
-      try {
-        const snapshot = await withTimeout(api.terminalReadOutput(sessionId), 350);
-        if (snapshot?.text.length) {
-          presentThreadTerminalSnapshot(threadId, snapshot, sessionId);
-        }
-      } catch {
-        // best effort
-      }
-
-      try {
-        await withTimeout(api.terminalSendSignal(sessionId, 'SIGINT'), 700);
-      } catch {
-        // best effort
-      }
-      await new Promise<void>((resolve) => {
-        window.setTimeout(() => resolve(), 120);
-      });
-      try {
-        await withTimeout(api.terminalKill(sessionId), 900);
-      } catch {
-        // best effort
-      }
-      finishSessionBinding(sessionId);
-      const endedAt = new Date().toISOString();
-      setThreadRunState(threadId, 'Canceled', null, endedAt);
-      clearThreadWorkingStopTimer(threadId);
-      stopThreadWorking(threadId);
-      completeTurn(threadId, 'Canceled');
-      clearTerminalSessionTracking(sessionId);
-      clearThreadRuntimeCwd(threadId);
-      runLifecycleByThreadRef.current[threadId] = markRunExited();
-      setStartingByThread((current) => removeThreadFlag(current, threadId));
-      setReadyByThread((current) => removeThreadFlag(current, threadId));
-      setHasInteractedByThread((current) => removeThreadFlag(current, threadId));
-    },
-    [
-      completeTurn,
-      finishSessionBinding,
-      invalidatePendingSessionStart,
-      presentThreadTerminalSnapshot,
-      runStore,
-      setThreadRunState,
-      stopThreadWorking,
-      clearTerminalSessionTracking,
-      clearThreadRuntimeCwd,
-      clearThreadWorkingStopTimer,
-      ignoreSshAuthStatusSession,
-      setHasInteractedByThread,
-    ]
-  );
-
-  const switchToThread = useCallback(
-    async (workspaceId: string, threadId: string) => {
-      recordThreadVisibleOutput(threadId, true, Date.now(), lastTerminalLogByThreadRef.current[threadId] ?? '');
-      if (selectedWorkspaceIdRef.current !== workspaceId) {
-        setSelectedWorkspace(workspaceId);
-      }
-      const thread = findThreadById(threadByIdRef.current, threadId);
-      primeRemoteThreadStartupOnSelection(thread);
-      setSelectedThread(threadId);
-      setTerminalFocusRequestId((current) => current + 1);
-    },
-    [primeRemoteThreadStartupOnSelection, recordThreadVisibleOutput, setSelectedThread, setSelectedWorkspace]
-  );
-
-  const clearResumeFailureBlock = useCallback((threadId?: string | null) => {
-    if (!threadId) {
-      return;
-    }
-    setResumeFailureBlockedByThread((current) => removeRecordEntry(current, threadId));
-  }, []);
-
-  const clearForkResolutionFailureBlock = useCallback((threadId?: string | null) => {
-    if (!threadId) {
-      return;
-    }
-    setForkResolutionFailureBlockedByThread((current) => removeRecordEntry(current, threadId));
-  }, []);
-
-  const restartThreadSession = useCallback(
-    async (thread: ThreadMetadata) => {
-      clearResumeFailureBlock(thread.id);
-      clearForkResolutionFailureBlock(thread.id);
-      sessionFailCountByThreadRef.current[thread.id] = 0;
-      await stopThreadSession(thread.id);
-      if (selectedWorkspaceIdRef.current !== thread.workspaceId) {
-        setSelectedWorkspace(thread.workspaceId);
-      }
-      primeRemoteThreadStartupOnSelection(thread);
-      setSelectedThread(thread.id);
-      setForkResolutionFailureModal(null);
-      setResumeFailureModal(null);
-      void ensureSessionForThread(thread).catch((error) => {
-        pushToast(String(error), 'error');
-      });
-    },
-    [
-      clearResumeFailureBlock,
-      clearForkResolutionFailureBlock,
-      ensureSessionForThread,
-      primeRemoteThreadStartupOnSelection,
-      pushToast,
-      setSelectedThread,
-      setSelectedWorkspace,
-      stopThreadSession
-    ]
-  );
-
-  const retryBlockedSshStartup = useCallback(
-    async (blocked: SshStartupBlockModalState) => {
-      setSshStartupBlockModal(null);
-
-      if (blocked.threadId) {
-        setSshStartupBlockedByThread((current) => removeRecordEntry(current, blocked.threadId!));
-        const thread = findThreadById(threadByIdRef.current, blocked.threadId);
-        if (!thread) {
-          pushToast('Unable to locate the blocked thread for retry.', 'error');
-          return;
-        }
-        await restartThreadSession(thread);
-        return;
-      }
-
-      setSshStartupBlockedShellByWorkspace((current) => removeRecordEntry(current, blocked.workspaceId));
-      const workspace = workspaces.find((item) => item.id === blocked.workspaceId);
-      if (!workspace) {
-        pushToast('Unable to locate the blocked workspace terminal for retry.', 'error');
-        return;
-      }
-      if (selectedWorkspaceIdRef.current !== workspace.id) {
-        setSelectedWorkspace(workspace.id);
-      }
-      setShellDrawerOpen(true);
-      setShellTerminalFocusRequestId((current) => current + 1);
-      await startWorkspaceShellSession(workspace);
-    },
-    [pushToast, restartThreadSession, setSelectedWorkspace, startWorkspaceShellSession, workspaces]
-  );
-
-  const dismissSshStartupBlockModal = useCallback((blocked: SshStartupBlockModalState | null) => {
-    if (!blocked) {
-      return;
-    }
-
-    if (blocked.threadId) {
-      setSshStartupBlockedByThread((current) => removeRecordEntry(current, blocked.threadId!));
-      setStartingByThread((current) => removeThreadFlag(current, blocked.threadId!));
-      setReadyByThread((current) => removeThreadFlag(current, blocked.threadId!));
-    } else {
-      setSshStartupBlockedShellByWorkspace((current) => removeRecordEntry(current, blocked.workspaceId));
-      setShellTerminalStarting(false);
-    }
-
-    setSshStartupBlockModal((current) => (current?.sessionId === blocked.sessionId ? null : current));
-  }, []);
-
-  const onStartFreshThreadSession = useCallback(
-    async (thread: ThreadMetadata) => {
-      try {
-        clearResumeFailureBlock(thread.id);
-        clearForkResolutionFailureBlock(thread.id);
-        allowFreshStartAfterForkFailureByThreadRef.current[thread.id] = true;
-        sessionFailCountByThreadRef.current[thread.id] = 0;
-        const cleared = await api.clearThreadCodexSession(thread.workspaceId, thread.id);
-        applyThreadUpdate(cleared);
-        await restartThreadSession(cleared);
-      } catch (error) {
-        delete allowFreshStartAfterForkFailureByThreadRef.current[thread.id];
-        pushToast(`Failed to start a fresh session: ${String(error)}`, 'error');
-      }
-    },
-    [applyThreadUpdate, clearForkResolutionFailureBlock, clearResumeFailureBlock, pushToast, restartThreadSession]
-  );
-
-  const stopSessionsForWorkspace = useCallback(
-    async (workspaceId: string) => {
-      const workspaceThreads = threadsByWorkspaceRef.current[workspaceId] ?? [];
-      const activeThreadIds = new Set(Object.values(runStore.activeRunsByThread).map((run) => run.threadId));
-      for (const thread of workspaceThreads) {
-        if (!activeThreadIds.has(thread.id)) {
-          continue;
-        }
-        await stopThreadSession(thread.id);
-      }
-    },
-    [runStore.activeRunsByThread, stopThreadSession]
-  );
-
-  const onLoadBranchSwitcher = useCallback(async (): Promise<{
-    branches: GitBranchEntry[];
-    status: GitWorkspaceStatus | null;
-  }> => {
-    if (!selectedWorkspace || !gitInfo || selectedWorkspace.kind !== 'local' || !selectedGitContextPath) {
-      return { branches: [], status: null };
-    }
-    const [branches, status] = await Promise.all([
-      api.gitListBranches(selectedGitContextPath),
-      api.gitWorkspaceStatus(selectedGitContextPath)
-    ]);
-    return { branches, status };
-  }, [gitInfo, selectedGitContextPath, selectedWorkspace]);
-
-  const onCheckoutBranch = useCallback(
-    async (branchName: string) => {
-      if (!selectedWorkspace || selectedWorkspace.kind !== 'local' || !selectedGitContextPath) {
-        return false;
-      }
-      const workspaceId = selectedWorkspace.id;
-      suppressResumeFailureModalUntilByWorkspaceRef.current = {
-        ...suppressResumeFailureModalUntilByWorkspaceRef.current,
-        [workspaceId]: Date.now() + BRANCH_SWITCH_RESUME_FAILURE_SUPPRESS_MS
-      };
-
-      try {
-        await api.gitCheckoutBranch(selectedGitContextPath, branchName);
-        await refreshGitInfo();
-        await refreshSkillsForWorkspace(selectedWorkspace);
-        return true;
-      } catch (error) {
-        suppressResumeFailureModalUntilByWorkspaceRef.current = removeRecordEntry(
-          suppressResumeFailureModalUntilByWorkspaceRef.current,
-          workspaceId
-        );
-        pushToast(`Branch checkout failed: ${String(error)}`, 'error');
-        throw error;
-      }
-    },
-    [
-      pushToast,
-      refreshGitInfo,
-      refreshSkillsForWorkspace,
-      selectedGitContextPath,
+      persistMetadata,
+      selectedPreferences,
+      selectedRunningTurn,
+      selectedThread,
       selectedWorkspace
     ]
   );
 
-  useEffect(() => {
-    const init = async () => {
+  const stopTurn = useCallback(async () => {
+    if (!selectedThread || !selectedRunningTurn) return;
+    try {
+      await api.interruptCodexTurn(selectedThread.id, selectedRunningTurn.id);
+    } catch (error) {
+      showToast(`Could not interrupt the turn: ${String(error)}`, 'error');
+    }
+  }, [selectedRunningTurn, selectedThread, showToast]);
+
+  const revertGitFile = useCallback(
+    async (path: string) => {
+      const workspace = selectedWorkspaceRef.current;
+      if (!workspace) return;
+      const approved = await confirm(
+        `Revert all staged and unstaged changes to ${path}? This restores the file from HEAD.`,
+        { title: 'Revert file', kind: 'warning', okLabel: 'Revert' }
+      );
+      if (!approved) return;
       try {
-        await api.getAppStorageRoot();
-        await refreshWorkspaces();
-        const savedSettings = normalizeSettings(await api.getSettings());
-        setSettings(savedSettings);
-        persistAppearanceMode(savedSettings.appearanceMode ?? 'system');
-        const detected = await detectActiveCliPath();
-        setDetectedCliPath(detected);
-        const savedActiveCliPath = savedSettings.codexCliPath;
-        if (!detected && !savedActiveCliPath) {
-          setBlockingError(`${CODEX_LABEL} CLI is missing. Open Settings to configure the CLI path.`);
-        }
+        await api.gitRevertFile(workspace.path, path);
+        await refreshGit(workspace);
+        showToast('File restored from HEAD', 'success');
       } catch (error) {
-        setBlockingError(String(error));
+        showToast(`Could not revert file: ${String(error)}`, 'error');
       }
-    };
+    },
+    [refreshGit, showToast]
+  );
 
-    void init();
-  }, [refreshWorkspaces]);
-
-  useEffect(() => {
-    const appearanceMode = normalizeAppearanceMode(settings.appearanceMode);
-
-    const syncAppearance = () => {
-      const resolvedTheme = resolveAppearanceTheme(appearanceMode);
-      applyAppearanceMode(appearanceMode);
-      persistAppearanceMode(appearanceMode);
-      void setAppTheme(appearanceMode === 'system' ? null : resolvedTheme).catch(() => undefined);
-    };
-
-    syncAppearance();
-
-    if (appearanceMode !== 'system' || !window.matchMedia) {
-      return;
-    }
-
-    const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const handleChange = () => {
-      syncAppearance();
-    };
-
-    media.addEventListener?.('change', handleChange);
-    return () => {
-      media.removeEventListener?.('change', handleChange);
-    };
-  }, [settings.appearanceMode]);
-
-  useEffect(() => {
-    if (!settings.taskCompletionAlerts) {
-      taskCompletionAlertBootstrapAttemptedRef.current = false;
-      return;
-    }
-    if (taskCompletionAlertBootstrapAttemptedRef.current) {
-      return;
-    }
-    if (window.localStorage.getItem(TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY) === '1') {
-      return;
-    }
-
-    taskCompletionAlertBootstrapAttemptedRef.current = true;
-    void sendTaskCompletionAlertsEnabledConfirmation().then((sent) => {
-      if (sent) {
-        window.localStorage.setItem(TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY, '1');
+  const switchGitBranch = useCallback(
+    async (branchName: string) => {
+      const workspace = selectedWorkspaceRef.current;
+      if (!workspace || branchName === gitInfo?.branch) return;
+      if (selectedRunningTurn) {
+        showToast('Stop the active Codex turn before switching branches', 'error');
         return;
       }
-      pushToast(
-        'ATController could not queue a desktop notification. Check macOS notification settings after the first alert.',
-        'info'
+      const approved = await confirm(
+        `Switch ${workspace.name} to branch ${branchName}?`,
+        { title: 'Switch branch', kind: 'warning', okLabel: 'Switch' }
       );
-    });
-  }, [pushToast, settings.taskCompletionAlerts]);
+      if (!approved) return;
+      try {
+        await api.gitCheckoutBranch(workspace.path, branchName);
+        await refreshGit(workspace);
+        showToast(`Switched to ${branchName}`, 'success');
+      } catch (error) {
+        showToast(`Could not switch branch: ${String(error)}`, 'error');
+      }
+    },
+    [gitInfo?.branch, refreshGit, selectedRunningTurn, showToast]
+  );
 
-  useEffect(() => {
-    if (!selectedWorkspaceId) {
-      setSelectedThread(undefined);
-      return;
-    }
-
-    window.localStorage.setItem(SELECTED_WORKSPACE_KEY, selectedWorkspaceId);
-    void refreshThreadsForWorkspace(selectedWorkspaceId);
-  }, [refreshThreadsForWorkspace, selectedWorkspaceId, setSelectedThread]);
-
-  useEffect(() => {
-    if (workspaces.length === 0) {
-      setRecentCodexThreads([]);
-      return;
-    }
-
-    void Promise.all(
-      workspaces.map(async (workspace) => {
-        try {
-          await listThreads(workspace.id);
-        } catch {
-          // keep rendering other workspaces even if one fails to refresh
-        }
-      })
-    );
-  }, [listThreads, workspaces]);
-
-  useEffect(() => {
-    if (localWorkspaceHistoryKey === '[]') {
-      setRecentCodexThreads([]);
-      return;
-    }
-    void refreshRecentCodexThreads();
-    const interval = window.setInterval(() => {
-      void refreshRecentCodexThreads();
-    }, 60_000);
-    return () => window.clearInterval(interval);
-  }, [localWorkspaceHistoryKey, refreshRecentCodexThreads]);
-
-  useEffect(() => {
-    const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
-    setSkillsByWorkspaceId((current) =>
-      Object.fromEntries(Object.entries(current).filter(([workspaceId]) => workspaceIds.has(workspaceId)))
-    );
-    setSkillsLoadingByWorkspaceId((current) =>
-      Object.fromEntries(Object.entries(current).filter(([workspaceId]) => workspaceIds.has(workspaceId)))
-    );
-    setSkillErrorsByWorkspaceId((current) =>
-      Object.fromEntries(Object.entries(current).filter(([workspaceId]) => workspaceIds.has(workspaceId)))
-    );
-  }, [workspaces]);
-
-  useEffect(() => {
-    if (!selectedWorkspace) {
-      return;
-    }
-    void refreshSkillsForWorkspace(selectedWorkspace);
-  }, [refreshSkillsForWorkspace, selectedWorkspace]);
-
-  useEffect(() => {
-    if (!selectedWorkspace) {
-      gitInfoRequestIdRef.current += 1;
-      setGitInfo(null);
-      return;
-    }
-
-    void refreshGitInfo();
-    const id = window.setInterval(() => {
-      void refreshGitInfo();
-    }, 10000);
-
-    return () => window.clearInterval(id);
-  }, [refreshGitInfo, selectedWorkspace]);
-
-  useEffect(() => {
-    if (!selectedWorkspaceId || !selectedThreadId) {
-      return;
-    }
-    window.localStorage.setItem(threadSelectionKey(selectedWorkspaceId), selectedThreadId);
-  }, [selectedThreadId, selectedWorkspaceId]);
-
-  useEffect(() => {
-    if (!selectedThreadId) {
-      return;
-    }
-    if (isThreadVisibleToUser(selectedThreadId)) {
-      markThreadJsonlCompletionSeen(selectedThreadId, true);
-      recordThreadVisibleOutput(
-        selectedThreadId,
-        true,
-        Date.now(),
-        lastTerminalLogByThreadRef.current[selectedThreadId] ?? ''
-      );
-    }
-  }, [isThreadVisibleToUser, markThreadJsonlCompletionSeen, recordThreadVisibleOutput, selectedThreadId]);
-
-  useEffect(() => {
-    const markSelectedThreadVisible = () => {
-      const threadId = selectedThreadIdRef.current;
-      if (!threadId || document.visibilityState !== 'visible') {
+  const createGitBranch = useCallback(
+    async (branchName: string) => {
+      const workspace = selectedWorkspaceRef.current;
+      const name = branchName.trim();
+      if (!workspace || !name) return;
+      if (selectedRunningTurn) {
+        showToast('Stop the active Codex turn before creating a branch', 'error');
         return;
       }
-      markThreadJsonlCompletionSeen(threadId, true);
-      recordThreadVisibleOutput(threadId, true, Date.now(), lastTerminalLogByThreadRef.current[threadId] ?? '');
-    };
-
-    window.addEventListener('focus', markSelectedThreadVisible);
-    document.addEventListener('visibilitychange', markSelectedThreadVisible);
-    return () => {
-      window.removeEventListener('focus', markSelectedThreadVisible);
-      document.removeEventListener('visibilitychange', markSelectedThreadVisible);
-    };
-  }, [markThreadJsonlCompletionSeen, recordThreadVisibleOutput]);
-
-  useEffect(() => {
-    void api.setAppBadgeCount(unreadCompletedTurnCount > 0 ? unreadCompletedTurnCount : null).catch(() => undefined);
-  }, [unreadCompletedTurnCount]);
-
-  useEffect(() => {
-    if (!selectedWorkspaceId || !selectedThreadId || selectedSessionId) {
-      return;
-    }
-    if (startingByThread[selectedThreadId] || startingSessionByThreadRef.current[selectedThreadId]) {
-      return;
-    }
-    let cancelled = false;
-    void api
-      .terminalGetLastLog(selectedWorkspaceId, selectedThreadId)
-      .then((log) => {
-        if (cancelled) {
-          return;
-        }
-        if (
-          activeRunsByThreadRef.current[selectedThreadId]?.sessionId ||
-          startingSessionByThreadRef.current[selectedThreadId]
-        ) {
-          return;
-        }
-        presentThreadTerminalSnapshot(selectedThreadId, log);
-      })
-      .catch(() => {
-        if (cancelled) {
-          return;
-        }
-        if (
-          activeRunsByThreadRef.current[selectedThreadId]?.sessionId ||
-          startingSessionByThreadRef.current[selectedThreadId]
-        ) {
-          return;
-        }
-        clearThreadTerminalStream(selectedThreadId);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    clearThreadTerminalStream,
-    presentThreadTerminalSnapshot,
-    selectedSessionId,
-    selectedThreadId,
-    selectedWorkspaceId,
-    startingByThread
-  ]);
-
-  useEffect(() => {
-    if (!selectedThread) {
-      previousSelectedTerminalBindingRef.current = {
-        threadId: null,
-        sessionId: null
-      };
-      return;
-    }
-    const rememberSelectedTerminalBinding = (sessionId: string | null) => {
-      previousSelectedTerminalBindingRef.current = {
-        threadId: selectedThread.id,
-        sessionId
-      };
-    };
-    const currentSelectedBindingSessionId =
-      selectedSessionId ?? activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? null;
-    if (
-      !allowFreshStartAfterForkFailureByThreadRef.current[selectedThread.id] &&
-      isThreadMissingClaimedForkSession(selectedThread)
-    ) {
-      setForkResolutionFailureBlockedByThread((current) =>
-        current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
-      );
-      setForkResolutionFailureModal((current) =>
-        current?.threadId === selectedThread.id
-          ? current
-          : {
-              threadId: selectedThread.id,
-              workspaceId: selectedThread.workspaceId
-            }
-      );
-      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
-      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
-      return;
-    }
-    // Fork resolution runs in the background — don't block the terminal.
-    // The user may need to send the first message before the child JSONL
-    // appears (--fork-session clones), so input must stay enabled.
-    if (selectedThreadAwaitingForkResolution) {
-      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
-      return;
-    }
-    if (selectedThreadForkResolutionFailureBlocked) {
-      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
-      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
-      return;
-    }
-    if (selectedThreadResumeFailureBlocked) {
-      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
-      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
-      return;
-    }
-    if (selectedThreadSshStartupBlockReason) {
-      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
-      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
-      return;
-    }
-    if ((sessionFailCountByThreadRef.current[selectedThread.id] ?? 0) >= 3) {
-      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      rememberSelectedTerminalBinding(currentSelectedBindingSessionId);
-      return;
-    }
-    const existingSessionId = currentSelectedBindingSessionId;
-    if (existingSessionId) {
-      const canReuseMountedSelectedTerminal =
-        previousSelectedTerminalBindingRef.current.threadId === selectedThread.id &&
-        previousSelectedTerminalBindingRef.current.sessionId === existingSessionId;
-      const existingSessionMeta = sessionMetaBySessionIdRef.current[existingSessionId];
-      const requiresReadySignal = requiresExplicitSshReadySignal(
-        existingSessionMeta?.workspaceKind ?? selectedWorkspace?.kind
-      );
-      if (!requiresReadySignal || readyByThreadRef.current[selectedThread.id]) {
-        setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      } else {
-        setStartingByThread((current) =>
-          current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
-        );
+      try {
+        await api.gitCreateBranch(workspace.path, name);
+        await refreshGit(workspace);
+        showToast(`Created and switched to ${name}`, 'success');
+      } catch (error) {
+        showToast(`Could not create branch: ${String(error)}`, 'error');
       }
-      const stream = terminalStreamsByThreadRef.current[selectedThread.id];
-      const hasReadyStatefulStream =
-        stream?.sessionId === existingSessionId &&
-        stream.phase === 'ready' &&
-        shouldPreserveRawTerminalPresentation(stream.text);
-      const hasReadyReusablePlainStream =
-        stream?.sessionId === existingSessionId &&
-        stream.phase === 'ready' &&
-        !shouldPreserveRawTerminalPresentation(stream.text);
-      const shouldRebindReadyStatefulStream =
-        hasReadyStatefulStream && !requiresReadySignal && !canReuseMountedSelectedTerminal;
-      if (hasReadyStatefulStream && !requiresReadySignal && canReuseMountedSelectedTerminal) {
-        // Preserve the live xterm buffer across local resizes. Re-reading a
-        // ready fullscreen snapshot here collapses the stream back down to the
-        // latest repaint frame and discards pre-resize scrollback. Only reuse
-        // the live buffer while the same selected terminal stayed mounted.
-        setReadyByThread((current) =>
-          current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
-        );
-      } else if (hasReadyReusablePlainStream && !requiresReadySignal) {
-        setReadyByThread((current) =>
-          current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
-        );
+    },
+    [refreshGit, selectedRunningTurn, showToast]
+  );
+
+  const copyWorkingTreePatch = useCallback(async () => {
+    const workspace = selectedWorkspaceRef.current;
+    if (!workspace) return;
+    try {
+      const patch = await api.gitWorkspaceDiff(workspace.path);
+      if (!patch) {
+        showToast('There is no textual patch to copy', 'neutral');
+        return;
+      }
+      await copyText(patch, 'Working tree patch');
+    } catch (error) {
+      showToast(`Could not copy patch: ${String(error)}`, 'error');
+    }
+  }, [copyText, showToast]);
+
+  const respondToApproval = useCallback(
+    async (
+      approval: CodexApprovalRequest,
+      decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel'
+    ) => {
+      let response: ServerRequestResponse;
+      if (approval.approvalType === 'commandExecution') {
+        response = { type: 'command', requestId: approval.requestId, decision };
+      } else if (approval.approvalType === 'fileChange') {
+        response = { type: 'fileChange', requestId: approval.requestId, decision };
+      } else if (approval.approvalType === 'permissions') {
+        response = {
+          type: 'permissions',
+          requestId: approval.requestId,
+          grant: decision === 'accept' || decision === 'acceptForSession',
+          scope: decision === 'acceptForSession' ? 'session' : 'turn'
+        };
+      } else if (approval.approvalType === 'mcpElicitation') {
+        response = {
+          type: 'mcpElicitation',
+          requestId: approval.requestId,
+          action: decision === 'acceptForSession' ? 'accept' : decision
+        };
+      } else if (approval.approvalType === 'userInput' && decision === 'cancel') {
+        response = { type: 'userInput', requestId: approval.requestId, answers: {} };
       } else {
-        if (!requiresReadySignal) {
-          setReadyByThread((current) =>
-            current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
-          );
-        }
-        void hydrateSessionSnapshot(selectedThread.id, existingSessionId, {
-          rebindReadyStatefulStream: shouldRebindReadyStatefulStream
+        showToast('This approval type needs a newer ATController interaction surface.', 'error');
+        return;
+      }
+      try {
+        await api.respondToCodexRequest(response);
+        codexStore.dismissApproval(approval.requestId);
+      } catch (error) {
+        showToast(`Approval response failed: ${String(error)}`, 'error');
+      }
+    },
+    [showToast]
+  );
+
+  const respondToUserInput = useCallback(
+    async (approval: CodexApprovalRequest, answers: Record<string, string[]>) => {
+      try {
+        await api.respondToCodexRequest({
+          type: 'userInput',
+          requestId: approval.requestId,
+          answers
         });
+        codexStore.dismissApproval(approval.requestId);
+      } catch (error) {
+        showToast(`Could not send the requested input: ${String(error)}`, 'error');
       }
-      rememberSelectedTerminalBinding(existingSessionId);
-      return;
+    },
+    [showToast]
+  );
+
+  const pickProject = useCallback(async () => {
+    const selected = await open({ directory: true, multiple: false, title: 'Open a project in ATController' });
+    if (typeof selected !== 'string') return;
+    try {
+      const workspace = await api.addWorkspace(selected);
+      setWorkspaces((current) => {
+        const withoutDuplicate = current.filter((candidate) => candidate.id !== workspace.id);
+        return [...withoutDuplicate, workspace];
+      });
+      setSelectedWorkspaceId(workspace.id);
+    } catch (error) {
+      showToast(`Could not add project: ${String(error)}`, 'error');
     }
-    setStartingByThread((current) => ({
+  }, [showToast]);
+
+  const startChatgptLogin = useCallback(async () => {
+    setLoginBusy(true);
+    try {
+      const login = await api.startCodexChatgptLogin();
+      await api.openExternalUrl(login.authorizationUrl);
+      showToast('Finish signing in in your browser. ATController will reconnect automatically.');
+    } catch (error) {
+      showToast(`Could not start Codex sign-in: ${String(error)}`, 'error');
+    } finally {
+      setLoginBusy(false);
+    }
+  }, [showToast]);
+
+  const pickAttachments = useCallback(async () => {
+    if (!selectedWorkspace || !selectedThreadId) return;
+    const selected = await open({
+      multiple: true,
+      directory: false,
+      title: 'Attach files to this Codex turn'
+    });
+    const paths = typeof selected === 'string' ? [selected] : selected ?? [];
+    if (!paths.length) return;
+    const added = paths.map((path) => attachmentFromPath(path, selectedWorkspace.path));
+    const outsideCount = added.filter((attachment) => attachment.outsideWorkspace).length;
+    if (outsideCount) {
+      const approved = await confirm(
+        `${outsideCount === 1 ? 'This file is' : 'Some files are'} outside ${selectedWorkspace.name}. Share with Codex for this turn?`,
+        { title: 'Share external attachment', kind: 'warning' }
+      );
+      if (!approved) return;
+    }
+    setAttachmentsByThread((current) => ({
       ...current,
-      [selectedThread.id]: true
+      [selectedThreadId]: [...(current[selectedThreadId] ?? []), ...added]
     }));
-    setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
-
-    void ensureSessionForThread(selectedThread).catch((error) => {
-      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      pushToast(`Failed to start ${CODEX_LABEL} session: ${String(error)}`, 'error');
-    });
-    rememberSelectedTerminalBinding(null);
-  }, [
-    ensureSessionForThread,
-    hasCachedTerminalLog,
-    hydrateSessionSnapshot,
-    pushToast,
-    selectedSessionId,
-    terminalSize.cols,
-    terminalSize.rows,
-    updateThreadTerminalStream,
-    selectedThreadForkResolutionFailureBlocked,
-    selectedThreadAwaitingForkResolution,
-    selectedThreadResumeFailureBlocked,
-    selectedThreadSshStartupBlockReason,
-    selectedWorkspace?.kind,
-    selectedThread,
-    CODEX_LABEL
-  ]);
-
-  useEffect(() => {
-    if (!selectedThread || !selectedWorkspace || isRemoteWorkspaceKind(selectedWorkspace.kind)) {
-      return;
-    }
-    if (!isUuidLike(selectedThread.pendingForkSourceCodexSessionId?.trim() ?? '')) {
-      return;
-    }
-
-    const activeSessionId =
-      selectedSessionId ?? activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? null;
-    if (!selectedThread.pendingForkLaunchConsumed && !activeSessionId) {
-      return;
-    }
-    if (suppressAutoForkResolutionByThreadRef.current[selectedThread.id]) {
-      return;
-    }
-
-    void resolvePendingThreadFork(selectedThread.id);
-  }, [resolvePendingThreadFork, selectedSessionId, selectedThread, selectedWorkspace]);
-
-  useEffect(() => {
-    if (!selectedWorkspace || !isRemoteWorkspaceKind(selectedWorkspace.kind)) {
-      return;
-    }
-
-    const recover = () => {
-      if (document.visibilityState === 'hidden') {
-        return;
-      }
-      void attemptAutoRecoverSelectedThread();
-    };
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState !== 'visible') {
-        return;
-      }
-      recover();
-    };
-
-    window.addEventListener('focus', recover);
-    window.addEventListener('online', recover);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-
-    return () => {
-      window.removeEventListener('focus', recover);
-      window.removeEventListener('online', recover);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [attemptAutoRecoverSelectedThread, selectedWorkspace]);
-
-  const handleTerminalDataEvent = useCallback(
-    (event: TerminalDataEvent) => {
-      if (isIgnoredSshAuthStatusSession(event.sessionId)) {
-        return;
-      }
-
-      if (shellTerminalSessionIdRef.current === event.sessionId && !event.threadId) {
-        setShellTerminalStarting(false);
-        setShellTerminalStream((current) => {
-          const boundState =
-            current.sessionId !== event.sessionId
-              ? bindLiveTerminalSessionStream(current, event.sessionId)
-              : current.phase === 'hydrating'
-                ? hydrateTerminalSessionStream(
-                    current,
-                    event.sessionId,
-                    {
-                      text: '',
-                      startPosition: 0,
-                      endPosition: 0,
-                      truncated: false
-                    },
-                    TERMINAL_LOG_BUFFER_CHARS
-                  )
-                : current;
-          if (event.endPosition <= terminalSessionStreamKnownRawEndPosition(boundState)) {
-            return boundState;
-          }
-          return appendTerminalStreamChunk(boundState, event, TERMINAL_LOG_BUFFER_CHARS);
-        });
-        return;
-      }
-
-      const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
-      const threadId =
-        event.threadId ??
-        sessionMeta?.threadId ??
-        threadIdBySessionIdRef.current[event.sessionId];
-      if (!threadId) {
-        queuePendingTerminalDataEvent(event);
-        return;
-      }
-
-      const workspaceKind =
-        sessionMeta?.workspaceKind ??
-        threadWorkspaceKindByThreadIdRef.current[threadId] ??
-        (threadId === selectedThreadIdRef.current && selectedWorkspaceIdRef.current
-          ? workspaces.find((workspace) => workspace.id === selectedWorkspaceIdRef.current)?.kind ?? null
-          : null);
-      const requiresReadySignal = requiresExplicitSshReadySignal(workspaceKind);
-
-      const activeSessionIdForThread = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
-      if (activeSessionIdForThread && activeSessionIdForThread !== event.sessionId) {
-        const mappedThreadIdForEventSession = threadIdBySessionIdRef.current[event.sessionId] ?? sessionMeta?.threadId ?? null;
-        if (mappedThreadIdForEventSession === threadId) {
-          activeRunsByThreadRef.current = {
-            ...activeRunsByThreadRef.current,
-            [threadId]: {
-              threadId,
-              sessionId: event.sessionId,
-              startedAt: activeRunsByThreadRef.current[threadId]?.startedAt ?? new Date().toISOString()
-            }
-          };
-          runStore.bindSession(
-            threadId,
-            event.sessionId,
-            activeRunsByThreadRef.current[threadId]?.startedAt ?? new Date().toISOString()
-          );
-        } else {
-          if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
-            console.debug('[terminal-data] dropped chunk for inactive session', {
-              eventSessionId: event.sessionId,
-              activeSessionId: activeSessionIdForThread,
-              threadId
-            });
-          }
-          return;
-        }
-      }
-
-      const currentStream = terminalStreamsByThreadRef.current[threadId];
-      if (
-        currentStream &&
-        currentStream.sessionId === event.sessionId &&
-        event.endPosition <= terminalSessionStreamKnownRawEndPosition(currentStream)
-      ) {
-        return;
-      }
-
-      const visibleEventData = stripThreadHiddenInjectedPrompts(threadId, event.data);
-      const terminalShowsIdlePrompt = hasShellPromptInSnapshot(visibleEventData);
-      const hasMeaningfulOutput = noteTurnOutput(threadId, visibleEventData);
-      const isSelectedThread = selectedThreadIdRef.current === threadId;
-      const nowMs = Date.now();
-      runLifecycleByThreadRef.current[threadId] = noteRunOutput(
-        runLifecycleByThreadRef.current[threadId],
-        hasMeaningfulOutput,
-        nowMs
-      );
-
-      const maybeResolveStuckStreaming = () => {
-        if (!workingByThreadRef.current[threadId]) {
-          return;
-        }
-        if (usesStructuredCompletionForThread(threadId)) {
-          return;
-        }
-        if (!isStreamingStuck(runLifecycleByThreadRef.current[threadId], nowMs, THREAD_WORKING_STUCK_TIMEOUT_MS)) {
-          return;
-        }
-        clearThreadWorkingStopTimer(threadId);
-        stopThreadWorking(threadId);
-      };
-
-      if (isSelectedThread) {
-        if (!requiresReadySignal) {
-          setStartingByThread((current) => removeThreadFlag(current, threadId));
-          setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-        }
-      }
-      const hasCompletedTurn = hasCompletedAttentionTurn(threadAttentionByThreadRef.current[threadId]);
-      if (workingByThreadRef.current[threadId]) {
-        if (terminalShowsIdlePrompt) {
-          clearThreadWorkingStopTimer(threadId);
-          stopThreadWorking(threadId);
-        } else {
-          scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
-          if (!hasMeaningfulOutput) {
-            maybeResolveStuckStreaming();
-          }
-        }
-      } else if (
-        hasMeaningfulOutput &&
-        activeRunsByThreadRef.current[threadId] &&
-        hasUserSentMessageInCurrentSession(threadId) &&
-        !(hasCompletedTurn && resolveThreadTurnCompletionMode(threadId) === 'jsonl')
-      ) {
-        // Session still alive but working timer expired — re-enter working state.
-        clearThreadWorkingStopTimer(threadId);
-        startThreadWorking(threadId);
-        scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
-      }
-      appendTerminalLogChunk(threadId, {
-        ...event,
-        data: event.data
-      });
-    },
-    [
-      appendTerminalLogChunk,
-      clearThreadWorkingStopTimer,
-      hasUserSentMessageInCurrentSession,
-      isIgnoredSshAuthStatusSession,
-      noteTurnOutput,
-      queuePendingTerminalDataEvent,
-      resolveThreadTurnCompletionMode,
-      stripThreadHiddenInjectedPrompts,
-      setShellTerminalStream,
-      startThreadWorking,
-      stopThreadWorking,
-      scheduleThreadWorkingStop,
-      usesStructuredCompletionForThread,
-      workspaces
-    ]
-  );
-
-  const handleTerminalReadyEvent = useCallback((event: TerminalReadyEvent) => {
-    if (isIgnoredSshAuthStatusSession(event.sessionId)) {
-      return;
-    }
-
-    if (shellTerminalSessionIdRef.current === event.sessionId && !event.threadId) {
-      if (shellTerminalWorkspaceIdRef.current) {
-        setSshStartupBlockedShellByWorkspace((current) =>
-          removeRecordEntry(current, shellTerminalWorkspaceIdRef.current!)
-        );
-      }
-      setSshStartupBlockModal((current) => (current?.sessionId === event.sessionId ? null : current));
-      setShellTerminalStarting(false);
-      return;
-    }
-
-    const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
-    const threadId =
-      event.threadId ??
-      sessionMeta?.threadId ??
-      threadIdBySessionIdRef.current[event.sessionId];
-    if (!threadId) {
-      return;
-    }
-
-    const activeSessionIdForThread = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
-    if (activeSessionIdForThread && activeSessionIdForThread !== event.sessionId) {
-      return;
-    }
-
-    runLifecycleByThreadRef.current[threadId] = markRunReady(runLifecycleByThreadRef.current[threadId]);
-    setSshStartupBlockedByThread((current) => removeRecordEntry(current, threadId));
-    setSshStartupBlockModal((current) => (current?.sessionId === event.sessionId ? null : current));
-    setStartingByThread((current) => removeThreadFlag(current, threadId));
-    setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-  }, [isIgnoredSshAuthStatusSession]);
-
-  const handleTerminalSshAuthStatusEvent = useCallback(
-    (event: TerminalSshAuthStatusEvent) => {
-      if (isIgnoredSshAuthStatusSession(event.sessionId)) {
-        return;
-      }
-
-      const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
-      const threadId =
-        event.threadId ??
-        sessionMeta?.threadId ??
-        threadIdBySessionIdRef.current[event.sessionId] ??
-        null;
-
-      if (threadId) {
-        const activeSessionIdForThread = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
-        if (activeSessionIdForThread && activeSessionIdForThread !== event.sessionId) {
-          return;
-        }
-        if (!activeSessionIdForThread) {
-          if (!startingSessionByThreadRef.current[threadId]) {
-            return;
-          }
-          stagePendingSshStartupAuthStatus(event);
-          ignoreSshAuthStatusSession(event.sessionId);
-          void api.terminalKill(event.sessionId).catch(() => undefined);
-          return;
-        }
-
-        ignoreSshAuthStatusSession(event.sessionId);
-        applyThreadSshStartupBlock(threadId, event);
-        void stopThreadSession(threadId).catch(() => undefined);
-        return;
-      }
-
-      const activeShellSessionId =
-        shellTerminalWorkspaceIdRef.current === event.workspaceId ? shellTerminalSessionIdRef.current : null;
-      if (activeShellSessionId && activeShellSessionId !== event.sessionId) {
-        return;
-      }
-      if (!activeShellSessionId) {
-        if (pendingShellSessionStartRef.current?.workspaceId !== event.workspaceId) {
-          return;
-        }
-        stagePendingSshStartupAuthStatus(event);
-        ignoreSshAuthStatusSession(event.sessionId);
-        void api.terminalKill(event.sessionId).catch(() => undefined);
-        return;
-      }
-
-      ignoreSshAuthStatusSession(event.sessionId);
-      applyWorkspaceShellSshStartupBlock(event);
-      if (shellTerminalSessionIdRef.current === event.sessionId) {
-        void stopShellSessionForWorkspace(event.workspaceId, { clearContent: false }).catch(() => undefined);
-      } else {
-        void api.terminalKill(event.sessionId).catch(() => undefined);
-      }
-    },
-    [
-      applyThreadSshStartupBlock,
-      applyWorkspaceShellSshStartupBlock,
-      isIgnoredSshAuthStatusSession,
-      ignoreSshAuthStatusSession,
-      stagePendingSshStartupAuthStatus,
-      stopShellSessionForWorkspace,
-      stopThreadSession
-    ]
-  );
-
-  const handleTerminalTurnCompletedEvent = useCallback(
-    (event: TerminalTurnCompletedEvent) => {
-      const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
-      const threadId =
-        event.threadId ??
-        sessionMeta?.threadId ??
-        threadIdBySessionIdRef.current[event.sessionId];
-      if (!threadId) {
-        return;
-      }
-
-      const activeSessionIdForThread =
-        activeRunsByThreadRef.current[threadId]?.sessionId ?? runStore.sessionForThread(threadId) ?? null;
-      if (activeSessionIdForThread !== event.sessionId) {
-        return;
-      }
-
-      const currentCwd = event.currentCwd?.trim() ?? '';
-      if (currentCwd) {
-        if (sessionMeta) {
-          sessionMeta.currentCwd = currentCwd;
-        }
-        rememberThreadRuntimeCwd(threadId, currentCwd);
-      }
-
-      clearThreadWorkingStopTimer(threadId);
-      stopThreadWorking(threadId);
-
-      const completionStatus: ThreadAttentionCompletionStatus = event.status === 'Failed' ? 'Failed' : 'Succeeded';
-      const completedAtMs = event.completedAtMs ?? Date.now();
-      const previousAttentionState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
-      const shouldSeedMeaningfulOutput =
-        event.hasMeaningfulOutput === true &&
-        previousAttentionState.activeTurnId !== null &&
-        previousAttentionState.activeTurnStatus === 'running';
-      if (shouldSeedMeaningfulOutput) {
-        commitThreadAttentionState(threadId, {
-          ...previousAttentionState,
-          activeTurnStatus: 'running',
-          activeTurnHasMeaningfulOutput: true,
-          activeTurnLastOutputAtMs: previousAttentionState.activeTurnLastOutputAtMs ?? completedAtMs
-        });
-        if (isThreadVisibleToUser(threadId)) {
-          recordThreadVisibleOutput(threadId, false, completedAtMs, lastTerminalLogByThreadRef.current[threadId] ?? '');
-        }
-      }
-
-      const jsonlAttentionContext = resolveJsonlCompletionAttentionContext(threadId, event.sessionId);
-      if (!jsonlAttentionContext.usesJsonlAttention) {
-        const completedAttentionState = completeTurn(threadId, completionStatus, completedAtMs);
-        if (
-          completedAttentionState.lastCompletedTurnIdWithOutput > previousAttentionState.lastCompletedTurnIdWithOutput ||
-          (
-            completedAttentionState.lastCompletedTurnIdWithOutput === previousAttentionState.lastCompletedTurnIdWithOutput &&
-            completedAttentionState.lastCompletedTurnStatus !== previousAttentionState.lastCompletedTurnStatus &&
-            shouldNotifyAttentionTurn(completedAttentionState)
-          )
-        ) {
-          notifyCompletedTurnIfNeeded(threadId, completedAttentionState);
-        }
-        return;
-      }
-
-      completeTurn(threadId, completionStatus, completedAtMs);
-      const codexSessionId = jsonlAttentionContext.codexSessionId;
-      const isQualifyingJsonlCompletion =
-        event.completionIndex !== null &&
-        event.completionIndex !== undefined &&
-        (event.hasMeaningfulOutput === true || completionStatus === 'Failed');
-      if (isQualifyingJsonlCompletion && codexSessionId) {
-        observeThreadJsonlCompletion(
-          threadId,
-          codexSessionId,
-          {
-            codexSessionId,
-            completionIndex: event.completionIndex!,
-            completedAtMs,
-            status: completionStatus,
-            hasMeaningfulOutput: event.hasMeaningfulOutput === true
-          },
-          { persistNow: true }
-        );
-      }
-    },
-    [
-      clearThreadWorkingStopTimer,
-      commitThreadAttentionState,
-      completeTurn,
-      isThreadVisibleToUser,
-      notifyCompletedTurnIfNeeded,
-      observeThreadJsonlCompletion,
-      recordThreadVisibleOutput,
-      resolveJsonlCompletionAttentionContext,
-      rememberThreadRuntimeCwd,
-      runStore,
-      stopThreadWorking
-    ]
-  );
-
-  const handleTerminalExitEvent = useCallback(
-    (event: TerminalExitEvent) => {
-      const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
-      ignoreSshAuthStatusSession(event.sessionId);
-      if (event.persistenceError) {
-        pushToast(
-          `ATController could not save complete terminal history: ${event.persistenceError}`,
-          'error'
-        );
-      }
-
-      if (shellTerminalSessionIdRef.current === event.sessionId) {
-        clearTerminalSessionTracking(event.sessionId);
-        invalidatePendingShellSessionStart(shellTerminalWorkspaceIdRef.current);
-        setShellSessionBinding(null, shellTerminalWorkspaceIdRef.current);
-        return;
-      }
-
-      const endedThreadId = finishSessionBinding(event.sessionId);
-      clearTerminalSessionTracking(event.sessionId);
-      if (!endedThreadId) {
-        return;
-      }
-      runLifecycleByThreadRef.current[endedThreadId] = markRunExited();
-      const exitStatus = statusFromExit(event);
-      setStartingByThread((current) => removeThreadFlag(current, endedThreadId));
-      setReadyByThread((current) => removeThreadFlag(current, endedThreadId));
-      clearThreadWorkingStopTimer(endedThreadId);
-      stopThreadWorking(endedThreadId);
-      clearThreadRuntimeCwd(endedThreadId);
-
-      const endedAt = new Date().toISOString();
-      setThreadRunState(endedThreadId, exitStatus, null, endedAt);
-      if (exitStatus === 'Succeeded') {
-        sessionFailCountByThreadRef.current[endedThreadId] = 0;
-      } else {
-        sessionFailCountByThreadRef.current[endedThreadId] =
-          (sessionFailCountByThreadRef.current[endedThreadId] ?? 0) + 1;
-      }
-      const previousAttentionState = threadAttentionByThreadRef.current[endedThreadId] ?? createThreadAttentionState();
-      const completedAttentionState = completeTurn(endedThreadId, exitStatus);
-      const shouldUseJsonlCompletionAttention = resolveJsonlCompletionAttentionContext(
-        endedThreadId,
-        event.sessionId
-      ).usesJsonlAttention;
-      if (
-        !shouldUseJsonlCompletionAttention &&
-        (
-          completedAttentionState.lastCompletedTurnIdWithOutput > previousAttentionState.lastCompletedTurnIdWithOutput ||
-          (
-          completedAttentionState.lastCompletedTurnIdWithOutput === previousAttentionState.lastCompletedTurnIdWithOutput &&
-          completedAttentionState.lastCompletedTurnStatus !== previousAttentionState.lastCompletedTurnStatus &&
-          shouldNotifyAttentionTurn(completedAttentionState)
-          )
-        )
-      ) {
-        notifyCompletedTurnIfNeeded(endedThreadId, completedAttentionState);
-      }
-
-      const workspaceId =
-        sessionMeta?.workspaceId ??
-        findThreadById(threadByIdRef.current, endedThreadId)?.workspaceId;
-      if (workspaceId) {
-        void refreshThreadsForWorkspace(workspaceId);
-      }
-
-      if (sessionMeta?.mode !== 'resumed') {
-        return;
-      }
-
-      const finalLog = lastTerminalLogByThreadRef.current[endedThreadId] ?? '';
-      const elapsedMs = Date.now() - sessionMeta.startedAtMs;
-      const failedCode = typeof event.code === 'number' && event.code !== 0 && event.code !== 130;
-      const likelyResumeFailure =
-        looksLikeResumeFailureOutput(finalLog) || (failedCode && elapsedMs < 15_000);
-      if (!likelyResumeFailure || !workspaceId) {
-        return;
-      }
-      const suppressModalUntil = suppressResumeFailureModalUntilByWorkspaceRef.current[workspaceId] ?? 0;
-      if (suppressModalUntil > Date.now()) {
-        sessionFailCountByThreadRef.current[endedThreadId] = Math.max(
-          0,
-          (sessionFailCountByThreadRef.current[endedThreadId] ?? 1) - 1
-        );
-        return;
-      }
-
-      setResumeFailureBlockedByThread((current) => addRecordFlag(current, endedThreadId));
-
-      setResumeFailureModal({
-        threadId: endedThreadId,
-        workspaceId,
-        log: finalLog,
-        showLog: false
-      });
-    },
-    [
-      clearThreadRuntimeCwd,
-      completeTurn,
-      finishSessionBinding,
-      invalidatePendingShellSessionStart,
-      notifyCompletedTurnIfNeeded,
-      refreshThreadsForWorkspace,
-      resolveJsonlCompletionAttentionContext,
-      setThreadRunState,
-      setShellSessionBinding,
-      stopThreadWorking,
-      clearTerminalSessionTracking,
-      clearThreadWorkingStopTimer,
-      ignoreSshAuthStatusSession,
-      pushToast
-    ]
-  );
-
-  const handleThreadUpdatedEvent = useCallback(
-    (thread: ThreadMetadata) => {
-      if (!thread || !thread.id || !thread.workspaceId) {
-        return;
-      }
-      if (deletedThreadIdsRef.current[thread.id]) {
-        return;
-      }
-      applyThreadUpdate(thread);
-      const activeSessionId =
-        activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
-      if (!activeSessionId) {
-        return;
-      }
-      const sessionMeta = sessionMetaBySessionIdRef.current[activeSessionId];
-      if (!sessionMeta) {
-        return;
-      }
-      const codexSessionId = thread.codexSessionId?.trim() ?? '';
-      if (sessionMeta.turnCompletionMode === 'jsonl' && sessionMeta.workspaceKind === 'local' && !codexSessionId) {
-        sessionMeta.codexSessionId = null;
-        resetThreadJsonlCompletionAttentionForSession(thread.id, null);
-        return;
-      }
-      if (!codexSessionId || sessionMeta.codexSessionId === codexSessionId) {
-        return;
-      }
-      sessionMeta.codexSessionId = codexSessionId;
-      if (sessionMeta.turnCompletionMode === 'jsonl' && sessionMeta.workspaceKind === 'local') {
-        resetThreadJsonlCompletionAttentionForSession(thread.id, codexSessionId);
-        const workspace = workspaces.find((candidate) => candidate.id === thread.workspaceId);
-        if (workspace?.kind === 'local') {
-          void reconcileThreadJsonlCompletionAttention(thread.id, workspace.path, codexSessionId);
-        }
-      }
-      void bootstrapThreadRuntimeCwdFromCodexSession(thread.id, activeSessionId);
-    },
-    [
-      applyThreadUpdate,
-      bootstrapThreadRuntimeCwdFromCodexSession,
-      reconcileThreadJsonlCompletionAttention,
-      resetThreadJsonlCompletionAttentionForSession,
-      runStore,
-      workspaces
-    ]
-  );
-
-  terminalDataEventHandlerRef.current = handleTerminalDataEvent;
-  terminalReadyEventHandlerRef.current = handleTerminalReadyEvent;
-  terminalSshAuthStatusEventHandlerRef.current = handleTerminalSshAuthStatusEvent;
-  terminalTurnCompletedEventHandlerRef.current = handleTerminalTurnCompletedEvent;
-  terminalExitEventHandlerRef.current = handleTerminalExitEvent;
-  threadUpdatedEventHandlerRef.current = handleThreadUpdatedEvent;
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenData: (() => void) | null = null;
-    terminalDataListenerReadyRef.current = false;
-
-    void onTerminalData((event) => {
-      terminalDataEventHandlerRef.current(event);
-    })
-      .then((off) => {
-        if (cancelled) {
-          off();
-          resolveTerminalDataListenerReady();
-          return;
-        }
-        unlistenData = off;
-        resolveTerminalDataListenerReady();
-      })
-      .catch(() => {
-        resolveTerminalDataListenerReady();
-      });
-
-    return () => {
-      cancelled = true;
-      unlistenData?.();
-    };
-  }, [resolveTerminalDataListenerReady]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenReady: (() => void) | null = null;
-
-    void onTerminalReady((event) => {
-      terminalReadyEventHandlerRef.current(event);
-      if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
-        console.debug('[terminal:ready]', event);
-      }
-    })
-      .then((off) => {
-        if (cancelled) {
-          off();
-          return;
-        }
-        unlistenReady = off;
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-      unlistenReady?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenSshAuthStatus: (() => void) | null = null;
-
-    void onTerminalSshAuthStatus((event) => {
-      terminalSshAuthStatusEventHandlerRef.current(event);
-    })
-      .then((off) => {
-        if (cancelled) {
-          off();
-          return;
-        }
-        unlistenSshAuthStatus = off;
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-      unlistenSshAuthStatus?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenTurnCompleted: (() => void) | null = null;
-
-    void onTerminalTurnCompleted((event: TerminalTurnCompletedEvent) => {
-      terminalTurnCompletedEventHandlerRef.current(event);
-    })
-      .then((off) => {
-        if (cancelled) {
-          off();
-          return;
-        }
-        unlistenTurnCompleted = off;
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-      unlistenTurnCompleted?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenExit: (() => void) | null = null;
-
-    void onTerminalExit((event: TerminalExitEvent) => {
-      terminalExitEventHandlerRef.current(event);
-    })
-      .then((off) => {
-        if (cancelled) {
-          off();
-          return;
-        }
-        unlistenExit = off;
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-      unlistenExit?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenThreadUpdate: (() => void) | null = null;
-
-    void onThreadUpdated((thread) => {
-      threadUpdatedEventHandlerRef.current(thread);
-    })
-      .then((off) => {
-        if (cancelled) {
-          off();
-          return;
-        }
-        unlistenThreadUpdate = off;
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-      unlistenThreadUpdate?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const key = event.key.toLowerCase();
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && key === 'f' && focusedTerminalKind) {
-        event.preventDefault();
-        if (focusedTerminalKind === 'shell') {
-          setShellTerminalSearchToggleRequestId((current) => current + 1);
-        } else {
-          setTerminalSearchToggleRequestId((current) => current + 1);
-        }
-        return;
-      }
-
-      if (shouldIgnoreGlobalTerminalShortcutTarget(event.target)) {
-        return;
-      }
-
-      const focusedSessionId =
-        focusedTerminalKind === 'shell'
-          ? shellTerminalSessionId
-          : focusedTerminalKind === 'codex'
-            ? selectedSessionId
-            : null;
-
-      if (focusedSessionId && event.ctrlKey && !event.metaKey && !event.altKey && key === 'c') {
-        event.preventDefault();
-        void api.terminalSendSignal(focusedSessionId, 'SIGINT');
-        return;
-      }
-
-      if (event.key === 'Escape' && focusedSessionId) {
-        event.preventDefault();
-        const now = Date.now();
-        if (
-          escapeSignalRef.current &&
-          escapeSignalRef.current.sessionId === focusedSessionId &&
-          now - escapeSignalRef.current.at < 1500
-        ) {
-          void api.terminalKill(focusedSessionId);
-          escapeSignalRef.current = null;
-        } else {
-          void api.terminalSendSignal(focusedSessionId, 'SIGINT');
-          escapeSignalRef.current = { sessionId: focusedSessionId, at: now };
-        }
-      }
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [focusedTerminalKind, selectedSessionId, shellTerminalSessionId]);
-
-  const saveSettings = useCallback(
-    async (nextSettings: {
-      cliPath: string;
-      appearanceMode: AppearanceMode;
-      defaultNewThreadFullAccess: boolean;
-      taskCompletionAlerts: boolean;
-      terminalScrollbackLines: number;
-    }) => {
-      const taskCompletionAlerts = nextSettings.taskCompletionAlerts;
-      const terminalScrollbackLines = normalizeTerminalScrollbackLines(nextSettings.terminalScrollbackLines);
-      const alertsJustEnabled = !settings.taskCompletionAlerts && taskCompletionAlerts;
-      if (alertsJustEnabled) {
-        taskCompletionAlertBootstrapAttemptedRef.current = true;
-      }
-
-      const normalizedCliPath = nextSettings.cliPath.trim() || null;
-      const saved = normalizeSettings(
-        await api.saveSettings({
-          codexCliPath: normalizedCliPath,
-          appearanceMode: nextSettings.appearanceMode,
-          defaultNewThreadFullAccess: nextSettings.defaultNewThreadFullAccess,
-          taskCompletionAlerts,
-          terminalScrollbackLines
-        })
-      );
-      setSettings(saved);
-      const detected = await detectActiveCliPath();
-      setDetectedCliPath(detected);
-      setSettingsOpen(false);
-      if (detected || normalizedCliPath) {
-        setBlockingError(null);
-      }
-      if (alertsJustEnabled && taskCompletionAlerts) {
-        const sent = await sendTaskCompletionAlertsEnabledConfirmation();
-        if (sent) {
-          window.localStorage.setItem(TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY, '1');
-        } else {
-          pushToast(
-            'ATController could not queue a desktop notification. Check macOS notification settings after the first alert.',
-            'info'
-          );
-        }
-      }
-    },
-    [pushToast, settings.taskCompletionAlerts]
-  );
-
-  const sendTestAlert = useCallback(async () => {
-    if (!settings.taskCompletionAlerts) {
-      pushToast('Turn on Task completion alerts first.', 'info');
-      return;
-    }
-
-    const sent = await sendTaskCompletionAlertsTestNotification();
-    if (sent) {
-      pushToast(
-        'Queued a test alert. If you do not see a banner, check macOS notification style and sound settings.',
-        'info'
-      );
-      return;
-    }
-
-    pushToast(
-      'ATController could not queue a desktop notification. Check macOS notification settings after the first alert.',
-      'info'
-    );
-  }, [pushToast, settings.taskCompletionAlerts]);
-
-  const writeTextToClipboard = useCallback(async (value: string) => {
+  }, [selectedThreadId, selectedWorkspace]);
+
+  const openProjectTerminal = useCallback(async () => {
+    const workspace = selectedWorkspaceRef.current;
+    if (!workspace) return;
     try {
-      await api.writeTextToClipboard(value);
-      return;
+      await api.openInTerminal(workspace.path);
     } catch (error) {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(value);
-        return;
-      }
-      throw error;
+      showToast(`Could not open Project Terminal: ${String(error)}`, 'error');
     }
-  }, []);
+  }, [showToast]);
 
-  const copyEnvDiagnostics = useCallback(async () => {
-    if (!selectedWorkspace) {
-      pushToast('Select a workspace first.', 'error');
-      return;
-    }
-    if (selectedWorkspace.kind !== 'local') {
-      pushToast('Diagnostics are only available for local workspaces.', 'info');
-      return;
-    }
-
-    try {
-      const diagnostics = await api.copyTerminalEnvDiagnostics(selectedWorkspace.path);
-      await writeTextToClipboard(diagnostics);
-      pushToast('Copied terminal environment diagnostics to clipboard.', 'info');
-    } catch (error) {
-      pushToast(`Failed to collect diagnostics: ${String(error)}`, 'error');
-    }
-  }, [pushToast, selectedWorkspace, writeTextToClipboard]);
-
-  const openSettings = useCallback(() => {
-    setSettingsOpen(true);
-  }, []);
-
-  const waitForRdevShellPrompt = useCallback(async (sessionId: string) => {
-    for (let attempt = 0; attempt < RDEV_SHELL_PROMPT_MAX_POLLS; attempt += 1) {
-      await new Promise<void>((resolve) => {
-        window.setTimeout(() => resolve(), RDEV_SHELL_PROMPT_POLL_INTERVAL_MS);
-      });
-      const snapshot = await api.terminalReadOutput(sessionId).catch(() => null);
-      if (hasShellPromptInSnapshot(snapshot?.text ?? '')) {
-        return true;
-      }
-    }
-    return false;
-  }, []);
-
-  const restartRdevCodexInPlace = useCallback(
-    async (thread: ThreadMetadata) => {
-      const sessionId =
-        activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
-      const resumeSessionId = threadCodexSessionId(thread);
-      if (!sessionId || !isUuidLike(resumeSessionId)) {
-        return false;
-      }
-
-      const command = buildThreadInPlaceRestartCommand(thread);
-      if (!command) {
-        return false;
-      }
-
-      await api.terminalSendSignal(sessionId, 'SIGINT').catch(() => undefined);
-      let ready = await waitForRdevShellPrompt(sessionId);
-      if (!ready) {
-        await api.terminalWrite(sessionId, '/exit\r').catch(() => false);
-        await new Promise<void>((resolve) => {
-          window.setTimeout(() => resolve(), CODEX_IN_PLACE_RESTART_DELAY_MS);
-        });
-        ready = await waitForRdevShellPrompt(sessionId);
-      }
-      if (!ready) {
-        return false;
-      }
-
-      const wrote = await api.terminalWrite(sessionId, `${command}\r`).catch(() => false);
-      return wrote;
-    },
-    [runStore, waitForRdevShellPrompt]
-  );
-
-  const selectThread = useCallback(
-    (workspaceId: string, threadId: string) => {
-      void switchToThread(workspaceId, threadId);
-    },
-    [switchToThread]
-  );
-
-  const toggleFullAccess = useCallback(async () => {
-    if (!selectedThread || fullAccessUpdating) {
-      return;
-    }
-
-    const workspace = workspaces.find((item) => item.id === selectedThread.workspaceId) ?? null;
-    const activeSessionId =
-      activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? runStore.sessionForThread(selectedThread.id) ?? null;
-    const activeSessionMode = activeSessionId
-      ? sessionMetaBySessionIdRef.current[activeSessionId]?.mode ?? null
-      : null;
-    const hasInteractedThisSession =
-      (lastUserInputAtMsByThreadRef.current[selectedThread.id] ?? 0) >
-      (lastSessionStartAtMsByThreadRef.current[selectedThread.id] ?? 0);
-    if (
-      workspace &&
-      isRemoteWorkspaceKind(workspace.kind) &&
-      (
-        Boolean(startingByThread[selectedThread.id]) ||
-        Boolean(startingSessionByThreadRef.current[selectedThread.id]) ||
-        !hasInteractedThisSession
-      )
-    ) {
-      pushToast(remoteAccessStartupBlockReason('Full access'), 'info');
-      return;
-    }
-    const nextValue = !selectedThread.fullAccess;
-    const draftInput = getThreadDraftInput(selectedThread.id);
-    setFullAccessUpdating(true);
-    try {
-      let updatedThread = await setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, nextValue);
-      if (
-        activeSessionMode === 'new' &&
-        !hasInteractedThisSession &&
-        isUuidLike(threadCodexSessionId(updatedThread))
-      ) {
-        updatedThread = await api.clearThreadCodexSession(updatedThread.workspaceId, updatedThread.id);
-        applyThreadUpdate(updatedThread);
-      }
-      const canRestartRdevInPlace =
-        workspace?.kind === 'rdev' && isUuidLike(threadCodexSessionId(updatedThread));
-      if (canRestartRdevInPlace) {
-        const switchedInPlace = await restartRdevCodexInPlace(updatedThread);
-        if (switchedInPlace) {
-          const sessionId =
-            activeRunsByThreadRef.current[updatedThread.id]?.sessionId ?? runStore.sessionForThread(updatedThread.id) ?? null;
-          await replayThreadDraftInput(sessionId, draftInput);
-          if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
-            setSelectedWorkspace(updatedThread.workspaceId);
-          }
-          setSelectedThread(updatedThread.id);
-          pushToast(`Full access ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
-          return;
-        }
-        pushToast('Could not switch in-place for remote workspace; reconnecting session.', 'info');
-      }
-      await stopThreadSession(updatedThread.id);
-      if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
-        setSelectedWorkspace(updatedThread.workspaceId);
-      }
-      primeRemoteThreadStartupOnSelection(updatedThread, workspace);
-      setSelectedThread(updatedThread.id);
-      const nextSessionId = await ensureSessionForThread(updatedThread);
-      await waitForThreadReplayWindow(updatedThread.id, nextSessionId);
-      await replayThreadDraftInput(nextSessionId, draftInput);
-    } catch (error) {
-      pushToast(`Failed to update Full access: ${String(error)}`, 'error');
-    } finally {
-      setFullAccessUpdating(false);
-    }
-  }, [
-    activeRunsByThreadRef,
-    applyThreadUpdate,
-    ensureSessionForThread,
-    fullAccessUpdating,
-    getThreadDraftInput,
-    lastSessionStartAtMsByThreadRef,
-    lastUserInputAtMsByThreadRef,
-    startingByThread,
-    primeRemoteThreadStartupOnSelection,
-    pushToast,
-    replayThreadDraftInput,
-    restartRdevCodexInPlace,
-    runStore,
-    sessionMetaBySessionIdRef,
-    selectedThread,
-    setSelectedThread,
-    setSelectedWorkspace,
-    setThreadFullAccess,
-    stopThreadSession,
-    waitForThreadReplayWindow,
-    workspaces
-  ]);
-
-  const openWorkspaceInFinder = useCallback(
-    (workspace: Workspace) => {
-      if (isRemoteWorkspaceKind(workspace.kind)) {
-        pushToast('Remote workspaces do not map to a local Finder folder.', 'info');
-        return;
-      }
-      void api.openInFinder(workspace.path);
-    },
-    [pushToast]
-  );
-
-  const launchWorkspaceInTerminal = useCallback(
-    async (workspace: Workspace): Promise<boolean> => {
-      if (isRemoteWorkspaceKind(workspace.kind)) {
-        const command =
-          workspace.kind === 'rdev' ? workspace.rdevSshCommand?.trim() : workspace.sshCommand?.trim();
-        if (!command) {
-          pushToast('Missing remote shell command for this workspace.', 'error');
-          return false;
-        }
-        try {
-          await api.openTerminalCommand(command);
-          return true;
-        } catch (error) {
-          pushToast(`Failed to open terminal: ${String(error)}`, 'error');
-          return false;
-        }
-      }
-      try {
-        await api.openInTerminal(workspace.path);
-        return true;
-      } catch (error) {
-        pushToast(`Failed to open terminal: ${String(error)}`, 'error');
-        return false;
-      }
-    },
-    [pushToast]
-  );
-
-  const openWorkspaceInTerminal = useCallback(
-    (workspace: Workspace) => {
-      void launchWorkspaceInTerminal(workspace);
-    },
-    [launchWorkspaceInTerminal]
-  );
-
-  const popOutWorkspaceShellToTerminal = useCallback(async () => {
-    if (!selectedWorkspace) {
-      return;
-    }
-    const opened = await launchWorkspaceInTerminal(selectedWorkspace);
-    if (opened) {
-      closeWorkspaceShellDrawer();
-    }
-  }, [closeWorkspaceShellDrawer, launchWorkspaceInTerminal, selectedWorkspace]);
-
-  const copyResumeCommand = useCallback(
-    (thread: ThreadMetadata) => {
-      const command = buildThreadResumeCommand(thread);
-      if (!command) {
-        pushToast(`No ${CODEX_LABEL} session ID available — start a session first.`, 'error');
-        return;
-      }
-      void writeTextToClipboard(command)
-        .then(() => {
-          pushToast('Resume command copied to clipboard.', 'info');
-        })
-        .catch((error) => {
-          pushToast(`Failed to copy resume command: ${String(error)}`, 'error');
-        });
-    },
-    [pushToast, writeTextToClipboard]
-  );
-
-  const openResumeCommandInTerminal = useCallback(
-    (thread: ThreadMetadata) => {
-      void (async () => {
-        const workspace = workspaceById[thread.workspaceId] ?? null;
-        if (workspace && isRemoteWorkspaceKind(workspace.kind)) {
-          pushToast('Open resume in Terminal is only available for local projects. Copy the resume command for remote projects.', 'info');
-          return;
-        }
-
-        let cwd = workspace?.path.trim() ?? '';
-        if (workspace?.kind === 'local') {
-          cwd = (await resolveInitialThreadCwd(thread, workspace).catch(() => null))?.trim() || cwd;
-        }
-
-        const command = buildThreadResumeTerminalCommand(thread, cwd);
-        if (!command) {
-          pushToast(`No ${CODEX_LABEL} session ID available — start a session first.`, 'error');
-          return;
-        }
-        await api.openTerminalCommand(command);
-        pushToast('Resume command opened in Terminal.', 'info');
-      })().catch((error) => {
-        pushToast(`Failed to open resume command in Terminal: ${String(error)}`, 'error');
-      });
-    },
-    [pushToast, resolveInitialThreadCwd, workspaceById]
-  );
-
-  const copyWorkspaceCommand = useCallback(
-    (workspace: Workspace) => {
-      const command = (
-        workspace.kind === 'rdev' ? workspace.rdevSshCommand : workspace.sshCommand
-      )?.trim();
-      if (!command) {
-        pushToast('No remote command configured for this workspace.', 'error');
-        return;
-      }
-      void writeTextToClipboard(command)
-        .then(() => {
-          pushToast('Remote command copied to clipboard.', 'info');
-        })
-        .catch((error) => {
-          pushToast(`Failed to copy remote command: ${String(error)}`, 'error');
-        });
-    },
-    [pushToast, writeTextToClipboard]
-  );
-
-  const onImportSession = useCallback((workspace: Workspace) => {
-    setImportSessionWorkspace(workspace);
-    setImportSessionError(null);
-  }, []);
-
-  const openRecentCodexThread = useCallback(
-    async (workspace: Workspace, recentThread: RecentCodexThread) => {
-      if (openingRecentCodexSessionIds[recentThread.sessionId]) {
-        return;
-      }
-      setOpeningRecentCodexSessionIds((current) => ({
-        ...current,
-        [recentThread.sessionId]: true
-      }));
-      try {
-        const importedThread = await api.importCodexSession(
-          workspace.id,
-          recentThread.sessionId,
-          recentThread.title,
-          settings.defaultNewThreadFullAccess === true
-        );
-        suppressedRecentCodexSessionIdsRef.current.delete(recentThread.sessionId);
-        delete deletedThreadIdsRef.current[importedThread.id];
-        setRecentCodexThreads((current) =>
-          current.filter((thread) => thread.sessionId !== recentThread.sessionId)
-        );
-        if (selectedWorkspaceIdRef.current !== workspace.id) {
-          setSelectedWorkspace(workspace.id);
-        }
-        await refreshThreadsForWorkspace(workspace.id);
-        applyThreadUpdate(importedThread);
-        setSelectedThread(importedThread.id);
-        setTerminalFocusRequestId((current) => current + 1);
-        pushToast('Codex thread opened.', 'info');
-        void refreshRecentCodexThreads();
-      } catch (error) {
-        pushToast(`Unable to open Codex thread: ${String(error)}`, 'error');
-      } finally {
-        setOpeningRecentCodexSessionIds((current) =>
-          removeRecordEntry(current, recentThread.sessionId)
-        );
-      }
-    },
-    [
-      applyThreadUpdate,
-      openingRecentCodexSessionIds,
-      pushToast,
-      refreshRecentCodexThreads,
-      refreshThreadsForWorkspace,
-      settings.defaultNewThreadFullAccess,
-      setSelectedThread,
-      setSelectedWorkspace
-    ]
-  );
-
-  const confirmImportSession = useCallback(
-    async (codexSessionId: string) => {
-      if (!importSessionWorkspace) {
-        return;
-      }
-      setImportingSession(true);
-      setImportSessionError(null);
-      try {
-        const importableSession =
-          importSessionWorkspace.kind === 'local'
-            ? await api.getImportableCodexSession(importSessionWorkspace.path, codexSessionId)
-            : null;
-        const sessionTitle =
-          importableSession?.summary?.trim() ||
-          importableSession?.firstPrompt?.trim() ||
-          null;
-        const importedThread = await api.importCodexSession(
-          importSessionWorkspace.id,
-          codexSessionId,
-          sessionTitle,
-          settings.defaultNewThreadFullAccess === true
-        );
-        suppressedRecentCodexSessionIdsRef.current.delete(codexSessionId);
-        setRecentCodexThreads((current) =>
-          current.filter((thread) => thread.sessionId !== codexSessionId)
-        );
-        delete deletedThreadIdsRef.current[importedThread.id];
-        if (selectedWorkspaceIdRef.current !== importSessionWorkspace.id) {
-          setSelectedWorkspace(importSessionWorkspace.id);
-        }
-        primeRemoteThreadStartupOnSelection(importedThread, importSessionWorkspace);
-        await refreshThreadsForWorkspace(importSessionWorkspace.id);
-        applyThreadUpdate(importedThread);
-        setSelectedThread(importedThread.id);
-        setTerminalFocusRequestId((current) => current + 1);
-        void refreshRecentCodexThreads();
-        setImportSessionWorkspace(null);
-        pushToast('Session imported — opening thread.', 'info');
-      } catch (error) {
-        setImportSessionError(String(error));
-      } finally {
-        setImportingSession(false);
-      }
-    },
-    [
-      applyThreadUpdate,
-      importSessionWorkspace,
-      primeRemoteThreadStartupOnSelection,
-      pushToast,
-      refreshThreadsForWorkspace,
-      refreshRecentCodexThreads,
-      settings.defaultNewThreadFullAccess,
-      setSelectedThread,
-      setSelectedWorkspace
-    ]
-  );
-
-  const refreshImportableCodexSessionsDiscovery = useCallback(async () => {
-    setBulkImportLoading(true);
-    setBulkImportError(null);
-    try {
-      const discovered = await api.discoverImportableCodexSessions();
-      setDiscoveredImportableCodexProjects(discovered);
-      const availableSessionIds = new Set(
-        discovered.flatMap((project) => project.sessions.map((session) => session.sessionId))
-      );
-      setSelectedBulkImportSessionIds((current) => current.filter((sessionId) => availableSessionIds.has(sessionId)));
-    } catch (error) {
-      setBulkImportError(String(error));
-    } finally {
-      setBulkImportLoading(false);
-    }
-  }, []);
-
-  const openBulkImportModal = useCallback(() => {
-    setSettingsOpen(false);
-    setAddWorkspaceOpen(false);
-    setAddWorkspaceError(null);
-    setAddWorkspaceSshCommand('');
-    setAddWorkspaceSshRemotePath('');
-    setBulkImportOpen(true);
-    setBulkImportError(null);
-    setSelectedBulkImportSessionIds([]);
-    void refreshImportableCodexSessionsDiscovery();
-  }, [refreshImportableCodexSessionsDiscovery]);
-
-  const closeBulkImportModal = useCallback(() => {
-    if (bulkImporting) {
-      return;
-    }
-    setBulkImportOpen(false);
-    setBulkImportError(null);
-    setSelectedBulkImportSessionIds([]);
-  }, [bulkImporting]);
-
-  const toggleBulkImportSessionSelection = useCallback((sessionId: string, selected: boolean) => {
-    setSelectedBulkImportSessionIds((current) => {
-      if (selected) {
-        return current.includes(sessionId) ? current : [...current, sessionId];
-      }
-      return current.filter((candidate) => candidate !== sessionId);
-    });
-  }, []);
-
-  const toggleBulkImportProjectSelection = useCallback(
-    (_project: ImportableCodexProject, visibleImportableSessionIds: string[], selected: boolean) => {
-      setSelectedBulkImportSessionIds((current) => {
-        const next = new Set(current);
-        if (selected) {
-          visibleImportableSessionIds.forEach((sessionId) => next.add(sessionId));
-        } else {
-          visibleImportableSessionIds.forEach((sessionId) => next.delete(sessionId));
-        }
-        return Array.from(next);
-      });
+  const renameThread = useCallback(
+    (threadId: string) => {
+      const thread = codexStore.getSnapshot().threads[threadId];
+      if (thread) setRename({ threadId, value: thread.title });
     },
     []
   );
 
-  const confirmBulkImportCodexSessions = useCallback(async () => {
-    if (bulkImporting) {
-      return;
-    }
-
-    const importedSessionIdSet = new Set(importedCodexSessionIds);
-    const sessionIdsToImport = selectedBulkImportSessionIds.filter((sessionId) => {
-      const discovered = discoveredImportableCodexSessionsById.get(sessionId);
-      return Boolean(discovered?.project.pathExists) && !importedSessionIdSet.has(sessionId);
-    });
-
-    if (sessionIdsToImport.length === 0) {
-      setBulkImportError('Select at least one Codex session that has not already been imported.');
-      return;
-    }
-
-    setBulkImporting(true);
-    setBulkImportError(null);
-
-    let importedCount = 0;
+  const submitRename = useCallback(async () => {
+    if (!rename || !rename.value.trim()) return;
     try {
-      const workspaceByProjectPath = new Map<string, Workspace>();
-      const impactedWorkspaceIds = new Set<string>();
-      const importedThreads: Array<{ workspace: Workspace; thread: ThreadMetadata }> = [];
-
-      for (const sessionId of sessionIdsToImport) {
-        const discovered = discoveredImportableCodexSessionsById.get(sessionId);
-        if (!discovered) {
-          continue;
-        }
-
-        const { project } = discovered;
-        let workspace =
-          workspaceByProjectPath.get(project.path) ??
-          workspaces.find(
-            (candidate) =>
-              candidate.id === project.workspaceId ||
-              (candidate.kind === 'local' && candidate.path === project.path)
-          );
-
-        if (!workspace) {
-          workspace = await ensureLocalWorkspaceByPath(project.path, { select: false });
-        }
-        workspaceByProjectPath.set(project.path, workspace);
-
-        const sessionTitle =
-          discovered.session.summary?.trim() ||
-          discovered.session.firstPrompt?.trim() ||
-          null;
-        const importedThread = await api.importCodexSession(
-          workspace.id,
-          sessionId,
-          sessionTitle,
-          settings.defaultNewThreadFullAccess === true
-        );
-
-        suppressedRecentCodexSessionIdsRef.current.delete(sessionId);
-        applyThreadUpdate(importedThread);
-        setRecentCodexThreads((current) =>
-          current.filter((thread) => thread.sessionId !== sessionId)
-        );
-        delete deletedThreadIdsRef.current[importedThread.id];
-        impactedWorkspaceIds.add(workspace.id);
-        importedThreads.push({ workspace, thread: importedThread });
-        importedCount += 1;
-      }
-
-      await Promise.all(Array.from(impactedWorkspaceIds, (workspaceId) => refreshThreadsForWorkspace(workspaceId)));
-
-      if (importedThreads.length === 1) {
-        const [{ workspace, thread }] = importedThreads;
-        if (selectedWorkspaceIdRef.current !== workspace.id) {
-          setSelectedWorkspace(workspace.id);
-        }
-        setSelectedThread(thread.id);
-        setTerminalFocusRequestId((current) => current + 1);
-      }
-
-      setBulkImportOpen(false);
-      setSelectedBulkImportSessionIds([]);
-      void refreshRecentCodexThreads();
-      pushToast(
-        importedThreads.length === 1
-          ? 'Imported 1 Codex session.'
-          : `Imported ${importedThreads.length} Codex sessions.`,
-        'info'
-      );
+      await api.renameCodexThread(rename.threadId, rename.value.trim());
+      const thread = codexStore.getSnapshot().threads[rename.threadId];
+      if (thread) codexStore.upsertThreads([{ ...thread, title: rename.value.trim() }]);
+      updateMetadata(rename.threadId, (current) => ({
+        ...current,
+        fallbackTitle: rename.value.trim(),
+        updatedAt: nowIso()
+      }));
+      setRename(null);
     } catch (error) {
-      setBulkImportError(
-        importedCount > 0
-          ? `Imported ${importedCount} before the remaining import failed: ${String(error)}`
-          : String(error)
-      );
-    } finally {
-      setBulkImporting(false);
+      showToast(`Could not rename thread: ${String(error)}`, 'error');
     }
-  }, [
-    applyThreadUpdate,
-    bulkImporting,
-    discoveredImportableCodexSessionsById,
-    ensureLocalWorkspaceByPath,
-    importedCodexSessionIds,
-    pushToast,
-    refreshThreadsForWorkspace,
-    refreshRecentCodexThreads,
-    selectedBulkImportSessionIds,
-    settings.defaultNewThreadFullAccess,
-    setSelectedThread,
-    setSelectedWorkspace,
-    workspaces
-  ]);
+  }, [rename, showToast, updateMetadata]);
 
-  const installLatestUpdate = useCallback(async () => {
-    if (installingUpdate) {
-      return;
-    }
+  const resumeRequest = useCallback(
+    (thread: CodexThread, fullAccess: boolean): ResumeCommandRequest => {
+      const ui = metadataRef.current[thread.id];
+      return {
+        threadId: thread.id,
+        workspacePath: thread.cwd || selectedWorkspaceRef.current?.path || '',
+        model: ui?.requestedModel ?? null,
+        reasoningEffort: ui?.requestedReasoningEffort ?? null,
+        serviceTier: ui?.requestedServiceTier ?? null,
+        fullAccess
+      };
+    },
+    []
+  );
 
-    setInstallingUpdate(true);
-    pushToast('Downloading and installing the latest ATController release…', 'info');
-    try {
-      await api.installLatestUpdate();
-    } catch (error) {
-      pushToast(`Update failed: ${String(error)}`, 'error');
-    } finally {
-      setInstallingUpdate(false);
-    }
-  }, [installingUpdate, pushToast]);
-
-  const onRemoveWorkspace = useCallback(
-    async (workspace: Workspace) => {
-      const detail =
-        isRemoteWorkspaceKind(workspace.kind)
-          ? 'This removes its saved threads in ATController.'
-          : 'This keeps your local folder intact but removes its saved threads in ATController.';
-      const message = `Remove "${workspace.name}" from ATController?\n\n${detail}`;
-      const confirmed = await confirm(message, {
-        title: 'ATController',
-        kind: 'warning',
-        okLabel: 'OK',
-        cancelLabel: 'Cancel'
-      }).catch(() => window.confirm(message));
-      if (!confirmed) {
-        return;
-      }
-
-      const workspaceThreads = threadsByWorkspaceRef.current[workspace.id] ?? [];
-      const threadIds = workspaceThreads.map((thread) => thread.id);
-      const threadIdSet = new Set(threadIds);
-      const workspaceCodexSessionIds = workspaceThreads
-        .map((thread) => thread.codexSessionId?.trim() ?? '')
-        .filter((sessionId) => sessionId.length > 0);
-
-      for (const threadId of threadIds) {
-        invalidatePendingSessionStart(threadId);
-        clearThreadWorkingStopTimer(threadId);
-        stopThreadWorking(threadId);
-      }
-      await stopShellSessionForWorkspace(workspace.id, {
-        closeDrawer: true,
-        clearContent: true
-      });
-      await stopSessionsForWorkspace(workspace.id);
-
-      const removed = await api.removeWorkspace(workspace.id);
-      if (!removed) {
-        pushToast(`Project "${workspace.name}" was already removed.`, 'info');
-        await refreshWorkspaces();
-        return;
-      }
-      for (const sessionId of workspaceCodexSessionIds) {
-        suppressedRecentCodexSessionIdsRef.current.add(sessionId);
-      }
-      if (workspaceCodexSessionIds.length > 0) {
-        const suppressed = new Set(workspaceCodexSessionIds);
-        setRecentCodexThreads((current) =>
-          current.filter((thread) => !suppressed.has(thread.sessionId))
-        );
-      }
-
-      window.localStorage.removeItem(threadSelectionKey(workspace.id));
-      clearThreadUserInputTimestamps(threadIds);
-      let removedAttentionState = false;
-      let removedJsonlCompletionAttentionState = false;
-      for (const threadId of threadIds) {
-        delete deletedThreadIdsRef.current[threadId];
-        delete startingSessionByThreadRef.current[threadId];
-        delete pendingInputByThreadRef.current[threadId];
-        delete pendingSubmittedInputByThreadRef.current[threadId];
-        delete pendingSkillClearByThreadRef.current[threadId];
-        delete inputBufferByThreadRef.current[threadId];
-        delete inputControlCarryByThreadRef.current[threadId];
-        delete forkResolutionByThreadRef.current[threadId];
-        delete forkResolutionTimeoutNotifiedByThreadRef.current[threadId];
-        delete threadTitleInitializedRef.current[threadId];
-        delete hiddenInjectedPromptsByThreadRef.current[threadId];
-        delete outputControlCarryByThreadRef.current[threadId];
-        delete sessionStartRequestIdByThreadRef.current[threadId];
-        delete threadWorkspaceKindByThreadIdRef.current[threadId];
-        delete draftAttachmentsByThreadRef.current[threadId];
-        if (threadId in visibleOutputGuardByThreadRef.current) {
-          delete visibleOutputGuardByThreadRef.current[threadId];
-          visibleOutputGuardDirtyRef.current = true;
-        }
-        if (threadId in threadAttentionByThreadRef.current) {
-          delete threadAttentionByThreadRef.current[threadId];
-          removedAttentionState = true;
-        }
-        if (threadId in threadJsonlCompletionAttentionByThreadRef.current) {
-          delete threadJsonlCompletionAttentionByThreadRef.current[threadId];
-          removedJsonlCompletionAttentionState = true;
-        }
-        delete jsonlCompletionSeededSessionIdByThreadRef.current[threadId];
-        delete jsonlCompletionReconcileRequestIdByThreadRef.current[threadId];
-        delete lastMeaningfulOutputByThreadRef.current[threadId];
-        delete lastSessionStartAtMsByThreadRef.current[threadId];
-        delete lastUserInputAtMsByThreadRef.current[threadId];
-        delete sessionFailCountByThreadRef.current[threadId];
-        delete runLifecycleByThreadRef.current[threadId];
-      }
-      for (const [sessionId, meta] of Object.entries(sessionMetaBySessionIdRef.current)) {
-        if (meta.workspaceId === workspace.id) {
-          clearTerminalSessionTracking(sessionId);
-        }
-      }
-      for (const [sessionId, pendingEvent] of Object.entries(pendingSshStartupAuthStatusBySessionIdRef.current)) {
-        if (pendingEvent.workspaceId === workspace.id) {
-          delete pendingSshStartupAuthStatusBySessionIdRef.current[sessionId];
-        }
-      }
-      for (const [sessionId, mappedThreadId] of Object.entries(threadIdBySessionIdRef.current)) {
-        if (threadIdSet.has(mappedThreadId)) {
-          delete threadIdBySessionIdRef.current[sessionId];
-        }
-      }
-      if (removedAttentionState) {
-        threadAttentionDirtyRef.current = true;
-      }
-      if (removedJsonlCompletionAttentionState) {
-        threadJsonlCompletionAttentionDirtyRef.current = true;
-        setThreadJsonlCompletionAttentionVersion((current) => current + 1);
-      }
-      clearThreadTerminalStreams(threadIds);
-      setDraftAttachmentsByThread((current) => {
-        let changed = false;
-        const next = { ...current };
-        for (const threadId of threadIds) {
-          if (!(threadId in next)) {
-            continue;
+  const runThreadAction = useCallback(
+    async (thread: CodexThread, action: ThreadMenuAction) => {
+      const workspace = selectedWorkspaceRef.current;
+      if (!workspace) return;
+      const ui = metadataRef.current[thread.id];
+      try {
+        switch (action) {
+          case 'open':
+            await openThread(thread.id);
+            break;
+          case 'rename':
+            renameThread(thread.id);
+            break;
+          case 'pin':
+            if (ui) await persistMetadata({ ...ui, pinned: !ui.pinned, updatedAt: nowIso() });
+            break;
+          case 'markRead':
+            if (ui) await persistMetadata({ ...ui, unread: !ui.unread, updatedAt: nowIso() });
+            break;
+          case 'copyId':
+            await copyText(thread.id, 'Thread ID');
+            break;
+          case 'copyResume': {
+            const command = await api.buildCodexResumeCommand(resumeRequest(thread, false));
+            await copyText(command.command, 'Resume command');
+            break;
           }
-          delete next[threadId];
-          changed = true;
-        }
-        return changed ? next : current;
-      });
-      setSshStartupBlockedByThread((current) => {
-        let next = current;
-        for (const threadId of threadIds) {
-          next = removeRecordEntry(next, threadId);
-        }
-        return next;
-      });
-      setSshStartupBlockedShellByWorkspace((current) => removeRecordEntry(current, workspace.id));
-      setSshStartupBlockModal((current) =>
-        current && current.workspaceId === workspace.id ? null : current
-      );
-      setResumeFailureBlockedByThread((current) => {
-        let changed = false;
-        const next = { ...current };
-        for (const threadId of threadIds) {
-          if (!(threadId in next)) {
-            continue;
+          case 'copyFullAccessResume': {
+            const command = await api.buildCodexResumeCommand(resumeRequest(thread, true));
+            await copyText(command.command, 'Full Access resume command');
+            break;
           }
-          delete next[threadId];
-          changed = true;
-        }
-        return changed ? next : current;
-      });
-      setResumeFailureModal((current) =>
-        current && current.workspaceId === workspace.id ? null : current
-      );
-      setStartingByThread((current) => {
-        let changed = false;
-        const next = { ...current };
-        for (const threadId of threadIds) {
-          if (!(threadId in next)) {
-            continue;
+          case 'openResumeInTerminal':
+            await api.openCodexResumeInTerminal(
+              resumeRequest(thread, ui?.permissionMode === 'fullAccess'),
+              settings.resumeTerminalBehavior === 'executeImmediately'
+            );
+            showToast(
+              settings.resumeTerminalBehavior === 'executeImmediately'
+                ? 'Resume command opened in Terminal'
+                : 'Resume command inserted in Terminal for review',
+              'success'
+            );
+            break;
+          case 'openProjectInTerminal':
+            await api.openInTerminal(workspace.path);
+            break;
+          case 'revealProject':
+            await api.openInFinder(workspace.path);
+            break;
+          case 'restartRuntime':
+            setControlBusy(true);
+            await api.restartCodexRuntime();
+            setCatalog(await api.getCodexCatalog());
+            await openThread(thread.id);
+            showToast('Codex runtime restarted', 'success');
+            setControlBusy(false);
+            break;
+          case 'startFresh':
+            await createThread();
+            break;
+          case 'fork': {
+            const lastTurnId =
+              thread.turns.length > 0 ? thread.turns[thread.turns.length - 1].id : null;
+            const preferences = preferencesFromMetadata(ui, settingsRef.current);
+            const session = await api.forkCodexThread(
+              workspace.path,
+              thread.id,
+              lastTurnId,
+              preferences
+            );
+            codexStore.setSession(session);
+            setVisibleThreadIds((current) =>
+              current.includes(session.thread.id)
+                ? current
+                : [session.thread.id, ...current]
+            );
+            await ensureMetadata(workspace, session.thread, preferences);
+            await openThread(session.thread.id);
+            showToast('Forked Codex thread', 'success');
+            break;
           }
-          delete next[threadId];
-          changed = true;
-        }
-        return changed ? next : current;
-      });
-      setReadyByThread((current) => {
-        let changed = false;
-        const next = { ...current };
-        for (const threadId of threadIds) {
-          if (!(threadId in next)) {
-            continue;
+          case 'archive':
+            await api.archiveCodexThread(thread.id);
+            codexStore.upsertThreads([{ ...thread, archived: true }]);
+            if (selectedThreadIdRef.current === thread.id) {
+              setSelectedThreadId(null);
+              codexStore.setActiveThread(null);
+            }
+            await refreshThreads(workspace);
+            break;
+          case 'unarchive': {
+            const reopening = selectedThreadIdRef.current === thread.id;
+            if (reopening) setRecoveringThread(true);
+            try {
+              const restored = await api.unarchiveCodexThread(thread.id);
+              codexStore.upsertThreads([restored]);
+              await refreshThreads(workspace);
+              if (reopening) {
+                await openThread(thread.id);
+              }
+            } finally {
+              if (reopening) setRecoveringThread(false);
+            }
+            break;
           }
-          delete next[threadId];
-          changed = true;
-        }
-        return changed ? next : current;
-      });
-      setHasInteractedByThread((current) => {
-        let changed = false;
-        const next = { ...current };
-        for (const threadId of threadIds) {
-          if (!(threadId in next)) {
-            continue;
+          case 'delete': {
+            const approved = await confirm(
+              `Permanently delete “${thread.title}”? This removes the Codex thread and cannot be undone.`,
+              { title: 'Delete Codex thread', kind: 'warning' }
+            );
+            if (!approved) break;
+            await api.deleteCodexThread(thread.id);
+            setVisibleThreadIds((current) => current.filter((threadId) => threadId !== thread.id));
+            if (selectedThreadIdRef.current === thread.id) {
+              setSelectedThreadId(null);
+              codexStore.setActiveThread(null);
+            }
+            break;
           }
-          delete next[threadId];
-          changed = true;
         }
-        return changed ? next : current;
-      });
-
-      if (threadIds.includes(selectedThreadIdRef.current ?? '')) {
-        setSelectedThread(undefined);
+      } catch (error) {
+        setControlBusy(false);
+        showToast(`${String(error)}`, 'error');
       }
-
-      await refreshWorkspaces();
-      void refreshRecentCodexThreads();
-      pushToast(`Removed project "${workspace.name}".`, 'info');
     },
     [
-      clearThreadUserInputTimestamps,
-      invalidatePendingSessionStart,
-      pushToast,
-      refreshWorkspaces,
-      refreshRecentCodexThreads,
-      clearThreadWorkingStopTimer,
-      setSelectedThread,
-      setHasInteractedByThread,
-      stopShellSessionForWorkspace,
-      stopThreadWorking,
-      stopSessionsForWorkspace,
-      clearThreadTerminalStreams,
-      clearTerminalSessionTracking
+      copyText,
+      createThread,
+      ensureMetadata,
+      openThread,
+      persistMetadata,
+      refreshThreads,
+      renameThread,
+      resumeRequest,
+      settings.resumeTerminalBehavior,
+      showToast
     ]
   );
 
-  const getSearchTextForThread = useCallback((threadId: string) => {
-    return threadSearchTextByThreadRef.current[threadId] ?? '';
-  }, []);
+  const restartRuntime = useCallback(async () => {
+    setControlBusy(true);
+    try {
+      const diagnostics = await api.restartCodexRuntime();
+      codexStore.setDiagnostics(diagnostics);
+      setCatalog(await api.getCodexCatalog());
+      if (selectedThreadIdRef.current) await openThread(selectedThreadIdRef.current);
+      showToast('Codex runtime restarted', 'success');
+    } catch (error) {
+      showToast(`Runtime restart failed: ${String(error)}`, 'error');
+    } finally {
+      setControlBusy(false);
+    }
+  }, [openThread, showToast]);
 
-
-  const appShellStyle = useMemo(
-    () =>
-      ({
-        '--sidebar-width': `${sidebarWidth}px`
-      }) as CSSProperties,
-    [sidebarWidth]
+  const saveSettings = useCallback(
+    async (next: Settings) => {
+      try {
+        const saved = await api.saveSettings(next);
+        setSettings(saved);
+        const appearance = normalizeAppearanceMode(saved.appearanceMode);
+        applyAppearanceMode(appearance);
+        persistAppearanceMode(appearance);
+        setControlCenter(null);
+        showToast('Settings saved', 'success');
+        if (saved.codexCliPath !== settings.codexCliPath) void restartRuntime();
+      } catch (error) {
+        showToast(`Could not save settings: ${String(error)}`, 'error');
+      }
+    },
+    [restartRuntime, settings.codexCliPath, showToast]
   );
 
-  // Keep terminal callback refs in sync with the latest closures on every render.
-  // The stable callbacks (stableTerminalOnData / stableTerminalOnResize) delegate
-  // to these refs, so TerminalPanel receives identity-stable props while always
-  // invoking the most recent handler logic.
-  terminalOnDataHandlerRef.current = (data: string) => {
-    if (!selectedThread) {
-      return;
-    }
-    if (
-      selectedWorkspace?.kind === 'ssh' &&
-      (!isSelectedThreadReady || Boolean(selectedThreadSshStartupBlockReason))
-    ) {
-      return;
-    }
-
-    const parsed = extractSubmittedInputLines(
-      inputBufferByThreadRef.current[selectedThread.id] ?? '',
-      inputControlCarryByThreadRef.current[selectedThread.id] ?? '',
-      data
-    );
-    inputBufferByThreadRef.current[selectedThread.id] = parsed.nextBuffer;
-    inputControlCarryByThreadRef.current[selectedThread.id] = parsed.nextControlCarry;
-    const submittedLines = parsed.submittedLines;
-    const nativeForkCommand =
-      selectedWorkspace && !isRemoteWorkspaceKind(selectedWorkspace.kind)
-        ? detectNativeForkCommand(submittedLines)
-        : null;
-
-    if (
-      submittedLines.length > 0 &&
-      !nativeForkCommand &&
-      isSelectedThreadReady &&
-      isDefaultThreadTitle(selectedThread.title) &&
-      !threadTitleInitializedRef.current[selectedThread.id]
-    ) {
-      const firstLine = submittedLines.map((line) => line.trim()).find((line) => line.length > 0);
-      if (firstLine) {
-        threadTitleInitializedRef.current[selectedThread.id] = true;
-        void onRenameThread(selectedThread.workspaceId, selectedThread.id, firstLine.slice(0, 50));
+  const paletteActions = useMemo<PaletteAction[]>(() => {
+    const actions: PaletteAction[] = [
+      {
+        id: 'open-project',
+        label: 'Open Project',
+        description: 'Add a local folder to ATController',
+        shortcut: '⌘O',
+        icon: 'folder',
+        run: () => void pickProject()
+      },
+      {
+        id: 'new-thread',
+        label: 'New Codex Thread',
+        description: selectedWorkspace?.name,
+        shortcut: '⌘N',
+        icon: 'add',
+        disabled: !selectedWorkspace,
+        run: () => void createThread()
+      },
+      {
+        id: 'focus-composer',
+        label: 'Focus Composer',
+        shortcut: '⌘L',
+        icon: 'send',
+        disabled: !selectedThread,
+        run: () => window.dispatchEvent(new Event('atcontroller:focus-composer'))
+      },
+      {
+        id: 'rename-thread',
+        label: 'Rename Thread',
+        shortcut: '⌘⇧R',
+        icon: 'code',
+        disabled: !selectedThread,
+        run: () => selectedThread && renameThread(selectedThread.id)
+      },
+      {
+        id: 'copy-resume',
+        label: 'Copy Resume Command',
+        shortcut: '⌘⇧C',
+        icon: 'copy',
+        disabled: !selectedThread,
+        run: () => selectedThread && void runThreadAction(selectedThread, 'copyResume')
+      },
+      {
+        id: 'open-resume-terminal',
+        label: 'Open Resume Command in Terminal',
+        icon: 'terminal',
+        disabled: !selectedThread,
+        run: () => selectedThread && void runThreadAction(selectedThread, 'openResumeInTerminal')
+      },
+      {
+        id: 'toggle-full-access',
+        label: selectedPreferences.permissionMode === 'fullAccess'
+          ? 'Use Workspace Access'
+          : 'Enable Full Access',
+        description: 'Change the permission profile for subsequent turns',
+        icon: 'warning',
+        disabled: !selectedThread,
+        run: () =>
+          updatePreferences({
+            ...selectedPreferences,
+            permissionMode:
+              selectedPreferences.permissionMode === 'fullAccess'
+                ? 'workspaceAccess'
+                : 'fullAccess'
+          })
+      },
+      {
+        id: 'toggle-inspector',
+        label: 'Toggle Inspector',
+        shortcut: '⌘⇧I',
+        icon: 'panelRight',
+        disabled: !selectedThread,
+        run: () => setInspectorOpen((value) => !value)
+      },
+      {
+        id: 'toggle-sidebar',
+        label: 'Toggle Sidebar',
+        shortcut: '⌘⇧S',
+        icon: 'panelLeft',
+        run: () => setSidebarCollapsed((value) => !value)
+      },
+      {
+        id: 'open-terminal',
+        label: 'Open Project Terminal',
+        shortcut: '⌘J',
+        icon: 'terminal',
+        disabled: !selectedWorkspace,
+        run: () => void openProjectTerminal()
+      },
+      {
+        id: 'restart-runtime',
+        label: 'Restart Codex Runtime',
+        icon: 'refresh',
+        run: () => void restartRuntime()
+      },
+      {
+        id: 'diagnostics',
+        label: 'Open Diagnostics',
+        icon: 'info',
+        run: () => setControlCenter('diagnostics')
       }
+    ];
+    if (selectedThread) {
+      actions.push({
+        id: 'fork-thread',
+        label: 'Fork Thread From Latest Turn',
+        icon: 'history',
+        run: () => void runThreadAction(selectedThread, 'fork')
+      });
+      actions.push({
+        id: 'archive-thread',
+        label: selectedThread.archived ? 'Restore Thread' : 'Archive Thread',
+        icon: 'archive',
+        run: () =>
+          void runThreadAction(selectedThread, selectedThread.archived ? 'unarchive' : 'archive')
+      });
     }
-
-    if (submittedLines.length > 0) {
-      const submittedAtMs = Date.now();
-      recordThreadVisibleOutput(
-        selectedThread.id,
-        true,
-        submittedAtMs,
-        lastTerminalLogByThreadRef.current[selectedThread.id] ?? ''
-      );
-      markThreadUserInput(selectedThread.workspaceId, selectedThread.id);
-      lastUserInputAtMsByThreadRef.current[selectedThread.id] = submittedAtMs;
-      sessionFailCountByThreadRef.current[selectedThread.id] = 0;
-      setHasInteractedByThread((current) =>
-        current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
-      );
-      beginTurn(selectedThread.id);
+    for (const model of catalog?.models ?? []) {
+      actions.push({
+        id: `model-${model.id}`,
+        label: `Use Model: ${model.displayName || model.model}`,
+        description: model.description,
+        icon: 'code',
+        disabled: !selectedThread,
+        run: () =>
+          updatePreferences({
+            ...selectedPreferences,
+            model: model.id,
+            reasoningEffort: model.defaultReasoningEffort,
+            serviceTier: model.defaultServiceTier ?? null
+          })
+      });
     }
+    const activeModel =
+      catalog?.models.find(
+        (model) =>
+          model.id === selectedPreferences.model || model.model === selectedPreferences.model
+      ) ??
+      catalog?.models.find((model) => model.isDefault) ??
+      catalog?.models[0];
+    for (const effort of activeModel?.reasoningEfforts ?? []) {
+      actions.push({
+        id: `effort-${effort.value}`,
+        label: `Reasoning: ${effort.value === 'ultra' ? 'Ultra' : effort.value}`,
+        description: effort.description,
+        icon: 'info',
+        disabled: !selectedThread,
+        run: () =>
+          updatePreferences({ ...selectedPreferences, reasoningEffort: effort.value })
+      });
+    }
+    for (const tier of activeModel?.serviceTiers ?? []) {
+      actions.push({
+        id: `tier-${tier.id}`,
+        label: `Service Tier: ${tier.name || tier.id}`,
+        description: tier.description,
+        icon: 'refresh',
+        disabled: !selectedThread,
+        run: () =>
+          updatePreferences({ ...selectedPreferences, serviceTier: tier.id })
+      });
+    }
+    for (const thread of visibleThreads.slice(0, 12)) {
+      actions.push({
+        id: `thread-${thread.id}`,
+        label: thread.title,
+        description: `Switch thread · ${selectedWorkspace?.name ?? ''}`,
+        icon: 'history',
+        keywords: thread.preview,
+        run: () => void openThread(thread.id)
+      });
+    }
+    return actions;
+  }, [
+    createThread,
+    catalog,
+    openThread,
+    pickProject,
+    renameThread,
+    restartRuntime,
+    runThreadAction,
+    selectedThread,
+    selectedPreferences,
+    selectedWorkspace,
+    openProjectTerminal,
+    updatePreferences,
+    visibleThreads
+  ]);
 
-    if (submittedLines.length > 0) {
-      const isObservedForkCommand = Boolean(nativeForkCommand);
-      const attachmentDraft = isObservedForkCommand
-        ? []
-        : draftAttachmentsByThreadRef.current[selectedThread.id] ?? [];
-      if (!isObservedForkCommand) {
-        clearAttachmentDraftForThread(selectedThread.id);
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!event.metaKey) return;
+      const key = event.key.toLocaleLowerCase();
+      if (key === 'n' && !event.shiftKey) {
+        event.preventDefault();
+        void createThread();
+      } else if (key === 'o') {
+        event.preventDefault();
+        void pickProject();
+      } else if (key === 'k' || key === 'p') {
+        event.preventDefault();
+        setPaletteOpen(true);
+      } else if (key === 'l') {
+        event.preventDefault();
+        window.dispatchEvent(new Event('atcontroller:focus-composer'));
+      } else if (key === 'j') {
+        event.preventDefault();
+        void openProjectTerminal();
+      } else if (key === 'i' && event.shiftKey) {
+        event.preventDefault();
+        setInspectorOpen((value) => !value);
+      } else if (key === 's' && event.shiftKey) {
+        event.preventDefault();
+        setSidebarCollapsed((value) => !value);
+      } else if (key === '.' && selectedRunningTurn) {
+        event.preventDefault();
+        void stopTurn();
+      } else if (key === 'r' && event.shiftKey && selectedThread) {
+        event.preventDefault();
+        renameThread(selectedThread.id);
+      } else if (key === 'c' && event.shiftKey && selectedThread) {
+        event.preventDefault();
+        void runThreadAction(selectedThread, 'copyResume');
+      } else if (key === 'f' && event.shiftKey) {
+        event.preventDefault();
+        document.querySelector<HTMLInputElement>('.sidebar-search input')?.focus();
       }
-      const activeSkills = isObservedForkCommand ? [] : selectedInjectableSkills;
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [
+    createThread,
+    pickProject,
+    renameThread,
+    runThreadAction,
+    selectedRunningTurn,
+    selectedThread,
+    openProjectTerminal,
+    stopTurn,
+  ]);
 
-      // Determine the live session id now (before any async work).
-      const sessionId = (!isSelectedThreadStarting && selectedSessionId)
-        ? runStore.sessionForThread(selectedThread.id)
-        : null;
-
-      const skillPromptText = activeSkills.length > 0
-        ? buildSkillPrompt(activeSkills)
-        : '';
-      if (skillPromptText) {
-        if (selectedWorkspace) {
-          setSkillUsageMap((current) =>
-            recordSkillUsage(
-              current,
-              selectedWorkspace.path,
-              activeSkills.map((skill) => skill.id)
-            )
-          );
-        }
-      }
-      const shouldClearSkills = activeSkills.length > 0;
-
-      const attachmentPromptText = attachmentDraft.length > 0
-        ? buildAttachmentPrompt(attachmentDraft)
-        : '';
-      const hiddenPromptBlocks = [skillPromptText, attachmentPromptText]
-        .filter((prompt): prompt is string => prompt.length > 0)
-        .map((prompt) => `\n\n${prompt}`);
-      for (const block of hiddenPromptBlocks) {
-        registerHiddenInjectedPrompt(selectedThread.id, block);
-      }
-
-      void (async () => {
-        const submitIndex = data.lastIndexOf('\r');
-        const outboundData =
-          hiddenPromptBlocks.length === 0
-            ? data
-            : submitIndex >= 0
-              ? `${data.slice(0, submitIndex)}${hiddenPromptBlocks.join('')}${data.slice(submitIndex)}`
-              : `${data}${hiddenPromptBlocks.join('')}`;
-
-        if (isSelectedThreadStarting || !sessionId) {
-          if (shouldClearSkills) {
-            pendingSkillClearByThreadRef.current[selectedThread.id] = true;
-          }
-          if (nativeForkCommand) {
-            pendingNativeForkCommandByThreadRef.current[selectedThread.id] = true;
-          }
-          pendingSubmittedInputByThreadRef.current[selectedThread.id] = true;
-          pendingInputByThreadRef.current[selectedThread.id] =
-            `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
-          void ensureSessionForThread(selectedThread);
-          return;
-        }
-
-        if (sessionId) {
-            clearThreadWorkingStopTimer(selectedThread.id);
-            startThreadWorking(selectedThread.id);
-            scheduleThreadWorkingStop(selectedThread.id, THREAD_WORKING_STUCK_TIMEOUT_MS);
-            let preparedNativeFork: PreparedNativeFork | null = null;
-          if (nativeForkCommand && selectedWorkspace && !isRemoteWorkspaceKind(selectedWorkspace.kind)) {
-            try {
-              preparedNativeFork = await api.prepareThreadNativeFork(
-                selectedThread.workspaceId,
-                selectedThread.id,
-                sessionId
-              );
-            } catch (error) {
-              pushToast(`Fork tracking failed: ${String(error)}`, 'error');
-            }
-          }
-          const wrote = await api.terminalWrite(sessionId, outboundData).catch(() => false);
-          if (wrote && shouldClearSkills) {
-            void clearThreadSkillsAfterSend(selectedThread.id);
-          }
-          if (wrote && preparedNativeFork) {
-            await commitPreparedNativeForkForThread(selectedThread.id, preparedNativeFork);
-          }
-          return;
-        }
-
-        // Session vanished between the start of onData and now.
-        if (shouldClearSkills) {
-          pendingSkillClearByThreadRef.current[selectedThread.id] = true;
-        }
-        if (nativeForkCommand) {
-          pendingNativeForkCommandByThreadRef.current[selectedThread.id] = true;
-        }
-        pendingSubmittedInputByThreadRef.current[selectedThread.id] = true;
-        pendingInputByThreadRef.current[selectedThread.id] =
-          `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
-        void ensureSessionForThread(selectedThread);
-      })();
-
-      return;
-    }
-
-    // No submitted lines — just forward raw keystrokes.
-    const outboundData = data;
-
-    if (isSelectedThreadStarting || !selectedSessionId) {
-      pendingInputByThreadRef.current[selectedThread.id] =
-        `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
-      void ensureSessionForThread(selectedThread);
-      return;
-    }
-
-    const sessionId = runStore.sessionForThread(selectedThread.id);
-    if (sessionId) {
-      void api.terminalWrite(sessionId, outboundData);
-      return;
-    }
+  const beginSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const move = (moveEvent: PointerEvent) => {
+      setSidebarWidth(Math.min(420, Math.max(236, startWidth + moveEvent.clientX - startX)));
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      setSidebarWidth((width) => {
+        window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+        return width;
+      });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
   };
 
-  terminalOnResizeHandlerRef.current = (cols: number, rows: number) => {
-    setTerminalSize((current) =>
-      current.cols === cols && current.rows === rows ? current : { cols, rows }
+  if (loading) {
+    return (
+      <div className="startup-screen">
+        <span className="app-startup-mark">AT</span>
+        <strong>ATController</strong>
+        <span className="startup-progress" />
+        <p>Connecting to the local Codex runtime…</p>
+      </div>
     );
-    if (!selectedSessionId) {
-      return;
-    }
-    scheduleTerminalResize(selectedSessionId, cols, rows);
-  };
+  }
+
+  const rootStyle = {
+    '--sidebar-width': sidebarCollapsed ? '52px' : `${sidebarWidth}px`
+  } as CSSProperties;
 
   return (
-    <div className={isSidebarResizing ? 'app-shell sidebar-resizing' : 'app-shell'} style={appShellStyle}>
-      <LeftRail
-        sidebarWidth={sidebarWidth}
+    <div className="atcontroller-app" style={rootStyle}>
+      <CodexSidebar
         workspaces={workspaces}
-        threadsByWorkspace={threadsByWorkspace}
-        recentCodexThreadsByWorkspace={recentCodexThreadsByWorkspace}
-        openingRecentCodexSessionIds={openingRecentCodexSessionIds}
         selectedWorkspaceId={selectedWorkspaceId}
         selectedThreadId={selectedThreadId}
-        threadSearch={threadSearch}
-        defaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
-        creatingThreadByWorkspace={creatingThreadByWorkspace}
-        onOpenWorkspacePicker={openWorkspacePicker}
-        onOpenSettings={openSettings}
-        onNewThreadInWorkspace={onNewThreadInWorkspace}
-        onThreadSearchChange={setThreadSearch}
-        onSelectThread={selectThread}
-        onRenameThread={onRenameThread}
-        onDeleteThread={onDeleteThread}
-        onOpenWorkspaceInFinder={openWorkspaceInFinder}
-        onOpenWorkspaceInTerminal={openWorkspaceInTerminal}
-        onSetWorkspaceGitPullOnMasterForNewThreads={onSetWorkspaceGitPullOnMasterForNewThreads}
-        onReorderWorkspaces={onReorderWorkspaces}
-        onRemoveWorkspace={onRemoveWorkspace}
-        isThreadWorking={isThreadWorking}
-        unreadCompletedTurnByThread={unreadCompletedTurnByThread}
-        getThreadDisplayTimestampMs={threadStore.getThreadDisplayTimestampMs}
-        getSearchTextForThread={getSearchTextForThread}
-        onCopyResumeCommand={copyResumeCommand}
-        onOpenResumeCommandInTerminal={openResumeCommandInTerminal}
-        onCopyWorkspaceCommand={copyWorkspaceCommand}
-        onImportSession={onImportSession}
-        onOpenRecentCodexThread={openRecentCodexThread}
+        threads={visibleThreads}
+        metadata={metadata}
+        approvals={codex.approvals as Record<string, CodexApprovalRequest>}
+        filter={filter}
+        connectionState={codex.diagnostics?.connectionState ?? 'stopped'}
+        collapsed={sidebarCollapsed}
+        onSelectWorkspace={setSelectedWorkspaceId}
+        onAddWorkspace={() => void pickProject()}
+        onNewThread={() => void createThread()}
+        onSelectThread={(threadId) => void openThread(threadId)}
+        onRenameThread={renameThread}
+        onOpenThreadMenu={(threadId, x, y) => setContextMenu({ threadId, x, y })}
+        onFilterChange={setFilter}
+        onOpenSettings={() => setControlCenter('settings')}
+        onOpenDiagnostics={() => setControlCenter('diagnostics')}
+        onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       />
-      <div
-        className="sidebar-resizer"
-        data-testid="sidebar-resizer"
-        role="separator"
-        aria-label="Resize sidebar"
-        aria-orientation="vertical"
-        onPointerDown={startSidebarResize}
-        onMouseDown={startSidebarResizeWithMouse}
-      />
+      {!sidebarCollapsed ? (
+        <div className="sidebar-resizer" role="separator" aria-label="Resize sidebar" onPointerDown={beginSidebarResize} />
+      ) : null}
 
-      <main className={blockingError ? 'main-panel has-blocking-error' : 'main-panel'} data-testid="main-panel">
-        <HeaderBar
-          workspace={selectedWorkspace}
-          selectedThread={selectedThread}
-          gitInfo={gitInfo}
-          updateAvailable={Boolean(appUpdateInfo?.updateAvailable)}
-          updateVersionLabel={appUpdateInfo?.latestVersion ?? undefined}
-          updating={installingUpdate}
-          onInstallUpdate={installLatestUpdate}
-          onOpenWorkspace={() => {
-            if (selectedWorkspace) {
-              openWorkspaceInFinder(selectedWorkspace);
-            }
-          }}
-          onOpenTerminal={() => {
-            toggleWorkspaceShellDrawer();
-          }}
-          terminalOpen={shellDrawerOpen}
-        />
-
-        {blockingError ? (
-          <div className="blocking-error">
-            <span>{blockingError}</span>
-            <button type="button" className="ghost-button" onClick={() => setSettingsOpen(true)}>
-              Open Settings
-            </button>
-          </div>
-        ) : null}
-
-        <section className="terminal-region">
-          {selectedThread ? (
-            <TerminalPanel
-              key={selectedThread.id}
-              sessionId={selectedSessionId}
-              streamState={selectedTerminalRenderStream}
-              scrollbackLines={settings.terminalScrollbackLines}
-              contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
-              readOnly={false}
-              inputEnabled={
-                !selectedThreadSshStartupBlockReason &&
-                (
-                  selectedWorkspace?.kind === 'ssh'
-                    ? Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting
-                    : true
-                )
-              }
-              cursorVisible={false}
-              overlayMessage={selectedTerminalOverlayMessage}
-              preferLiveRedrawOnMount={selectedTerminalPrefersLiveRedraw}
-              focusRequestId={terminalFocusRequestId}
-              searchToggleRequestId={terminalSearchToggleRequestId}
-              onData={stableTerminalOnData}
-              onResize={stableTerminalOnResize}
-              onFocusChange={handleCodexTerminalFocusChange}
-              onFollowOutputPausedChange={handleSelectedTerminalFollowPausedChange}
+      <div className="application-main">
+        {catalog && !catalog.account.signedIn && catalog.account.requiresOpenaiAuth ? (
+          <EmptyWorkspace
+            kind="info"
+            detail="Sign in to Codex"
+            action={loginBusy ? 'Opening browser…' : 'Continue with ChatGPT'}
+            onAction={() => void startChatgptLogin()}
+          />
+        ) : workspaces.length === 0 ? (
+          <EmptyWorkspace kind="folder" detail="Open your first project" action="Open Project" onAction={() => void pickProject()} />
+        ) : fatalError && !connected ? (
+          <EmptyWorkspace
+            kind="warning"
+            detail="Codex runtime is unavailable"
+            action="Open Diagnostics"
+            onAction={() => setControlCenter('diagnostics')}
+          />
+        ) : !selectedWorkspace ? (
+          <EmptyWorkspace kind="folder" detail="Select a project" action="Choose Project" onAction={() => void pickProject()} />
+        ) : !selectedThread ? (
+          <EmptyWorkspace
+            kind="history"
+            detail={loadingThreads ? 'Loading Codex threads…' : 'Start a Codex thread'}
+            action="New Thread"
+            onAction={() => void createThread()}
+          />
+        ) : (
+          <>
+            <ThreadHeader
+              thread={selectedThread}
+              workspace={selectedWorkspace}
+              session={selectedSession}
+              preferences={selectedPreferences}
+              gitInfo={gitInfo}
+              approvals={selectedApprovals}
+              disconnected={!connected}
+              inspectorOpen={inspectorOpen}
+              onRename={() => renameThread(selectedThread.id)}
+              onOpenMenu={(x, y) => setContextMenu({ threadId: selectedThread.id, x, y })}
+              onToggleInspector={() => setInspectorOpen((value) => !value)}
+              onOpenTerminal={() => void openProjectTerminal()}
             />
-          ) : (
-            <div className="terminal-empty">Select a thread to start {CODEX_LABEL}.</div>
-          )}
-        </section>
-        <BottomBar
-          workspace={selectedWorkspace}
-          selectedThread={selectedThread}
-          skillsControl={
-            selectedThread ? (
-              <ThreadSkillsPopover
-                workspace={selectedWorkspace}
-                thread={selectedThread}
-                skills={selectedWorkspaceSkills}
-                loading={selectedWorkspaceSkillsLoading}
-                error={selectedWorkspaceSkillError}
-                usageMap={skillUsageMap}
-                saving={skillsUpdating}
-                onToggleSkill={toggleSelectedThreadSkill}
-                onRemoveMissingSkill={removeMissingSelectedThreadSkill}
-                onTogglePinned={togglePinnedSkillForSelectedWorkspace}
-                onRefresh={async () => {
-                  if (!selectedWorkspace) {
-                    return;
+            {threadError ? (
+              <div className="thread-error-banner">
+                <AppIcon name="warning" />
+                <span>{threadError}</span>
+                <button type="button" className="error-action" onClick={() => void openThread(selectedThread.id)}>
+                  Retry
+                </button>
+                <button type="button" className="error-action" onClick={() => void createThread()}>
+                  Start fresh
+                </button>
+                <button type="button" onClick={() => setThreadError(null)} aria-label="Dismiss"><AppIcon name="close" /></button>
+              </div>
+            ) : null}
+            <div className="session-workspace">
+              <section className="conversation-region">
+                <ConversationTimeline
+                  thread={selectedThread}
+                  approvals={selectedApprovals}
+                  usage={codex.usage[selectedThread.id]}
+                  onRespondToApproval={(approval, decision) => void respondToApproval(approval, decision)}
+                  onRespondToUserInput={(approval, answers) => void respondToUserInput(approval, answers)}
+                  onCopy={(value, label) => void copyText(value, label)}
+                  onOpenFile={(path) => void api.openProjectFile(selectedWorkspace.path, path)}
+                  onRevealPath={(path) => void api.revealProjectFile(selectedWorkspace.path, path)}
+                  onRevertFile={(path) => void revertGitFile(path)}
+                  onOpenTerminal={(path) => void api.openInTerminal(path)}
+                />
+                <MessageComposer
+                  threadId={selectedThread.id}
+                  workspacePath={selectedWorkspace.path}
+                  value={selectedMetadata?.draft ?? ''}
+                  promptHistory={selectedMetadata?.promptHistory ?? []}
+                  attachments={currentAttachments}
+                  skills={runtimeSkills}
+                  selectedSkills={currentSkills}
+                  preferences={selectedPreferences}
+                  models={catalog?.models ?? []}
+                  fiveHourLimit={catalog?.account.fiveHourLimit}
+                  weeklyLimit={catalog?.account.weeklyLimit}
+                  archived={selectedThread.archived}
+                  running={Boolean(selectedRunningTurn)}
+                  connected={connected}
+                  recovering={recoveringThread}
+                  submitting={submitting}
+                  commandEnterToSend={settings.commandEnterToSend !== false}
+                  onChange={updateDraft}
+                  onAttachmentsChange={(attachments) =>
+                    setAttachmentsByThread((current) => ({
+                      ...current,
+                      [selectedThread.id]: attachments
+                    }))
                   }
-                  await refreshSkillsForWorkspace(selectedWorkspace);
-                }}
-              />
-            ) : null
-          }
-          attachmentDraftPaths={selectedThreadDraftAttachments}
-          attachmentsEnabled={Boolean(selectedThread)}
-          fullAccessUpdating={fullAccessUpdating}
-          gitInfo={gitInfo}
-          onPickAttachments={pickAttachmentFiles}
-          onAddAttachmentPaths={addAttachmentPathsFromDrop}
-          onRemoveAttachmentPath={removeSelectedThreadAttachmentPath}
-          onClearAttachmentPaths={clearSelectedThreadAttachmentDraft}
-          onToggleFullAccess={toggleFullAccess}
-          fullAccessToggleBlockedReason={fullAccessToggleBlockedReason}
-          onLoadBranchSwitcher={onLoadBranchSwitcher}
-          onCheckoutBranch={onCheckoutBranch}
-        />
-        <WorkspaceShellDrawer
-          open={shellDrawerOpen}
-          workspace={selectedWorkspace}
-          sessionId={shellTerminalSessionId}
-          streamState={shellTerminalStream}
-          scrollbackLines={settings.terminalScrollbackLines}
-          height={shellDrawerHeight}
-          starting={shellTerminalStarting}
-          blockedMessage={
-            selectedShellSshStartupBlockReason
-              ? sshStartupBlockOverlayMessage(selectedShellSshStartupBlockReason)
-              : undefined
-          }
-          focusRequestId={shellTerminalFocusRequestId}
-          searchToggleRequestId={shellTerminalSearchToggleRequestId}
-          onClose={closeWorkspaceShellDrawer}
-          onStartResize={beginShellDrawerResize}
-          onOpenInTerminal={popOutWorkspaceShellToTerminal}
-          onData={handleShellTerminalData}
-          onResize={handleShellTerminalResize}
-          onFocusChange={handleShellTerminalFocusChange}
-        />
-      </main>
+                  onSelectedSkillsChange={(skills) =>
+                    setSkillsByThread((current) => ({
+                      ...current,
+                      [selectedThread.id]: skills
+                    }))
+                  }
+                  onPreferencesChange={updatePreferences}
+                  onPickAttachments={() => void pickAttachments()}
+                  onSubmit={(inputs) => void submitInputs(inputs)}
+                  onStop={() => void stopTurn()}
+                  onRestore={() => void runThreadAction(selectedThread, 'unarchive')}
+                />
+              </section>
+              {inspectorOpen ? (
+                <InspectorPanel
+                  thread={selectedThread}
+                  session={selectedSession}
+                  metadata={selectedMetadata}
+                  diagnostics={codex.diagnostics}
+                  gitInfo={gitInfo}
+                  gitStatus={gitStatus}
+                  gitBranches={gitBranches}
+                  onClose={() => setInspectorOpen(false)}
+                  onCopy={(value, label) => void copyText(value, label)}
+                  onOpenFile={(path) => void api.openProjectFile(selectedWorkspace.path, path)}
+                  onRevealFile={(path) => void api.revealProjectFile(selectedWorkspace.path, path)}
+                  onLoadDiff={(path) => api.gitWorkspaceDiff(selectedWorkspace.path, path)}
+                  onRevertFile={(path) => void revertGitFile(path)}
+                  onSwitchBranch={(branch) => void switchGitBranch(branch)}
+                  onCreateBranch={(branch) => void createGitBranch(branch)}
+                  onCopyPatch={() => void copyWorkingTreePatch()}
+                  onCopyResume={(fullAccess) =>
+                    void runThreadAction(
+                      selectedThread,
+                      fullAccess ? 'copyFullAccessResume' : 'copyResume'
+                    )
+                  }
+                  onOpenResumeInTerminal={() =>
+                    void runThreadAction(selectedThread, 'openResumeInTerminal')
+                  }
+                  onOpenTerminal={(path) => void api.openInTerminal(path)}
+                  onRestartRuntime={() => void restartRuntime()}
+                />
+              ) : null}
+            </div>
+          </>
+        )}
+      </div>
 
-      <SettingsModal
-        open={settingsOpen}
-        initialCliPath={activeCliPath}
-        initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
-        initialDefaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
-        initialTaskCompletionAlerts={settings.taskCompletionAlerts === true}
-        initialTerminalScrollbackLines={normalizeTerminalScrollbackLines(settings.terminalScrollbackLines)}
-        detectedCliPath={detectedCliPath}
-        copyEnvDiagnosticsDisabled={!selectedWorkspace || selectedWorkspace.kind !== 'local'}
-        onClose={() => setSettingsOpen(false)}
-        onSave={(nextSettings) => void saveSettings(nextSettings)}
-        onCopyEnvDiagnostics={() => void copyEnvDiagnostics()}
-        onSendTestAlert={() => void sendTestAlert()}
-      />
+      {contextMenu ? (() => {
+        const thread = codex.threads[contextMenu.threadId];
+        if (!thread || !selectedWorkspace) return null;
+        return (
+          <ThreadContextMenu
+            thread={thread}
+            workspace={selectedWorkspace}
+            metadata={metadata[thread.id]}
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onAction={(action) => void runThreadAction(thread, action)}
+            onClose={() => setContextMenu(null)}
+          />
+        );
+      })() : null}
 
-      <AddWorkspaceModal
-        open={addWorkspaceOpen}
-        initialMode={addWorkspaceMode}
-        initialPath={addWorkspacePath}
-        initialRdevCommand={addWorkspaceRdevCommand}
-        initialSshCommand={addWorkspaceSshCommand}
-        initialSshRemotePath={addWorkspaceSshRemotePath}
-        initialDisplayName={addWorkspaceDisplayName}
-        error={addWorkspaceError}
-        saving={addingWorkspace}
-        onClose={() => {
-          setAddWorkspaceOpen(false);
-          setAddWorkspaceError(null);
-          setAddWorkspaceRdevCommand('');
-          setAddWorkspaceSshCommand('');
-          setAddWorkspaceSshRemotePath('');
+      {rename ? (
+        <div className="modal-backdrop" onPointerDown={() => setRename(null)}>
+          <form
+            className="rename-dialog"
+            onPointerDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitRename();
+            }}
+          >
+            <h2>Rename thread</h2>
+            <input
+              value={rename.value}
+              maxLength={200}
+              autoFocus
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) => setRename({ ...rename, value: event.target.value })}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') setRename(null);
+              }}
+            />
+            <footer>
+              <button type="button" className="ghost-button" onClick={() => setRename(null)}>Cancel</button>
+              <button type="submit" className="primary-button" disabled={!rename.value.trim()}>Rename</button>
+            </footer>
+          </form>
+        </div>
+      ) : null}
+
+      <CommandPalette open={paletteOpen} actions={paletteActions} onClose={() => setPaletteOpen(false)} />
+      <ControlCenterDialog
+        open={controlCenter != null}
+        initialTab={controlCenter ?? 'settings'}
+        settings={settings}
+        catalog={catalog}
+        diagnostics={codex.diagnostics}
+        dataRoot={dataRoot}
+        selfTestResult={selfTestResult}
+        busy={controlBusy}
+        onClose={() => setControlCenter(null)}
+        onSaveSettings={(next) => void saveSettings(next)}
+        onRestartRuntime={() => void restartRuntime()}
+        onRunSelfTest={() => {
+          setControlBusy(true);
+          void api
+            .runCodexSelfTest()
+            .then(setSelfTestResult)
+            .catch((error) => setSelfTestResult({ ok: false, error: String(error) }))
+            .finally(() => setControlBusy(false));
         }}
-        onPickDirectory={() => void pickWorkspaceDirectory()}
-        onConfirmLocal={(path) => void confirmManualWorkspace(path)}
-        onConfirmRdev={(command, displayName) => void confirmRdevWorkspace(command, displayName)}
-        onConfirmSsh={(command, displayName, remotePath) =>
-          void confirmSshWorkspace(command, displayName, remotePath)
+        onRegenerateProtocol={() => {
+          setControlBusy(true);
+          void api
+            .regenerateCodexProtocolSnapshot()
+            .then((path) => {
+              setSelfTestResult({ ok: true, generatedProtocolSnapshot: path });
+              showToast('Protocol bindings regenerated', 'success');
+            })
+            .catch((error) => setSelfTestResult({ ok: false, error: String(error) }))
+            .finally(() => setControlBusy(false));
+        }}
+        onCopyDiagnostics={() => void copyText(JSON.stringify(codex.diagnostics, null, 2), 'Diagnostics')}
+        onOpenDataRoot={() => void api.openInFinder(dataRoot)}
+        onOpenCodexConfiguration={() =>
+          void api
+            .openCodexConfiguration()
+            .catch((error) => showToast(`Could not open Codex configuration: ${String(error)}`, 'error'))
         }
-        onOpenBulkImport={openBulkImportModal}
       />
 
-      <ImportSessionModal
-        open={Boolean(importSessionWorkspace)}
-        workspaceName={importSessionWorkspace?.name ?? ''}
-        error={importSessionError}
-        saving={importingSession}
-        onClose={() => {
-          setImportSessionWorkspace(null);
-          setImportSessionError(null);
-        }}
-        onConfirm={(codexSessionId) => void confirmImportSession(codexSessionId)}
-      />
-
-      <BulkImportCodexSessionsModal
-        open={bulkImportOpen}
-        loading={bulkImportLoading}
-        importing={bulkImporting}
-        projects={discoveredImportableCodexProjects}
-        selectedSessionIds={selectedBulkImportSessionIds}
-        alreadyImportedSessionIds={importedCodexSessionIds}
-        error={bulkImportError}
-        onClose={closeBulkImportModal}
-        onToggleSession={toggleBulkImportSessionSelection}
-        onToggleProject={toggleBulkImportProjectSelection}
-        onImport={() => void confirmBulkImportCodexSessions()}
-      />
-
-      {resumeFailureModal ? (
-        <div className="modal-backdrop">
-          <section className="modal">
-            <h3>Failed to resume session. Start fresh?</h3>
-            <p>{CODEX_LABEL} could not resume this thread&apos;s saved session id.</p>
-            {resumeFailureModal.showLog ? <pre>{resumeFailureModal.log || '(No logs captured)'}</pre> : null}
-            <footer className="modal-actions">
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => {
-                  clearResumeFailureBlock(resumeFailureModal.threadId);
-                  sessionFailCountByThreadRef.current[resumeFailureModal.threadId] = 0;
-                  setResumeFailureModal(null);
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => {
-                  setResumeFailureModal((current) =>
-                    current
-                      ? {
-                          ...current,
-                          showLog: !current.showLog
-                        }
-                      : null
-                  );
-                }}
-              >
-                View logs
-              </button>
-              <button
-                type="button"
-                className="danger-button"
-                onClick={() => {
-                  const thread = (threadsByWorkspace[resumeFailureModal.workspaceId] ?? []).find(
-                    (item) => item.id === resumeFailureModal.threadId
-                  );
-                  if (thread) {
-                    void onStartFreshThreadSession(thread);
-                  } else {
-                    pushToast('Unable to locate thread metadata for fresh restart.', 'error');
-                  }
-                  setResumeFailureModal(null);
-                }}
-              >
-                Start fresh
-              </button>
-            </footer>
-          </section>
-        </div>
-      ) : null}
-
-      {forkResolutionFailureModal ? (
-        <div className="modal-backdrop">
-          <section className="modal">
-            <h3>Failed to confirm forked session. Start fresh?</h3>
-            <p>ATController could not confirm the child session for this forked thread.</p>
-            <footer className="modal-actions">
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => {
-                  setForkResolutionFailureModal(null);
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="danger-button"
-                onClick={() => {
-                  const thread = (threadsByWorkspace[forkResolutionFailureModal.workspaceId] ?? []).find(
-                    (item) => item.id === forkResolutionFailureModal.threadId
-                  );
-                  if (thread) {
-                    void onStartFreshThreadSession(thread);
-                  } else {
-                    pushToast('Unable to locate thread metadata for fresh restart.', 'error');
-                  }
-                  setForkResolutionFailureModal(null);
-                }}
-              >
-                Start fresh
-              </button>
-            </footer>
-          </section>
-        </div>
-      ) : null}
-
-      {sshStartupBlockModal ? (
-        <div className="modal-backdrop">
-          <section className="modal">
-            <h3>{sshStartupBlockHeading(sshStartupBlockModal.reason)}</h3>
-            <p>{sshStartupBlockBody(sshStartupBlockModal.reason)}</p>
-            <p className="muted">
-              ATController only supports key-based SSH here. Expected macOS SSH config:{' '}
-              <code>AddKeysToAgent yes</code> <code>UseKeychain yes</code>
-            </p>
-            <footer className="modal-actions">
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => {
-                  dismissSshStartupBlockModal(sshStartupBlockModal);
-                }}
-              >
-                Close
-              </button>
-              <button
-                type="button"
-                className="primary-button"
-                onClick={() => {
-                  void retryBlockedSshStartup(sshStartupBlockModal).catch((error) => {
-                    pushToast(String(error), 'error');
-                  });
-                }}
-              >
-                Retry
-              </button>
-            </footer>
-          </section>
-        </div>
-      ) : null}
-
-      <ToastRegion toasts={toasts} />
+      <div className="toast-region" aria-live="polite">
+        {toasts.map((toast) => (
+          <div key={toast.id} className={`toast ${toast.tone}`}>
+            {toast.tone === 'success' ? <AppIcon name="check" /> : toast.tone === 'error' ? <AppIcon name="warning" /> : <AppIcon name="info" />}
+            <span>{toast.message}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

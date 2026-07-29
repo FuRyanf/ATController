@@ -1,60 +1,12 @@
-export type RunStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled';
-export type TerminalSessionMode = 'resumed' | 'new' | 'forked';
-export type TerminalTurnCompletionMode = 'idle' | 'jsonl';
-export type WorkspaceKind = 'local' | 'rdev' | 'ssh';
 export type AppearanceMode = 'dark' | 'light' | 'system';
-
-export const TERMINAL_SCROLLBACK_LINES_MIN = 10_000;
-export const TERMINAL_SCROLLBACK_LINES_DEFAULT = 100_000;
-export const TERMINAL_SCROLLBACK_LINES_MAX = 250_000;
-
-export function normalizeTerminalScrollbackLines(value?: number | null): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return TERMINAL_SCROLLBACK_LINES_DEFAULT;
-  }
-  return Math.min(
-    TERMINAL_SCROLLBACK_LINES_MAX,
-    Math.max(TERMINAL_SCROLLBACK_LINES_MIN, Math.round(value))
-  );
-}
 
 export interface Workspace {
   id: string;
   name: string;
   path: string;
-  kind?: WorkspaceKind;
-  rdevSshCommand?: string | null;
-  sshCommand?: string | null;
-  remotePath?: string | null;
   gitPullOnMasterForNewThreads: boolean;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface ThreadMetadata {
-  id: string;
-  workspaceId: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  isArchived: boolean;
-  lastRunStatus: RunStatus;
-  lastRunStartedAt?: string | null;
-  lastRunEndedAt?: string | null;
-  fullAccess: boolean;
-  enabledSkills: string[];
-  codexSessionId?: string | null;
-  forkedFromCodexSessionId?: string | null;
-  pendingForkSourceCodexSessionId?: string | null;
-  pendingForkKnownChildSessionIds?: string[];
-  pendingForkRequestedAt?: string | null;
-  pendingForkLaunchConsumed?: boolean;
-  lastResumeAt?: string | null;
-  lastNewSessionAt?: string | null;
-}
-
-export interface CreateThreadOptions {
-  fullAccess?: boolean;
 }
 
 export interface GitInfo {
@@ -79,6 +31,16 @@ export interface GitWorkspaceStatus {
   uncommittedFiles: number;
   insertions: number;
   deletions: number;
+  files: GitChangedFile[];
+}
+
+export interface GitChangedFile {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'conflicted' | string;
+  staged: boolean;
+  insertions: number;
+  deletions: number;
+  binary: boolean;
 }
 
 export interface GitPullForNewThreadResult {
@@ -90,166 +52,339 @@ export interface Settings {
   codexCliPath?: string | null;
   appearanceMode?: AppearanceMode | null;
   defaultNewThreadFullAccess?: boolean;
+  defaultPermissionMode?: PermissionMode;
+  defaultModel?: string | null;
+  defaultReasoningEffort?: string | null;
+  defaultServiceTier?: string | null;
+  resumeTerminalBehavior?: 'insertForReview' | 'executeImmediately';
+  commandEnterToSend?: boolean;
   taskCompletionAlerts?: boolean;
-  terminalScrollbackLines?: number;
 }
 
-export interface ImportableCodexSession {
-  sessionId: string;
-  summary?: string | null;
-  firstPrompt?: string | null;
-  messageCount: number;
-  createdAt?: string | null;
-  modifiedAt?: string | null;
-  gitBranch?: string | null;
+export type PermissionMode = 'standard' | 'workspaceAccess' | 'fullAccess';
+export type CodexConnectionState =
+  | 'stopped'
+  | 'starting'
+  | 'initializing'
+  | 'ready'
+  | 'degraded'
+  | 'restarting'
+  | 'failed'
+  | 'stopping';
+
+export interface CodexDiagnostics {
+  atcontrollerVersion: string;
+  codexBinaryPath?: string | null;
+  codexVersion?: string | null;
+  appServerSupported: boolean;
+  generatedSchemaVersion: string;
+  transport: string;
+  connectionState: CodexConnectionState;
+  initialized: boolean;
+  processId?: number | null;
+  processUptimeMs?: number | null;
+  codexHome?: string | null;
+  platformFamily?: string | null;
+  platformOs?: string | null;
+  authenticationState?: string | null;
+  planType?: string | null;
+  currentModel?: string | null;
+  currentReasoningEffort?: string | null;
+  currentPermissionProfile?: string | null;
+  approvalPolicy?: string | null;
+  sandboxPolicy?: string | null;
+  workspacePath?: string | null;
+  activeThreadId?: string | null;
+  activeTurnId?: string | null;
+  pendingRequests: number;
+  eventQueueDepth: number;
+  recentStderr: string[];
+  recentProtocolErrors: string[];
+  lastProcessExit?: {
+    code?: number | null;
+    signal?: string | null;
+    summary: string;
+  } | null;
+  restartAttempts: number;
 }
 
-export interface ImportableCodexProject {
+export interface CodexFileChange {
   path: string;
-  name: string;
-  pathExists: boolean;
-  workspaceId?: string | null;
-  workspaceName?: string | null;
-  sessions: ImportableCodexSession[];
+  kind: string;
+  diff: string;
 }
 
-export interface RecentCodexThread {
+export interface CodexInputPart {
+  kind: string;
+  text?: string | null;
+  path?: string | null;
+  url?: string | null;
+  name?: string | null;
+}
+
+export interface CodexError {
+  message: string;
+  details?: string | null;
+  kind?: string | null;
+  willRetry: boolean;
+}
+
+export interface CodexItem {
+  id: string;
+  kind: string;
+  status?: string | null;
+  phase?: string | null;
+  text?: string | null;
+  summary: string[];
+  reasoning: string[];
+  content: CodexInputPart[];
+  command?: string | null;
+  cwd?: string | null;
+  output?: string | null;
+  exitCode?: number | null;
+  durationMs?: number | null;
+  changes: CodexFileChange[];
+  toolName?: string | null;
+  toolServer?: string | null;
+  toolArguments?: unknown;
+  toolResult?: unknown;
+  error?: string | null;
+  details?: unknown;
+}
+
+export interface CodexTurn {
+  id: string;
+  status: 'completed' | 'interrupted' | 'failed' | 'inProgress' | string;
+  items: CodexItem[];
+  itemsView: string;
+  error?: CodexError | null;
+  startedAt?: number | null;
+  completedAt?: number | null;
+  durationMs?: number | null;
+}
+
+export interface CodexThread {
+  id: string;
   sessionId: string;
-  workspaceId: string;
+  forkedFromId?: string | null;
+  parentThreadId?: string | null;
   title: string;
+  preview: string;
+  cwd: string;
+  modelProvider: string;
   createdAt: number;
   updatedAt: number;
   recencyAt?: number | null;
+  status: string;
+  source: string;
+  cliVersion: string;
+  archived: boolean;
+  turns: CodexTurn[];
 }
 
-export interface CodexReasoningEffortOption {
+export interface EffectiveThreadSettings {
+  requestedModel?: string | null;
+  effectiveModel?: string | null;
+  modelResolution: 'applied' | 'runtimeDefault' | 'runtimeFallback' | string;
+  requestedReasoningEffort?: string | null;
+  effectiveReasoningEffort?: string | null;
+  reasoningEffortResolution: 'applied' | 'runtimeDefault' | 'runtimeFallback' | string;
+  requestedServiceTier?: string | null;
+  effectiveServiceTier?: string | null;
+  serviceTierResolution: 'applied' | 'runtimeDefault' | 'runtimeFallback' | string;
+  permissionMode: PermissionMode;
+  permissionProfile: string;
+  approvalPolicy: string;
+  sandboxPolicy: string;
+  cwd: string;
+}
+
+export interface CodexThreadSession {
+  thread: CodexThread;
+  settings: EffectiveThreadSettings;
+  instructionSources: string[];
+}
+
+export interface CodexThreadPage {
+  data: CodexThread[];
+  nextCursor?: string | null;
+  backwardsCursor?: string | null;
+}
+
+export interface ThreadPreferences {
+  permissionMode: PermissionMode;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  serviceTier?: string | null;
+}
+
+export interface CodexReasoningOption {
   value: string;
   description: string;
 }
 
-export interface CodexModelOption {
+export interface CodexServiceTier {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface CodexModel {
   id: string;
   model: string;
   displayName: string;
   description: string;
+  hidden: boolean;
   isDefault: boolean;
   defaultReasoningEffort: string;
-  supportedReasoningEfforts: CodexReasoningEffortOption[];
-  supportsFastMode: boolean;
+  reasoningEfforts: CodexReasoningOption[];
+  serviceTiers: CodexServiceTier[];
+  defaultServiceTier?: string | null;
+  inputModalities: string[];
 }
 
-export interface CodexRateLimitWindow {
+export interface CodexRateLimitWindowV2 {
   usedPercent: number;
-  windowDurationMins: number;
+  windowDurationMins?: number | null;
   resetsAt?: number | null;
 }
 
-export interface CodexRuntimeOverview {
-  models: CodexModelOption[];
-  selectedModel: string;
-  selectedReasoningEffort: string;
-  fastMode: boolean;
-  fiveHourLimit?: CodexRateLimitWindow | null;
-  weeklyLimit?: CodexRateLimitWindow | null;
+export interface CodexAccount {
+  signedIn: boolean;
+  authenticationMode?: string | null;
   planType?: string | null;
+  requiresOpenaiAuth: boolean;
+  fiveHourLimit?: CodexRateLimitWindowV2 | null;
+  weeklyLimit?: CodexRateLimitWindowV2 | null;
 }
 
-export interface CodexRuntimePreferences {
-  model: string;
-  reasoningEffort: string;
-  fastMode: boolean;
-}
-
-export interface AppUpdateInfo {
-  currentVersion: string;
-  latestVersion?: string | null;
-  updateAvailable: boolean;
-  releaseUrl?: string | null;
-}
-
-export interface SkillInfo {
+export interface CodexPermissionProfile {
   id: string;
+  description?: string | null;
+  allowed: boolean;
+}
+
+export interface CodexRuntimeCatalog {
+  models: CodexModel[];
+  account: CodexAccount;
+  permissionProfiles: CodexPermissionProfile[];
+  configuredModel?: string | null;
+  configuredReasoningEffort?: string | null;
+  configuredServiceTier?: string | null;
+}
+
+export interface CodexSkill {
   name: string;
   description: string;
-  entryPoints: string[];
+  shortDescription?: string | null;
   path: string;
-  relativePath: string;
-  isGlobal?: boolean;
-  warning?: string | null;
+  scope: string;
+  enabled: boolean;
 }
 
-export interface TerminalStartResponse {
-  sessionId: string;
-  sessionMode: TerminalSessionMode;
-  resumeSessionId?: string | null;
-  turnCompletionMode?: TerminalTurnCompletionMode;
-  currentCwd?: string | null;
-  thread: ThreadMetadata;
+export interface CodexLoginSession {
+  loginId: string;
+  authorizationUrl: string;
 }
 
-export interface PreparedNativeFork {
-  sourceCodexSessionId: string;
-  knownChildSessionIds: string[];
-  requestedAt: string;
+export type ComposerInput =
+  | { type: 'text'; text: string }
+  | {
+      type: 'image';
+      url: string;
+      detail?: 'auto' | 'low' | 'high' | 'original' | null;
+    }
+  | {
+      type: 'localImage';
+      path: string;
+      detail?: 'auto' | 'low' | 'high' | 'original' | null;
+      allowOutsideWorkspace?: boolean;
+    }
+  | { type: 'file'; path: string; name?: string | null; allowOutsideWorkspace?: boolean }
+  | { type: 'skill'; name: string; path: string };
+
+export interface CodexTokenUsage {
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  lastTotalTokens: number;
+  modelContextWindow?: number | null;
 }
 
-export interface WorkspaceShellStartResponse {
-  sessionId: string;
-}
-
-export interface TerminalDataEvent {
-  sessionId: string;
+export interface CodexApprovalRequest {
+  requestId: string | number;
+  approvalType: 'commandExecution' | 'fileChange' | 'permissions' | 'userInput' | 'mcpElicitation' | 'unsupported';
   threadId?: string | null;
-  data: string;
-  startPosition: number;
-  endPosition: number;
+  turnId?: string | null;
+  itemId?: string | null;
+  command?: string | null;
+  cwd?: string | null;
+  reason?: string | null;
+  networkHost?: string | null;
+  networkProtocol?: string | null;
+  grantRoot?: string | null;
+  requestedPermissions?: unknown;
+  availableDecisions: string[];
+  payload?: unknown;
 }
 
-export interface TerminalOutputSnapshot {
-  text: string;
-  startPosition: number;
-  endPosition: number;
-  truncated: boolean;
-}
-
-export interface TerminalReadyEvent {
-  sessionId: string;
+export interface CodexEvent {
+  sequence: number;
+  kind: string;
+  method: string;
   threadId?: string | null;
+  turnId?: string | null;
+  itemId?: string | null;
+  status?: string | null;
+  delta?: string | null;
+  thread?: CodexThread | null;
+  turn?: CodexTurn | null;
+  item?: CodexItem | null;
+  approval?: CodexApprovalRequest | null;
+  tokenUsage?: CodexTokenUsage | null;
+  error?: CodexError | null;
+  data?: unknown;
 }
 
-export type TerminalSshAuthStatusReason =
-  | 'host-verification-required'
-  | 'password-auth-unsupported'
-  | 'interactive-auth-unsupported';
+export type ServerRequestResponse =
+  | { type: 'command'; requestId: string | number; decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel' }
+  | { type: 'fileChange'; requestId: string | number; decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel' }
+  | { type: 'permissions'; requestId: string | number; grant: boolean; scope?: 'turn' | 'session' | null }
+  | { type: 'userInput'; requestId: string | number; answers: Record<string, string[]> }
+  | { type: 'mcpElicitation'; requestId: string | number; action: 'accept' | 'decline' | 'cancel'; content?: unknown };
 
-export interface TerminalSshAuthStatusEvent {
-  sessionId: string;
+export interface CodexThreadUiMetadata {
+  threadId: string;
   workspaceId: string;
-  threadId?: string | null;
-  reason: TerminalSshAuthStatusReason;
+  fallbackTitle: string;
+  pinned: boolean;
+  unread: boolean;
+  draft: string;
+  promptHistory: string[];
+  permissionMode: PermissionMode;
+  requestedModel?: string | null;
+  requestedReasoningEffort?: string | null;
+  requestedServiceTier?: string | null;
+  lastViewedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface TerminalExitEvent {
-  sessionId: string;
-  code?: number | null;
-  signal?: string | null;
-  persistenceError?: string | null;
+export interface ResumeCommandRequest {
+  threadId: string;
+  workspacePath: string;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  serviceTier?: string | null;
+  fullAccess: boolean;
 }
 
-export interface TerminalTurnCompletedEvent {
-  sessionId: string;
-  threadId?: string | null;
-  status?: Extract<RunStatus, 'Succeeded' | 'Failed'>;
-  hasMeaningfulOutput?: boolean;
-  completedAtMs?: number | null;
-  completionIndex?: number | null;
-  currentCwd?: string | null;
-}
-
-export interface CodexTurnCompletionSummary {
-  codexSessionId: string;
-  completionIndex: number;
-  completedAtMs: number;
-  status: Extract<RunStatus, 'Succeeded' | 'Failed'>;
-  hasMeaningfulOutput: boolean;
+export interface CodexResumeCommand {
+  command: string;
+  binaryPath: string;
+  arguments: string[];
+  workingDirectory: string;
+  fullAccess: boolean;
 }

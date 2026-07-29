@@ -15,6 +15,16 @@ const steps = [
     args: ['audit:branding']
   },
   {
+    id: 'protocol-bindings',
+    cmd: 'yarn',
+    args: ['codex:check-protocol']
+  },
+  {
+    id: 'version-alignment',
+    cmd: 'yarn',
+    args: ['version:check']
+  },
+  {
     id: 'frontend-build',
     cmd: 'yarn',
     args: ['build']
@@ -28,11 +38,6 @@ const steps = [
     id: 'rust-tests',
     cmd: 'cargo',
     args: ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml']
-  },
-  {
-    id: 'codex-pty-smoke',
-    cmd: 'python3',
-    args: ['scripts/codex_pty_smoke.py']
   }
 ];
 
@@ -153,24 +158,18 @@ function summarizeRootCause(stepId) {
   if (stepId.includes('ui-tests')) {
     return [
       '- UI behavior regressed against expected interactions.',
-      '- Check `/Users/you/project-root/src/App.tsx`, `/Users/you/project-root/src/components/LeftRail.tsx`, and `/Users/you/project-root/src/components/TerminalPanel.tsx`.'
+      '- Check `src/App.tsx`, the structured timeline, sidebar, and composer components.'
     ];
   }
   if (stepId.includes('rust-tests')) {
     return [
       '- Backend persistence or git detection behavior regressed.',
-      '- Check `/Users/you/project-root/src-tauri/src/storage.rs`, `/Users/you/project-root/src-tauri/src/git_tools.rs`, and `/Users/you/project-root/src-tauri/src/skills.rs`.'
-    ];
-  }
-  if (stepId.includes('codex-pty-smoke')) {
-    return [
-      '- Codex interactive PTY behavior regressed.',
-      '- Check `/Users/you/project-root/src-tauri/src/runner.rs` and `/Users/you/project-root/src/components/TerminalPanel.tsx` for key forwarding or streaming issues.'
+      '- Check `src-tauri/src/codex`, `src-tauri/src/storage.rs`, and `src-tauri/src/git_tools.rs`.'
     ];
   }
   return [
     '- Build pipeline regression detected.',
-    '- Check frontend dependency or compile errors in `/Users/you/project-root/package.json` and `/Users/you/project-root/src`.'
+    '- Check frontend dependency or compile errors in `package.json` and `src`.'
   ];
 }
 

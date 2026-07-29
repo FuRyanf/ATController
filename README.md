@@ -1,29 +1,30 @@
 # ATController
 
-ATController is a native macOS desktop application for running the local OpenAI Codex CLI across multiple workspaces and threads.
+ATController is a native macOS control plane for local Codex sessions. It gives the official, locally installed Codex runtime a focused graphical interface for projects, threads, turns, commands, file changes, approvals, models, usage, and recovery.
 
-Codex is ATController’s only runtime. ATController launches the local `codex` executable in a real pseudo-terminal, renders the interactive terminal in the app, and keeps workspace, thread, and run state on your Mac. It does not proxy Codex through an ATController service or call the OpenAI API itself.
+Codex is the only runtime. The normal conversation path uses the structured `codex app-server` protocol over stdio; it does not scrape terminal output or simulate keystrokes.
 
-## Highlights
+## Product experience
 
-- Local, SSH, and rdev workspaces in one desktop interface
-- Recent, unarchived local Codex history directly in each workspace sidebar
-- Persistent, resumable local Codex threads with saved terminal output
-- Manual and bulk import of existing local Codex sessions
-- Model, reasoning-effort, Standard/Fast, 5-hour usage, and weekly usage controls
-- Workspace and full-access permission modes for each thread
-- Repository and personal Codex skill discovery
-- File and image attachments for the next prompt
-- Git status, branch switching, and optional pull-before-start behavior
-- Unread indicators, macOS notifications, and Dock badge counts
-- System, light, and dark appearances
+ATController is organized around a resizable three-region workspace:
+
+- A project and thread sidebar with Active, Recent, Pinned, and Archived sections.
+- A structured conversation timeline for user messages, streamed agent responses, reasoning summaries, plans, commands, file edits, tool calls, approvals, errors, and completion.
+- An optional inspector for Git changes, command history, thread details, and runtime health.
+
+The compact composer supports multiline prompts, prompt history, file and image attachments, drag and drop, pasted images, runtime skills, turn steering, interruption, model and reasoning selection, permission modes, and the Codex-reported five-hour and weekly usage windows.
+
+The project terminal is a separate utility surface opened in Terminal.app. It is never used as the primary Codex conversation renderer.
 
 ## Requirements
 
-- Apple silicon Mac with macOS 12 or newer
-- OpenAI Codex CLI installed and authenticated
+- Apple silicon Mac running macOS 12 or newer
+- Node.js 20.19+ or 22.12+ and Yarn Classic 1.22 for development
+- Rust 1.88+ and Xcode Command Line Tools for native builds
+- The official Codex CLI installed and authenticated
+- A Codex CLI version that supports `app-server --stdio`, `generate-ts`, and `generate-json-schema`
 
-Install the Codex CLI:
+Install and authenticate Codex:
 
 ```bash
 npm install --global @openai/codex
@@ -31,342 +32,293 @@ codex login
 codex login status
 ```
 
-Codex supports ChatGPT sign-in and API-key authentication. See the [official Codex authentication documentation](https://developers.openai.com/codex/auth) for current options.
-
-For remote SSH or rdev workspaces, install and authenticate the Codex CLI in the remote environment as well.
+ATController discovers Codex through its configured binary override, the application environment, standard installation paths, and the login-shell environment. Authentication remains entirely managed by Codex.
 
 ## Install ATController
 
-Download the current release:
+Production releases publish exactly:
 
 - [ATController.dmg](https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg)
 - [ATController.app.zip](https://github.com/FuRyanf/ATController/releases/latest/download/ATController.app.zip)
 
-Open `ATController.dmg`, then drag `ATController.app` to Applications.
+Open `ATController.dmg` and drag `ATController.app` to Applications. Tagged production releases are Developer ID signed, notarized, and stapled. Branch and pull-request builds are unsigned development artifacts.
 
-Production releases are Developer ID signed, notarized by Apple, and stapled before publication. Pull-request, branch, and manually dispatched CI builds are always unsigned development artifacts and are never published as releases.
+## Architecture
 
-## Core Concepts
+```text
+ATController React UI
+        ↕ typed Tauri commands and events
+Rust Codex app-server client
+        ↕ JSON RPC messages over JSONL stdio
+codex app-server --stdio
+        ↕
+Official Codex runtime
+```
 
-### Workspaces
+The Rust layer owns process discovery, startup, initialization, request correlation, streaming, approvals, diagnostics, restart supervision, and shutdown. React receives a narrow ATController domain model rather than importing raw generated protocol types.
 
-A workspace is the working directory for Codex and related shell operations.
+Every connection performs this lifecycle exactly once:
 
-- Local workspaces run Codex on this Mac.
-- SSH and rdev workspaces open the configured remote shell, then start Codex there.
+1. Spawn the resolved binary with the argument array `["app-server", "--stdio"]`.
+2. Send `initialize` with ATController client metadata and stable capabilities.
+3. Wait for a successful response.
+4. Send the required `initialized` notification.
+5. Allow normal requests and structured event delivery.
 
-ATController stores connection commands and workspace settings locally. Credentials remain managed by your shell, SSH configuration, and Codex.
+The checked-in protocol bindings and JSON Schema in `generated/codex-app-server/` were generated by the installed Codex CLI and are the compatibility source of truth. Experimental APIs are disabled.
 
-Connection commands are parsed as argument lists and reconstructed safely before they reach the login shell. Shell composition (including separators, substitutions, redirects, and newlines), custom remote commands, SSH options that can load or execute command-supplied local helpers, and modes that prevent an interactive Codex session are rejected. Put trusted advanced SSH behavior in `~/.ssh/config`; `{CODEX_CMD}` is supported only as a single final argument for connection tools that require an explicit command placeholder.
+See [technology.md](technology.md) for transport, state, normalization, and supervision details.
 
-Automatic Codex session-ID discovery and durable resume are local-workspace features. Remote Codex history remains on the remote machine, and ATController does not inspect remote rollout JSONL; SSH and rdev threads should be treated as terminal sessions without guaranteed automatic resume.
+## Getting started
 
-### Threads
+1. Launch ATController.
+2. Choose **Open Project** and select a local directory.
+3. Select an existing Codex thread or create a new thread.
+4. Enter a task and press Return.
+5. Follow structured activity in the timeline.
+6. Review commands and changes inline or in the inspector.
+7. Respond to an approval when Standard or Workspace Access requires one.
+8. Continue, steer, interrupt, rename, fork, archive, or resume the thread.
 
-A thread is a named Codex conversation within a workspace. Each thread can persist:
+Threads are listed and read through Codex. ATController persists only project definitions and useful UI metadata such as pinned/unread state, drafts, prompt history, selected settings, panel state, and last-viewed timestamps.
 
-- its Codex session ID
-- permission mode
-- enabled skills
-- activity and unread state
-- run metadata and terminal output
+## Threads and turns
 
-Opening a local thread starts a new Codex session or resumes its saved session when ATController has discovered its session ID. Remote threads start Codex in the configured remote shell and do not guarantee automatic resume. Deleting a thread removes ATController’s local metadata and logs; it does not delete the source session from Codex’s own history.
+The canonical session identifier is the Codex thread identifier. ATController supports:
 
-For local workspaces, ATController reads the same active local Codex session history used by its
-import screen and merges recent, unarchived sessions into the sidebar by activity time. A history row is imported atomically the
-first time you open it, so the session becomes a normal resumable ATController thread without
-duplicating ownership or leaving a half-created row after a failed import. Archived Codex sessions
-are not shown.
+- list, search, create, open, read, and resume
+- rename and fork
+- archive and restore
+- explicit deletion with confirmation
+- replacement threads for **Start Fresh**
+- recovery after a runtime restart or an invalid stored selection
+- structured history hydration after application restart
 
-### Model, Speed, and Usage
+Turns use `turn/start`, `turn/steer`, and `turn/interrupt`. ATController preserves protocol ordering, tolerates unknown events, deduplicates repeated notifications, batches high-frequency updates, and keeps the current action visible without forcing the scroll position.
 
-The bottom bar shows the effective local Codex model, Standard/Fast mode, and the usage windows
-reported by the signed-in Codex CLI. Open it to select a catalog-supported model and reasoning
-effort, toggle Fast mode when the selected model supports it, and inspect reset times.
+## Resume commands and Terminal handoff
 
-These choices update the local Codex user configuration and apply when a local session next starts
-or resumes. They do not override a remote SSH or rdev installation. Usage availability depends on
-the Codex account: if Codex does not report a 5-hour or weekly window, ATController labels that
-window unavailable instead of estimating it.
+Thread menus expose:
 
-### Permission Modes
+- **Copy Resume Command**
+- **Copy Full Access Resume Command**
+- **Open Resume Command in Terminal**
 
-ATController exposes two explicit Codex execution modes:
+ATController probes `codex resume --help` from the installed binary before constructing a command. The command contains the resolved Codex binary, canonical thread identifier, `--cd` workspace, and shell-safe quoting. Model, reasoning effort, and service tier overrides are included only when the user explicitly selected them. The Full Access form includes the installed CLI’s verified Full Access switch.
 
-- **Workspace** starts Codex with `--sandbox workspace-write --ask-for-approval on-request`.
-- **Full access** starts Codex with `--dangerously-bypass-approvals-and-sandbox`.
+The default Terminal handoff opens Terminal.app in the thread workspace and inserts the exact command into zsh for review with `print -z`. Settings can opt into immediate execution. Insert-for-review reports a clear compatibility error when the login shell is not zsh.
 
-Workspace mode is the default unless you explicitly change the new-thread default in Settings. Full access disables Codex’s approval and sandbox protections and should only be used for workspaces and instructions you trust.
+## Permissions
 
-### Session Import
+ATController exposes three thread-scoped modes and maps them to generated, structured app-server fields:
 
-ATController can import a Codex session by ID or scan the local Codex session history for bulk import into a local workspace.
+- **Standard** uses read-only sandboxing and on-request approvals.
+- **Workspace Access** uses workspace-write sandboxing and on-request approvals.
+- **Full Access** uses the danger-full-access sandbox and the `never` approval policy.
 
-The discovery root is:
+Full Access is the default for new threads in this product. A persistent indicator warns that Codex may read, modify, delete, and execute resources available to the current macOS user. ATController does not add redundant local confirmation dialogs to a Full Access turn.
 
-- `$CODEX_HOME/sessions/` when `CODEX_HOME` is set
-- `~/.codex/sessions/` otherwise
+ATController is not an operating-system sandbox. Choose Standard or Workspace Access for projects or instructions that are not fully trusted.
 
-Import creates ATController thread metadata that resumes the selected Codex session. It does not copy or modify Codex’s source rollout files.
+## Models, reasoning, and usage
 
-### Skills
+Model, reasoning-effort, service-tier, permission-profile, account, plan, and rate-limit data come from the connected Codex runtime. ATController does not invent model names or reasoning values.
 
-ATController discovers Codex skills from repository and personal skill directories:
+Requested and effective settings remain distinct. Runtime defaults and fallbacks are shown instead of silently presenting a rejected value as applied. Ultra appears only when the selected runtime model reports it.
 
-- `<workspace>/.agents/skills/`
-- `~/.agents/skills/`
+## Attachments and skills
 
-Selected skills are added to the next prompt locally.
+The composer serializes the exact structured input forms accepted by the generated protocol:
 
-## Local Data
+- text input
+- local images
+- bounded inline PNG, JPEG, GIF, and WebP data
+- local file paths
+- runtime-reported skills
 
-ATController preserves all application-owned data under:
+Inline images are limited to 10 MB. Files outside the active project are visibly marked, and the file picker requires confirmation before sharing them. Large ordinary files are passed by path instead of being converted into prompt text.
+
+## Git and changes
+
+Git remains the source of truth for the working tree. The inspector provides:
+
+- current branch and clean/dirty state
+- added, modified, deleted, renamed, copied, and conflicted files
+- insertion and deletion counts
+- per-file structured diffs
+- open, reveal, copy path, copy patch, and confirmed revert
+- copy the full working-tree patch
+- safe branch switching and branch creation
+
+App-server file events update the timeline immediately; Git refreshes reconcile the final filesystem state.
+
+## Keyboard shortcuts
+
+| Action | Shortcut |
+| --- | --- |
+| Open project | Command O |
+| New thread | Command N |
+| Command palette | Command K or Command P |
+| Focus composer | Command L |
+| Stop active turn | Command . |
+| Rename thread | Command Shift R |
+| Search threads | Command Shift F |
+| Copy resume command | Command Shift C |
+| Toggle sidebar | Command Shift S |
+| Toggle inspector | Command Shift I |
+| Open Project Terminal | Command J |
+| Send | Return |
+| New line | Shift Return |
+| Optional alternate send | Command Return |
+
+The command palette also exposes project, thread, resume, model, reasoning, permission, runtime, inspector, terminal, diagnostics, fork, and archive actions.
+
+## Diagnostics
+
+The diagnostics screen shows:
+
+- ATController and Codex versions
+- resolved binary and Codex home
+- app-server/schema support and transport
+- connection/initialization state, PID, uptime, and restart attempts
+- authentication and plan state
+- current model, reasoning, permission, approval, and sandbox settings
+- active workspace, thread, and turn
+- pending request and event-queue counts
+- recent redacted stderr, protocol errors, and exit status
+
+Actions can copy redacted diagnostics, run a connection self-test, restart the runtime, generate a protocol snapshot in the application data directory, open Codex configuration, or open ATController data.
+
+Diagnostics redact credential-bearing values and do not include prompt content.
+
+## Local data and migration
+
+All ATController-owned data remains under:
 
 ```text
 ~/Library/Application Support/ATController/
 ```
 
-The main files and directories are:
+The active layout is:
 
 ```text
-workspaces.json
 settings.json
-sidebar-hidden-codex-sessions.json
-threads/<workspaceId>/<threadId>/thread.json
-threads/<workspaceId>/<threadId>/runs/<runId>/input_manifest.json
-threads/<workspaceId>/<threadId>/runs/<runId>/metadata.json
-threads/<workspaceId>/<threadId>/runs/<runId>/output.log
+workspaces.json
+codex-thread-ui.json
+migrations/app-server-v3.json
+migration-backups/app-server-v3/
+generated-codex-protocol/
 ```
 
-Back up this directory to preserve ATController workspace metadata, thread state, and local run logs.
+Codex owns conversation history in its own home directory. ATController does not duplicate full transcripts.
 
-ATController bounds its own terminal history. Each active `output.log` is atomically compacted
-from 8 MiB to its most recent 6 MiB, while logical stream positions remain monotonic so reconnect
-snapshots can identify omitted output. ATController keeps the newest 32 run directories for each
-thread and the newest 32 workspace-shell session directories for each workspace. The latest
-recorded thread run and directories marked by a live ATController process are never pruned, even
-when they are outside that newest-32 window. Codex’s own session history under `$CODEX_HOME` is not
-modified by this retention policy.
+The app-server migration:
 
-On the first launch after upgrading, ATController performs a one-time in-place safety migration. Existing thread metadata is preserved, but any legacy thread that had Full access enabled is reset to Workspace mode so unrestricted execution must be explicitly re-enabled. Completion is recorded atomically at:
+1. preserves registered local projects;
+2. backs up settings, workspace definitions, and old thread metadata before rewriting;
+3. maps only records with a canonical Codex session identifier;
+4. preserves useful UI metadata;
+5. records incompatible legacy runtime metadata in a report;
+6. leaves original thread directories intact;
+7. never passes incompatible identifiers to Codex.
 
-```text
-~/Library/Application Support/ATController/migrations/codex-only-v1.json
-```
+Production builds always use the fixed Application Support path. Debug and test builds may use `ATCONTROLLER_APP_SUPPORT_ROOT` for isolated fixtures.
 
-The migration also disables any legacy setting that made new threads start with Full access. Malformed legacy JSON encountered during this migration is preserved beside its original location with a `.codex-only-v1.invalid` suffix and excluded from active state; malformed settings and workspace indexes are recreated with safe defaults. After the migration is complete, newly corrupted active files produce an error and are not silently overwritten.
+## Security
 
-A second one-time migration removes pre-Codex, unbound legacy thread rows from the live sidebar.
-Their complete directories are moved—not deleted—to:
-
-```text
-~/Library/Application Support/ATController/migration-backups/codex-sidebar-v2/threads/
-```
-
-Completion is recorded in `migrations/codex-sidebar-v2.json`. Threads created after the Codex-only
-migration and threads already bound to a Codex session are preserved.
-
-When you explicitly delete an imported thread or remove its project, ATController records the
-Codex session ID in `sidebar-hidden-codex-sessions.json`. This keeps the still-intact source Codex
-history from immediately reappearing. Explicit manual or bulk import restores it.
-
-## Privacy and Network Access
-
-ATController has no analytics or telemetry of its own and does not upload its application data to an ATController service. Codex CLI authentication and network behavior remain governed by Codex and its configuration.
-
-At startup and every 10 minutes while the application remains open, ATController requests the latest release metadata from the ATController repository on the GitHub Releases API. These checks do not download a release artifact. `ATController.dmg` is downloaded only after you explicitly click **Update**; ATController then verifies the update before replacing the installed application.
-
-ATController-owned terminal output logs, input manifests, and run metadata are plaintext files in the application data directory. They can contain sensitive prompts, paths, commands, attachment references, and command output. ATController does not encrypt these files; protect them with the same macOS account and backup controls you use for other sensitive local development data.
-
-## Security Model
-
-ATController runs the Codex CLI as your macOS user through your login shell. It does not create a separate operating-system account or security boundary.
-
-- Workspace mode keeps Codex’s workspace sandbox and on-request approvals enabled.
-- Full access must be explicitly enabled for a thread or as the new-thread default, and it disables those protections.
-- Codex authentication remains in Codex’s configured credential storage; ATController does not copy credentials into its data directory.
-- ATController’s plaintext local logs and metadata follow the retention policy above; deleting a thread removes those ATController-owned files but not Codex’s source history.
-- Remote sessions inherit the permissions and environment of the configured remote account.
-- Skills, attachments, and repository instructions can influence agent behavior. Review untrusted content before using it.
-
-For more on Codex sandbox and approval behavior, see the [official Codex approvals and security documentation](https://developers.openai.com/codex/agent-approvals-security).
+- The frontend can invoke only a narrow typed Tauri command surface.
+- Workspace and project-file paths are canonicalized and checked against registered projects.
+- Arbitrary frontend-supplied shell command execution is not exposed.
+- Codex is spawned directly with an argument array.
+- Protocol stdout, diagnostic stderr, and stdin remain separate.
+- Protocol logs are bounded and redacted.
+- Codex authentication tokens are never copied into ATController persistence.
+- External URLs are limited to validated HTTP(S) values.
+- The WebView uses a restrictive Content Security Policy.
+- Shutdown terminates the app-server process group and escalates only after a timeout.
 
 ## Development
-
-### Prerequisites
-
-- Node.js 20.19+ or 22.12+
-- Yarn 1.22
-- Rust 1.88 or newer
-- Xcode Command Line Tools
-- Codex CLI for live PTY verification
 
 Install dependencies:
 
 ```bash
-yarn install --frozen-lockfile
+yarn install --ignore-engines
 ```
 
-Run the macOS app in development:
+Generate bindings from the configured or discovered Codex binary:
+
+```bash
+yarn codex:generate-protocol
+```
+
+Verify that checked-in bindings match the installed Codex version:
+
+```bash
+yarn codex:check-protocol
+```
+
+Run the native application:
 
 ```bash
 yarn tauri dev
 ```
 
-Run the frontend only:
+Run the frontend alone:
 
 ```bash
 yarn dev
 ```
 
-Build the native Apple silicon application:
+## Testing
 
 ```bash
-rustup target add aarch64-apple-darwin
-yarn run tauri -- build --target aarch64-apple-darwin -- --locked
+yarn test
+yarn build
+cargo test --manifest-path src-tauri/Cargo.toml
+yarn test:contract
+yarn test:e2e
+yarn verify
+make verify
 ```
 
-The application bundle is named `ATController.app`.
+Unit tests cover protocol framing and normalization, redaction, permission mapping, attachment serialization, state reduction, persistence migration, Git safety, structured timeline behavior, approvals, composer behavior, sidebar interactions, inspector actions, appearance, diagnostics, and keyboard command surfaces.
 
-Create locally verifiable Apple silicon packages with the production artifact names:
+The real contract and end-to-end tests use a temporary Git repository, skip clearly when Codex is unavailable or unauthenticated, and never mutate a user project.
+
+## Build and release
+
+Build the local native application:
+
+```bash
+yarn tauri build --bundles app,dmg
+```
+
+Create the exact local release filenames:
 
 ```bash
 yarn package:local
 ```
 
-This writes `ATController.dmg` and `ATController.app.zip` to
-`src-tauri/target/release-assets/`. Local packages use a resource-sealed ad-hoc
-signature; tagged production releases remain Developer ID signed and notarized
-by the protected GitHub Actions workflow.
+Artifacts are written to:
 
-## Verification
-
-Run the frontend build and UI tests:
-
-```bash
-yarn build
-yarn test:ui
+```text
+src-tauri/target/release-assets/ATController.dmg
+src-tauri/target/release-assets/ATController.app.zip
 ```
 
-Run Rust tests:
+Version fields stay synchronized across `package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`. See [docs/releasing.md](docs/releasing.md) for signing, notarization, and GitHub Release details.
 
-```bash
-cargo test --locked --manifest-path src-tauri/Cargo.toml
-```
+## Compatibility and troubleshooting
 
-Run the full verification sequence:
+If startup fails:
 
-```bash
-make verify
-```
+1. Run `which codex`, `codex --version`, and `codex app-server --help`.
+2. Confirm Codex authentication with `codex login status`.
+3. Open **Runtime → Diagnostics** and run the connection self-test.
+4. Configure an explicit Codex binary path if login-shell discovery selects the wrong installation.
+5. Regenerate protocol bindings after upgrading the local Codex CLI.
+6. Restart the runtime and reopen the thread.
 
-The full sequence runs the product/runtime audit, frontend build, UI tests, Rust tests, and Codex PTY smoke test. Logs are written to `artifacts/e2e/`, with the latest diagnosis in `artifacts/last_diagnosis.txt`.
+Unknown notifications are retained as generic structured activity instead of crashing the session. Unsupported required capabilities produce explicit upgrade or compatibility errors; ATController does not fall back to terminal scraping.
 
-Release CI additionally audits the locked Rust graph against RustSec for the
-`aarch64-apple-darwin` target. Vulnerable, unsound, and yanked packages fail that check;
-unmaintained-only notices remain visible without blocking releases.
-
-See [`docs/manual-terminal-rendering.md`](docs/manual-terminal-rendering.md) for the live terminal checklist.
-
-## Releases
-
-ATController releases use stable numeric SemVer (`major.minor.patch`). Keep these version fields aligned:
-
-- `package.json`
-- `src-tauri/tauri.conf.json`
-- `src-tauri/Cargo.toml`
-- `src-tauri/Cargo.lock`
-
-Set and verify a release version:
-
-```bash
-node scripts/sync-version.mjs set 0.1.0
-node scripts/sync-version.mjs check 0.1.0
-```
-
-Push an annotated `v*` tag only after the version change is on `main`:
-
-```bash
-git tag -a v0.1.0 -m "ATController v0.1.0"
-git push origin v0.1.0
-```
-
-The macOS GitHub Actions workflow builds a native Apple silicon application and publishes exactly:
-
-- `ATController.dmg`
-- `ATController.app.zip`
-
-Tag builds attach those files to the GitHub Release only after production signing and notarization verification succeeds. A tag build fails closed if any required Apple secret is unavailable.
-
-### Signing and Notarization
-
-Create a protected GitHub Actions environment named `production` and configure these environment secrets for signed and notarized releases:
-
-- `APPLE_CERTIFICATE`: base64-encoded Developer ID Application `.p12`
-- `APPLE_CERTIFICATE_PASSWORD`: password for the certificate
-- `APPLE_SIGNING_IDENTITY`: Developer ID Application certificate name
-- `APPLE_ID`: Apple ID used for notarization
-- `APPLE_PASSWORD`: app-specific password
-- `APPLE_TEAM_ID`: Apple Developer Team ID, also used as the expected code-signing `TeamIdentifier`
-
-Require approval for the `production` environment and restrict it to protected `v*` tags. Protect `main` and those tags from unauthorized creation or modification, and enable immutable releases in the repository settings. Apple credentials are exposed only to the fresh tag-only release job after its test dependencies pass and the remote tag is confirmed to still resolve to a commit contained in `main`.
-
-Pull-request, `main`, and manually dispatched builds produce only clearly named unsigned development artifacts and never receive Apple credentials. Version-tag builds require every secret above and never publish unsigned or unnotarized artifacts.
-
-The release workflow verifies the exact bundle name, identifier, and version; the thin `arm64` executable; Developer ID signature and Team ID; Gatekeeper assessment; notarization tickets; DMG integrity; release/tag freshness; and the exact two artifact names before publishing without overwriting assets.
-
-See [`docs/releasing.md`](docs/releasing.md) for the complete release checklist.
-
-## Architecture
-
-ATController has three local layers:
-
-- React and TypeScript implement the workspace, thread, settings, and terminal interface.
-- Tauri and Rust manage persistence, git operations, session discovery, and PTY lifecycle.
-- `portable_pty` launches the local shell and Codex CLI, while xterm.js renders the byte stream.
-
-For runtime flow and persistence details, see [`technology.md`](technology.md).
-
-## Troubleshooting
-
-### Codex CLI is not detected
-
-1. Confirm `codex --version` works in Terminal.
-2. Open ATController Settings and set the Codex CLI path explicitly if needed.
-3. Reopen the thread after changing the path.
-
-ATController launches through your login shell (`$SHELL -lic`, with `/bin/zsh` as the fallback), so shell startup errors can also affect detection.
-
-### Codex is not authenticated
-
-Run:
-
-```bash
-codex login
-codex login status
-```
-
-For a remote workspace, run those commands on the remote machine.
-
-### A saved session will not resume
-
-Confirm that the session still exists under the active Codex home and belongs to the selected workspace. Use **Start fresh** to clear the saved session ID and begin a new Codex session without deleting the old rollout file.
-
-### MCP or shell tools differ from Terminal
-
-Compare ATController’s environment diagnostics with your normal Terminal session. Check login-shell startup files such as `~/.zprofile` and `~/.zshrc`, and confirm that any required MCP servers are configured for the same Codex home.
-
-### Remote workspace will not start
-
-Test the configured SSH or rdev command directly in Terminal, then confirm that `codex --version` and `codex login status` work after connecting.
-
-## Icons
-
-The canonical icon source is `app icon.jpg`. Generate all platform icon assets with:
-
-```bash
-yarn generate:icons
-```
-
-Generated assets are written to `assets/icon.png` and `src-tauri/icons/`.
+See [docs/known-issues.md](docs/known-issues.md) for current runtime-specific limitations.

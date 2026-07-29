@@ -1,0 +1,6 @@
+{
+  "codexVersion": "codex-cli 0.144.0",
+  "experimentalApi": false,
+  "generatedBy": "codex app-server generate-ts and generate-json-schema",
+  "protocolTransport": "stdio-jsonl"
+}
