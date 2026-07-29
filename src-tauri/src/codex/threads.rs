@@ -322,12 +322,11 @@ impl CodexRuntime {
             )
             .await
         {
-            let known_cleanup_defect = error.to_string().contains("no such table: agent_jobs");
-            if !known_cleanup_defect || self.read_thread(thread_id.clone(), false).await.is_ok() {
+            if !is_known_delete_cleanup_defect(&error) {
                 return Err(error);
             }
             self.diagnostics.push_protocol_error(
-                "Codex deleted the thread rollout but reported a stale agent_jobs cleanup error",
+                "Codex deleted the thread rollout but 0.144.0 reported its stale agent_jobs cleanup error",
             );
         }
         storage::remove_codex_thread_ui_metadata(&thread_id)?;
@@ -610,6 +609,81 @@ fn validate_id(value: &str, label: &str) -> Result<()> {
         return Err(anyhow!("Invalid {label}"));
     }
     Ok(())
+}
+
+fn is_known_delete_cleanup_defect(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("no such table: agent_jobs"))
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use anyhow::anyhow;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{is_known_delete_cleanup_defect, CodexRuntime, RequestOptions};
+
+    #[test]
+    fn recognizes_codex_0144_stale_agent_jobs_delete_error() {
+        let error = anyhow!(
+            "failed to delete app-server state for thread-1: error returned from database: \
+             (code: 1) no such table: agent_jobs (-32603)"
+        );
+        assert!(is_known_delete_cleanup_defect(&error));
+    }
+
+    #[test]
+    fn preserves_unrelated_thread_delete_errors() {
+        assert!(!is_known_delete_cleanup_defect(&anyhow!(
+            "thread/delete failed: permission denied"
+        )));
+    }
+
+    #[tokio::test]
+    #[ignore = "uses the installed Codex app-server to verify its 0.144.0 delete compatibility path"]
+    async fn real_runtime_accepts_stale_agent_jobs_cleanup_failure() {
+        if std::env::var_os("ATCONTROLLER_RUN_CODEX_DELETE_COMPAT").is_none() {
+            eprintln!("skipped: set ATCONTROLLER_RUN_CODEX_DELETE_COMPAT=1");
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("atcontroller-delete-compat-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temporary delete workspace should exist");
+        let runtime = Arc::new(CodexRuntime::default());
+        let started = runtime
+            .request(
+                "thread/start",
+                json!({
+                    "cwd": root.to_string_lossy(),
+                    "approvalPolicy": "never",
+                    "sandbox": "danger-full-access",
+                    "serviceName": "ATController-delete-compat",
+                    "threadSource": "atcontroller"
+                }),
+                RequestOptions {
+                    timeout: Duration::from_secs(90),
+                    idempotent: false,
+                },
+            )
+            .await
+            .expect("temporary thread should start");
+        let thread_id = started["thread"]["id"]
+            .as_str()
+            .expect("temporary thread should have an id")
+            .to_string();
+
+        runtime
+            .delete_thread(thread_id)
+            .await
+            .expect("the known post-delete cleanup defect should not block removal");
+        runtime.shutdown().await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 fn update_effective_diagnostics(runtime: &CodexRuntime, session: &CodexThreadSession) {

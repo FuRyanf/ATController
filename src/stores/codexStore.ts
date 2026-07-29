@@ -331,7 +331,7 @@ export function reduceCodexEvent(
   };
 }
 
-class CodexStore {
+export class CodexStore {
   private snapshot = EMPTY_SNAPSHOT;
   private listeners = new Set<Listener>();
   private pendingEvents: CodexEvent[] = [];
@@ -387,6 +387,32 @@ class CodexStore {
       ...this.snapshot,
       activeThreadId: threadId,
       unseenEvents: 0
+    });
+  }
+
+  removeThread(threadId: string) {
+    this.pendingEvents = this.pendingEvents.filter(
+      (event) => event.threadId !== threadId && event.thread?.id !== threadId
+    );
+    const threads = { ...this.snapshot.threads };
+    const sessions = { ...this.snapshot.sessions };
+    const usage = { ...this.snapshot.usage };
+    delete threads[threadId];
+    delete sessions[threadId];
+    delete usage[threadId];
+    const approvals = Object.fromEntries(
+      Object.entries(this.snapshot.approvals).filter(
+        ([, approval]) => approval.threadId !== threadId
+      )
+    );
+    this.publish({
+      ...this.snapshot,
+      threads,
+      sessions,
+      approvals,
+      usage,
+      activeThreadId:
+        this.snapshot.activeThreadId === threadId ? null : this.snapshot.activeThreadId
     });
   }
 

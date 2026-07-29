@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 
+import { isTauri } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+
 import type {
   CodexModel,
   CodexRateLimitWindowV2,
@@ -42,6 +45,7 @@ interface MessageComposerProps {
   onSelectedSkillsChange: (skills: CodexSkill[]) => void;
   onPreferencesChange: (preferences: ThreadPreferences) => void;
   onPickAttachments: () => void;
+  onDropPaths: (paths: string[]) => void | Promise<void>;
   onSubmit: (inputs: ComposerInput[]) => void;
   onStop: () => void;
   onRestore: () => void;
@@ -49,6 +53,17 @@ interface MessageComposerProps {
 
 const MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+export function physicalPointInsideRect(
+  position: { x: number; y: number },
+  rect: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>,
+  scaleFactor: number
+): boolean {
+  const scale = Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1;
+  const x = position.x / scale;
+  const y = position.y / scale;
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
 
 function pathInsideWorkspace(path: string, workspacePath: string): boolean {
   const root = workspacePath.endsWith('/') ? workspacePath : `${workspacePath}/`;
@@ -155,11 +170,13 @@ export function MessageComposer({
   onSelectedSkillsChange,
   onPreferencesChange,
   onPickAttachments,
+  onDropPaths,
   onSubmit,
   onStop,
   onRestore
 }: MessageComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dropTargetRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [historyCursor, setHistoryCursor] = useState<number | null>(null);
@@ -194,6 +211,55 @@ export function MessageComposer({
     setHistoryCursor(null);
     setHistoryDraft('');
   }, [threadId]);
+
+  useEffect(() => {
+    if (!isTauri() || archived) return;
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void getCurrentWindow()
+      .onDragDropEvent((event) => {
+        if (disposed) return;
+        const payload = event.payload;
+        if (payload.type === 'leave') {
+          setDragging(false);
+          return;
+        }
+        const target = dropTargetRef.current;
+        const inside = Boolean(
+          target &&
+            physicalPointInsideRect(
+              payload.position,
+              target.getBoundingClientRect(),
+              window.devicePixelRatio
+            )
+        );
+        if (payload.type !== 'drop') {
+          setDragging(inside);
+          return;
+        }
+        setDragging(false);
+        if (!inside || payload.paths.length === 0) return;
+        void (async () => {
+          try {
+            setAttachmentError(null);
+            await onDropPaths(payload.paths);
+          } catch (error) {
+            if (!disposed) {
+              setAttachmentError(error instanceof Error ? error.message : String(error));
+            }
+          }
+        })();
+      })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stop = unlisten;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, [archived, onDropPaths]);
 
   const addFiles = async (files: File[]) => {
     setAttachmentError(null);
@@ -320,6 +386,7 @@ export function MessageComposer({
 
   return (
     <div
+      ref={dropTargetRef}
       className={`composer-wrap ${dragging ? 'dragging' : ''}`}
       onDragEnter={(event) => {
         event.preventDefault();

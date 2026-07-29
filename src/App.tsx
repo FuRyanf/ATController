@@ -423,6 +423,38 @@ export default function App() {
     }, 3_500);
   }, []);
 
+  const removeThreadFromUi = useCallback((threadId: string) => {
+    codexStore.removeThread(threadId);
+    setThreadIdsByWorkspace((current) =>
+      Object.fromEntries(
+        Object.entries(current).map(([workspaceId, threadIds]) => [
+          workspaceId,
+          threadIds.filter((candidate) => candidate !== threadId)
+        ])
+      )
+    );
+    const nextMetadata = { ...metadataRef.current };
+    delete nextMetadata[threadId];
+    metadataRef.current = nextMetadata;
+    setMetadata(nextMetadata);
+    setAttachmentsByThread((current) => {
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
+    setSkillsByThread((current) => {
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
+    if (selectedThreadIdRef.current === threadId) {
+      selectedThreadIdRef.current = null;
+      setSelectedThreadId(null);
+      setThreadError(null);
+      window.localStorage.removeItem(SELECTED_THREAD_KEY);
+    }
+  }, []);
+
   const copyText = useCallback(
     async (value: string, label: string) => {
       if (!value) return;
@@ -935,6 +967,10 @@ export default function App() {
     let disposed = false;
     const unlisten: Array<() => void> = [];
     void apiModule.onCodexEvent((event: CodexEvent) => {
+      const threadWasDeleted = event.kind === 'threadDeleted' && Boolean(event.threadId);
+      if (threadWasDeleted) {
+        removeThreadFromUi(event.threadId!);
+      }
       codexStore.queueEvent(event);
       const eventThread =
         event.thread ??
@@ -943,7 +979,7 @@ export default function App() {
         event.threadId || eventThread
           ? findWorkspaceForThread(event.threadId ?? eventThread!.id, eventThread)
           : undefined;
-      if (eventThread && eventWorkspace) {
+      if (!threadWasDeleted && eventThread && eventWorkspace) {
         setThreadIdsByWorkspace((current) => ({
           ...current,
           [eventWorkspace.id]: current[eventWorkspace.id]?.includes(eventThread.id)
@@ -1028,6 +1064,7 @@ export default function App() {
     findWorkspaceForThread,
     persistMetadata,
     reconcileRuntimeDiagnostics,
+    removeThreadFromUi,
     refreshProjectGit,
     scheduleGitRefresh,
     updateMetadata
@@ -1885,16 +1922,15 @@ export default function App() {
     }
   }, [showToast]);
 
-  const pickAttachments = useCallback(async () => {
+  const attachPaths = useCallback(async (paths: string[]) => {
     if (!selectedWorkspace || !selectedThreadId) return;
-    const selected = await open({
-      multiple: true,
-      directory: false,
-      title: 'Attach files to this Codex turn'
-    });
-    const paths = typeof selected === 'string' ? [selected] : selected ?? [];
-    if (!paths.length) return;
-    const added = paths.map((path) => attachmentFromPath(path, selectedWorkspace.path));
+    const uniquePaths = Array.from(
+      new Set(paths.filter((path) => typeof path === 'string' && path.startsWith('/')))
+    );
+    if (!uniquePaths.length) return;
+    const added = uniquePaths.map((path) =>
+      attachmentFromPath(path, selectedWorkspace.path)
+    );
     const outsideCount = added.filter((attachment) => attachment.outsideWorkspace).length;
     if (outsideCount) {
       const approved = await confirm(
@@ -1905,9 +1941,27 @@ export default function App() {
     }
     setAttachmentsByThread((current) => ({
       ...current,
-      [selectedThreadId]: [...(current[selectedThreadId] ?? []), ...added]
+      [selectedThreadId]: [
+        ...(current[selectedThreadId] ?? []),
+        ...added.filter(
+          (attachment) =>
+            !current[selectedThreadId]?.some(
+              (existing) => existing.path === attachment.path
+            )
+        )
+      ]
     }));
   }, [selectedThreadId, selectedWorkspace]);
+
+  const pickAttachments = useCallback(async () => {
+    const selected = await open({
+      multiple: true,
+      directory: false,
+      title: 'Attach files to this Codex turn'
+    });
+    const paths = typeof selected === 'string' ? [selected] : selected ?? [];
+    await attachPaths(paths);
+  }, [attachPaths]);
 
   const renameThread = useCallback(
     (threadId: string) => {
@@ -2077,16 +2131,8 @@ export default function App() {
             );
             if (!approved) break;
             await api.deleteCodexThread(thread.id);
-            setThreadIdsByWorkspace((current) => ({
-              ...current,
-              [workspace.id]: (current[workspace.id] ?? []).filter(
-                (threadId) => threadId !== thread.id
-              )
-            }));
-            if (selectedThreadIdRef.current === thread.id) {
-              setSelectedThreadId(null);
-              codexStore.setActiveThread(null);
-            }
+            removeThreadFromUi(thread.id);
+            showToast('Codex thread deleted', 'success');
             break;
           }
         }
@@ -2103,6 +2149,7 @@ export default function App() {
       openThread,
       openProjectTerminal,
       persistMetadata,
+      removeThreadFromUi,
       refreshThreads,
       renameThread,
       resumeRequest,
@@ -2662,6 +2709,7 @@ export default function App() {
                   }
                   onPreferencesChange={updatePreferences}
                   onPickAttachments={() => void pickAttachments()}
+                  onDropPaths={attachPaths}
                   onSubmit={(inputs) => void submitInputs(inputs)}
                   onStop={() => void stopTurn()}
                   onRestore={() => void runThreadAction(selectedThread, 'unarchive')}

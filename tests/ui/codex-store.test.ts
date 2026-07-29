@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { reduceCodexEvent, type CodexStoreSnapshot } from '../../src/stores/codexStore';
+import {
+  CodexStore,
+  reduceCodexEvent,
+  type CodexStoreSnapshot
+} from '../../src/stores/codexStore';
 import type { CodexEvent, CodexThread } from '../../src/types';
 
 function thread(): CodexThread {
@@ -248,5 +252,80 @@ describe('structured Codex event reduction', () => {
       })
     );
     expect(state.approvals).toEqual({});
+  });
+
+  it('removes all local state for a thread even when Codex omits thread/deleted', () => {
+    const store = new CodexStore();
+    store.setSession({
+      thread: thread(),
+      settings: {
+        requestedModel: null,
+        effectiveModel: 'runtime-model',
+        modelResolution: 'runtimeDefault',
+        requestedReasoningEffort: null,
+        effectiveReasoningEffort: 'high',
+        reasoningEffortResolution: 'runtimeDefault',
+        requestedServiceTier: null,
+        effectiveServiceTier: null,
+        serviceTierResolution: 'runtimeDefault',
+        permissionMode: 'fullAccess',
+        permissionProfile: 'fullAccess',
+        approvalPolicy: 'never',
+        sandboxPolicy: 'danger-full-access',
+        cwd: '/tmp/project'
+      },
+      instructionSources: []
+    });
+    store.setActiveThread('thread-1');
+    store.queueEvent(
+      event({
+        sequence: 1,
+        kind: 'approvalRequested',
+        approval: {
+          requestId: 7,
+          approvalType: 'commandExecution',
+          threadId: 'thread-1',
+          availableDecisions: ['accept', 'decline']
+        },
+        tokenUsage: {
+          totalTokens: 12,
+          inputTokens: 10,
+          cachedInputTokens: 0,
+          outputTokens: 2,
+          reasoningOutputTokens: 0,
+          lastTotalTokens: 12,
+          modelContextWindow: 100
+        }
+      })
+    );
+    store.flushEvents();
+
+    store.removeThread('thread-1');
+
+    expect(store.getSnapshot().threads).toEqual({});
+    expect(store.getSnapshot().sessions).toEqual({});
+    expect(store.getSnapshot().approvals).toEqual({});
+    expect(store.getSnapshot().usage).toEqual({});
+    expect(store.getSnapshot().activeThreadId).toBeNull();
+  });
+
+  it('drops queued activity for a thread removed through the compatibility path', () => {
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    store.queueEvent(
+      event({
+        sequence: 1,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-1',
+        itemId: 'agent-1',
+        delta: 'late output'
+      })
+    );
+
+    store.removeThread('thread-1');
+    store.flushEvents();
+
+    expect(store.getSnapshot().threads).toEqual({});
   });
 });

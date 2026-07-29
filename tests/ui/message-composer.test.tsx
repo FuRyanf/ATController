@@ -1,14 +1,30 @@
 import { useState } from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   attachmentsToInputs,
   MessageComposer,
+  physicalPointInsideRect,
   type ComposerAttachment
 } from '../../src/components/MessageComposer';
 import type { CodexModel, ThreadPreferences } from '../../src/types';
+
+const nativeDrop = vi.hoisted(() => ({
+  handler: null as ((event: { payload: unknown }) => void) | null
+}));
+
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    onDragDropEvent: async (handler: (event: { payload: unknown }) => void) => {
+      nativeDrop.handler = handler;
+      return () => {
+        nativeDrop.handler = null;
+      };
+    }
+  })
+}));
 
 const model: CodexModel = {
   id: 'runtime-model',
@@ -60,6 +76,7 @@ function renderComposer(overrides: Partial<React.ComponentProps<typeof MessageCo
     onSelectedSkillsChange: vi.fn(),
     onPreferencesChange: vi.fn(),
     onPickAttachments: vi.fn(),
+    onDropPaths: vi.fn(),
     onSubmit: vi.fn(),
     onStop: vi.fn(),
     onRestore: vi.fn(),
@@ -68,6 +85,11 @@ function renderComposer(overrides: Partial<React.ComponentProps<typeof MessageCo
   render(<MessageComposer {...props} />);
   return props;
 }
+
+afterEach(() => {
+  delete (globalThis as typeof globalThis & { isTauri?: boolean }).isTauri;
+  nativeDrop.handler = null;
+});
 
 describe('Codex message composer', () => {
   it('sends on Enter and preserves a newline on Shift Enter', async () => {
@@ -152,6 +174,54 @@ describe('Codex message composer', () => {
     ]);
   });
 
+  it('maps native physical drag coordinates into the composer CSS bounds', () => {
+    expect(
+      physicalPointInsideRect(
+        { x: 80, y: 120 },
+        { left: 20, right: 120, top: 40, bottom: 100 },
+        2
+      )
+    ).toBe(true);
+    expect(
+      physicalPointInsideRect(
+        { x: 10, y: 120 },
+        { left: 20, right: 120, top: 40, bottom: 100 },
+        2
+      )
+    ).toBe(false);
+  });
+
+  it('accepts file paths from the native Tauri drop event', async () => {
+    (globalThis as typeof globalThis & { isTauri?: boolean }).isTauri = true;
+    const onDropPaths = vi.fn(async () => undefined);
+    renderComposer({ onDropPaths });
+    await waitFor(() => expect(nativeDrop.handler).not.toBeNull());
+
+    act(() => {
+      nativeDrop.handler?.({
+        payload: {
+          type: 'enter',
+          paths: ['/tmp/project/notes.txt'],
+          position: { x: 0, y: 0 }
+        }
+      });
+    });
+    expect(screen.getByText('Drop files or images to attach')).toBeInTheDocument();
+
+    act(() => {
+      nativeDrop.handler?.({
+        payload: {
+          type: 'drop',
+          paths: ['/tmp/project/notes.txt'],
+          position: { x: 0, y: 0 }
+        }
+      });
+    });
+    await waitFor(() =>
+      expect(onDropPaths).toHaveBeenCalledWith(['/tmp/project/notes.txt'])
+    );
+  });
+
   it('offers Stop and steering while a turn is running', async () => {
     const user = userEvent.setup();
     const props = renderComposer({ running: true });
@@ -205,6 +275,7 @@ describe('Codex message composer', () => {
           onSelectedSkillsChange={vi.fn()}
           onPreferencesChange={vi.fn()}
           onPickAttachments={vi.fn()}
+          onDropPaths={vi.fn()}
           onSubmit={submit}
           onStop={vi.fn()}
           onRestore={vi.fn()}
