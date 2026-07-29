@@ -4,10 +4,40 @@ export interface Workspace {
   id: string;
   name: string;
   path: string;
+  workspaceType: 'local' | string;
+  lastOpenedAt?: string | null;
+  isPinned: boolean;
+  sortOrder: number;
+  isExpanded: boolean;
+  iconPreference?: string | null;
+  isAvailable: boolean;
   gitPullOnMasterForNewThreads: boolean;
   createdAt: string;
   updatedAt: string;
 }
+
+export interface WorkspaceUpdate {
+  displayName?: string | null;
+  isPinned?: boolean | null;
+  isExpanded?: boolean | null;
+  iconPreference?: string | null;
+  clearIconPreference?: boolean;
+  markOpened?: boolean;
+}
+
+export interface CodexDiscoveredProject {
+  name: string;
+  workspacePath: string;
+  threadCount: number;
+  activeThreadCount: number;
+  archivedThreadCount: number;
+  mostRecentActivity?: number | null;
+  alreadyAdded: boolean;
+  available: boolean;
+  threadIds: string[];
+}
+
+export type ProjectSortMode = 'custom' | 'name' | 'recent' | 'running';
 
 export interface GitInfo {
   branch: string;
@@ -361,6 +391,7 @@ export interface CodexThreadUiMetadata {
   fallbackTitle: string;
   pinned: boolean;
   unread: boolean;
+  archived: boolean;
   draft: string;
   promptHistory: string[];
   permissionMode: PermissionMode;

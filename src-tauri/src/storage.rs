@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
@@ -9,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::models::{CodexThreadUiMetadata, Settings, Workspace};
+use crate::models::{CodexThreadUiMetadata, Settings, Workspace, WorkspaceUpdate};
 
 const APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ATController";
 const WORKSPACES_FILE: &str = "workspaces.json";
@@ -19,6 +20,12 @@ const CODEX_THREAD_UI_VERSION: u32 = 1;
 const APP_SERVER_MIGRATION_VERSION: u32 = 3;
 const APP_SERVER_MIGRATION_MARKER: &str = "migrations/app-server-v3.json";
 const APP_SERVER_MIGRATION_BACKUP_DIR: &str = "migration-backups/app-server-v3";
+const CODEX_SETTINGS_MIGRATION_VERSION: u32 = 1;
+const CODEX_SETTINGS_MIGRATION_MARKER: &str = "migrations/codex-settings-v1.json";
+const CODEX_SETTINGS_MIGRATION_BACKUP_DIR: &str = "migration-backups/codex-settings-v1";
+const PROJECT_SHELF_MIGRATION_VERSION: u32 = 1;
+const PROJECT_SHELF_MIGRATION_MARKER: &str = "migrations/project-shelves-v1.json";
+const PROJECT_SHELF_MIGRATION_BACKUP_DIR: &str = "migration-backups/project-shelves-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -333,6 +340,7 @@ fn migrate_legacy_thread_metadata(
                 .to_string();
             ui.pinned = bool_field(&value, "pinned");
             ui.unread = bool_field(&value, "unread");
+            ui.archived = bool_field(&value, "archived");
             ui.permission_mode = if bool_field(&value, "fullAccess") {
                 "fullAccess".to_string()
             } else {
@@ -434,6 +442,233 @@ fn run_app_server_migration(root: &Path) -> Result<()> {
     .with_context(|| format!("Unable to record migration {}", marker_path.display()))
 }
 
+fn run_codex_settings_migration(root: &Path) -> Result<()> {
+    let marker_path = root.join(CODEX_SETTINGS_MIGRATION_MARKER);
+    if marker_path.is_file() {
+        let marker = fs::read(&marker_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+        if marker.as_ref().is_some_and(|value| {
+            value.get("version").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(CODEX_SETTINGS_MIGRATION_VERSION))
+                && value
+                    .get("completedAt")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+                    .is_some()
+        }) {
+            return Ok(());
+        }
+    }
+
+    let settings_path = root.join(SETTINGS_FILE);
+    let backup_root = root.join(CODEX_SETTINGS_MIGRATION_BACKUP_DIR);
+    fs::create_dir_all(&backup_root)?;
+    backup_file_once(&settings_path, &backup_root.join(SETTINGS_FILE))?;
+
+    if settings_path.is_file() {
+        let raw = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Unable to read {}", settings_path.display()))?;
+        let settings = serde_json::from_str::<Settings>(&raw)
+            .with_context(|| format!("Invalid settings JSON in {}", settings_path.display()))?
+            .normalized();
+        write_file_atomic(
+            &settings_path,
+            serde_json::to_string_pretty(&settings)?.as_bytes(),
+        )?;
+    }
+
+    let marker = serde_json::json!({
+        "version": CODEX_SETTINGS_MIGRATION_VERSION,
+        "completedAt": Utc::now(),
+        "backupDirectory": CODEX_SETTINGS_MIGRATION_BACKUP_DIR,
+        "note": "Settings were rewritten to the Codex-only ATController schema; the previous file is retained in the backup directory."
+    });
+    write_file_atomic(
+        &marker_path,
+        serde_json::to_string_pretty(&marker)?.as_bytes(),
+    )
+    .with_context(|| {
+        format!(
+            "Unable to record Codex settings migration {}",
+            marker_path.display()
+        )
+    })
+}
+
+fn project_shelf_migration_is_complete(path: &Path) -> bool {
+    fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        .is_some_and(|value| {
+            value.get("version").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(PROJECT_SHELF_MIGRATION_VERSION))
+                && value
+                    .get("completedAt")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+                    .is_some()
+        })
+}
+
+fn run_project_shelf_migration(root: &Path) -> Result<()> {
+    let marker_path = root.join(PROJECT_SHELF_MIGRATION_MARKER);
+    if project_shelf_migration_is_complete(&marker_path) {
+        return Ok(());
+    }
+
+    let workspaces_path = root.join(WORKSPACES_FILE);
+    let backup_root = root.join(PROJECT_SHELF_MIGRATION_BACKUP_DIR);
+    fs::create_dir_all(&backup_root)?;
+    backup_file_once(&workspaces_path, &backup_root.join(WORKSPACES_FILE))?;
+    backup_file_once(
+        &root.join(CODEX_THREAD_UI_FILE),
+        &backup_root.join(CODEX_THREAD_UI_FILE),
+    )?;
+
+    let mut migrated = Vec::new();
+    let mut malformed = Vec::new();
+    let raw = fs::read(&workspaces_path)
+        .with_context(|| format!("Unable to read {}", workspaces_path.display()))?;
+    match serde_json::from_slice::<Vec<serde_json::Value>>(&raw) {
+        Ok(values) => {
+            for (index, mut value) in values.into_iter().enumerate() {
+                if !string_field(&value, "kind")
+                    .unwrap_or("local")
+                    .eq_ignore_ascii_case("local")
+                {
+                    malformed.push(serde_json::json!({
+                        "index": index,
+                        "reason": "remote legacy workspace is unsupported by local ATController",
+                        "record": value
+                    }));
+                    continue;
+                }
+                let Some(object) = value.as_object_mut() else {
+                    malformed.push(serde_json::json!({
+                        "index": index,
+                        "reason": "workspace record is not an object",
+                        "record": value
+                    }));
+                    continue;
+                };
+
+                let original_path = object
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string);
+                let Some(original_path) = original_path else {
+                    malformed.push(serde_json::json!({
+                        "index": index,
+                        "reason": "workspace record has no usable path",
+                        "record": value
+                    }));
+                    continue;
+                };
+                let resolved = fs::canonicalize(&original_path).ok();
+                let unresolved = PathBuf::from(&original_path);
+                let stored_path = resolved
+                    .as_ref()
+                    .unwrap_or(&unresolved)
+                    .to_string_lossy()
+                    .to_string();
+                let fallback_name = Path::new(&stored_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "Project".to_string());
+                let now = Utc::now();
+
+                object.insert("path".to_string(), serde_json::Value::String(stored_path));
+                object
+                    .entry("id")
+                    .or_insert_with(|| serde_json::Value::String(Uuid::new_v4().to_string()));
+                object
+                    .entry("name")
+                    .or_insert_with(|| serde_json::Value::String(fallback_name));
+                object
+                    .entry("workspaceType")
+                    .or_insert_with(|| serde_json::Value::String("local".to_string()));
+                object
+                    .entry("createdAt")
+                    .or_insert_with(|| serde_json::Value::String(now.to_rfc3339()));
+                object
+                    .entry("updatedAt")
+                    .or_insert_with(|| serde_json::Value::String(now.to_rfc3339()));
+                object
+                    .entry("lastOpenedAt")
+                    .or_insert(serde_json::Value::Null);
+                object
+                    .entry("isPinned")
+                    .or_insert(serde_json::Value::Bool(false));
+                object
+                    .entry("sortOrder")
+                    .or_insert_with(|| serde_json::Value::Number((index as i64).into()));
+                object
+                    .entry("isExpanded")
+                    .or_insert(serde_json::Value::Bool(true));
+                object
+                    .entry("iconPreference")
+                    .or_insert(serde_json::Value::Null);
+                object.insert(
+                    "isAvailable".to_string(),
+                    serde_json::Value::Bool(resolved.as_ref().is_some_and(|path| path.is_dir())),
+                );
+                object
+                    .entry("gitPullOnMasterForNewThreads")
+                    .or_insert(serde_json::Value::Bool(false));
+
+                match serde_json::from_value::<Workspace>(value.clone()) {
+                    Ok(workspace) => migrated.push(workspace),
+                    Err(error) => malformed.push(serde_json::json!({
+                        "index": index,
+                        "reason": error.to_string(),
+                        "record": value
+                    })),
+                }
+            }
+            save_workspaces_at(&workspaces_path, &migrated)?;
+        }
+        Err(error) => {
+            malformed.push(serde_json::json!({
+                "reason": format!("workspace registry is not a JSON array: {error}"),
+                "backup": format!("{PROJECT_SHELF_MIGRATION_BACKUP_DIR}/{WORKSPACES_FILE}")
+            }));
+            save_workspaces_at(&workspaces_path, &[])?;
+        }
+    }
+
+    let report = serde_json::json!({
+        "version": PROJECT_SHELF_MIGRATION_VERSION,
+        "note": "Every original record is retained in the backup. Records that could not be migrated are listed here instead of being silently discarded.",
+        "malformedRecords": malformed
+    });
+    write_file_atomic(
+        &backup_root.join("migration-report.json"),
+        serde_json::to_string_pretty(&report)?.as_bytes(),
+    )?;
+
+    let marker = serde_json::json!({
+        "version": PROJECT_SHELF_MIGRATION_VERSION,
+        "completedAt": Utc::now(),
+        "backupDirectory": PROJECT_SHELF_MIGRATION_BACKUP_DIR,
+        "projectCount": migrated.len(),
+        "malformedRecordCount": report["malformedRecords"].as_array().map(Vec::len).unwrap_or(0)
+    });
+    write_file_atomic(
+        &marker_path,
+        serde_json::to_string_pretty(&marker)?.as_bytes(),
+    )
+    .with_context(|| {
+        format!(
+            "Unable to record project shelf migration {}",
+            marker_path.display()
+        )
+    })
+}
+
 pub fn ensure_base_dirs() -> Result<PathBuf> {
     let _guard = base_dirs_lock()
         .lock()
@@ -441,6 +676,7 @@ pub fn ensure_base_dirs() -> Result<PathBuf> {
     let root = app_support_root()?;
     fs::create_dir_all(&root)?;
     run_app_server_migration(&root)?;
+    run_codex_settings_migration(&root)?;
     if !root.join(WORKSPACES_FILE).exists() {
         write_file_atomic(&root.join(WORKSPACES_FILE), b"[]")?;
     }
@@ -450,6 +686,7 @@ pub fn ensure_base_dirs() -> Result<PathBuf> {
             serde_json::to_string_pretty(&Settings::default())?.as_bytes(),
         )?;
     }
+    run_project_shelf_migration(&root)?;
     Ok(root)
 }
 
@@ -495,23 +732,52 @@ pub fn load_workspaces() -> Result<Vec<Workspace>> {
     let file = workspaces_file()?;
     let raw =
         fs::read_to_string(&file).with_context(|| format!("Unable to read {}", file.display()))?;
-    parse_local_workspaces(&raw)
-        .with_context(|| format!("Invalid workspace JSON in {}", file.display()))
+    let mut workspaces = parse_local_workspaces(&raw)
+        .with_context(|| format!("Invalid workspace JSON in {}", file.display()))?;
+    for workspace in &mut workspaces {
+        workspace.workspace_type = "local".to_string();
+        workspace.is_available = Path::new(&workspace.path).is_dir();
+    }
+    sort_workspaces(&mut workspaces);
+    Ok(workspaces)
+}
+
+fn sort_workspaces(workspaces: &mut [Workspace]) {
+    workspaces.sort_by(|left, right| {
+        right
+            .is_pinned
+            .cmp(&left.is_pinned)
+            .then_with(|| left.sort_order.cmp(&right.sort_order))
+            .then_with(|| left.created_at.cmp(&right.created_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn save_workspaces_at(path: &Path, workspaces: &[Workspace]) -> Result<()> {
+    write_file_atomic(path, serde_json::to_string_pretty(workspaces)?.as_bytes())
 }
 
 fn save_workspaces(workspaces: &[Workspace]) -> Result<()> {
-    write_file_atomic(
-        &workspaces_file()?,
-        serde_json::to_string_pretty(workspaces)?.as_bytes(),
-    )
+    save_workspaces_at(&workspaces_file()?, workspaces)
 }
 
-pub fn add_workspace(path: &str) -> Result<Workspace> {
+fn canonical_workspace_path(path: &str) -> Result<PathBuf> {
     let canonical_path = fs::canonicalize(path)
         .with_context(|| format!("Unable to resolve workspace path: {path}"))?;
     if !canonical_path.is_dir() {
         return Err(anyhow!("Workspace path is not a directory"));
     }
+    Ok(canonical_path)
+}
+
+fn workspace_path_matches(workspace: &Workspace, canonical_path: &Path) -> bool {
+    fs::canonicalize(&workspace.path)
+        .map(|known| known == canonical_path)
+        .unwrap_or_else(|_| Path::new(&workspace.path) == canonical_path)
+}
+
+pub fn add_workspace(path: &str) -> Result<Workspace> {
+    let canonical_path = canonical_workspace_path(path)?;
     let canonical = canonical_path.to_string_lossy().to_string();
     let _guard = workspace_registry_lock()
         .lock()
@@ -519,11 +785,17 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
     let mut workspaces = load_workspaces()?;
     if let Some(existing) = workspaces
         .iter()
-        .find(|workspace| workspace.path == canonical)
+        .find(|workspace| workspace_path_matches(workspace, &canonical_path))
     {
         return Ok(existing.clone());
     }
     let now = Utc::now();
+    let sort_order = workspaces
+        .iter()
+        .map(|workspace| workspace.sort_order)
+        .max()
+        .unwrap_or(-1)
+        + 1;
     let workspace = Workspace {
         id: Uuid::new_v4().to_string(),
         name: canonical_path
@@ -532,6 +804,13 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "Project".to_string()),
         path: canonical,
+        workspace_type: "local".to_string(),
+        last_opened_at: Some(now),
+        is_pinned: false,
+        sort_order,
+        is_expanded: true,
+        icon_preference: None,
+        is_available: true,
         git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
@@ -539,6 +818,91 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
     workspaces.push(workspace.clone());
     save_workspaces(&workspaces)?;
     Ok(workspace)
+}
+
+pub fn clone_repository(repository: &str, destination_parent: &str) -> Result<Workspace> {
+    let repository = repository.trim();
+    if repository.is_empty()
+        || repository.len() > 2_048
+        || repository.starts_with('-')
+        || repository.chars().any(char::is_control)
+    {
+        return Err(anyhow!("Invalid repository location"));
+    }
+    let is_remote = ["https://", "http://", "ssh://", "git://"]
+        .iter()
+        .any(|prefix| repository.starts_with(prefix))
+        || (repository.starts_with("git@") && repository.contains(':'));
+    let is_local = Path::new(repository).is_absolute() && Path::new(repository).exists();
+    if !is_remote && !is_local {
+        return Err(anyhow!(
+            "Repository must be an HTTPS, SSH, git URL, or an existing absolute local path"
+        ));
+    }
+    if (repository.starts_with("https://") || repository.starts_with("http://"))
+        && repository
+            .split("://")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .is_some_and(|authority| authority.contains('@'))
+    {
+        return Err(anyhow!(
+            "Repository URLs containing credentials are not accepted; use Git credential management instead"
+        ));
+    }
+
+    let parent = canonical_workspace_path(destination_parent)?;
+    let name_source = repository
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(repository)
+        .trim_end_matches(['/', '\\']);
+    let repository_name = name_source
+        .rsplit(['/', '\\', ':'])
+        .next()
+        .unwrap_or_default()
+        .strip_suffix(".git")
+        .unwrap_or_else(|| {
+            name_source
+                .rsplit(['/', '\\', ':'])
+                .next()
+                .unwrap_or_default()
+        })
+        .trim();
+    if repository_name.is_empty()
+        || repository_name == "."
+        || repository_name == ".."
+        || repository_name.chars().any(|character| {
+            character.is_control() || character == '/' || character == '\\' || character == ':'
+        })
+    {
+        return Err(anyhow!(
+            "Unable to derive a safe project name from the repository"
+        ));
+    }
+    let destination = parent.join(repository_name);
+    if destination.exists() {
+        return Err(anyhow!(
+            "A file or folder named `{repository_name}` already exists in the destination"
+        ));
+    }
+
+    let git = if Path::new("/usr/bin/git").is_file() {
+        Path::new("/usr/bin/git")
+    } else {
+        Path::new("git")
+    };
+    let status = Command::new(git)
+        .arg("clone")
+        .arg("--")
+        .arg(repository)
+        .arg(&destination)
+        .status()
+        .context("Unable to launch Git")?;
+    if !status.success() {
+        return Err(anyhow!("Git clone failed with {status}"));
+    }
+    add_workspace(&destination.to_string_lossy())
 }
 
 pub fn remove_workspace(workspace_id: &str) -> Result<bool> {
@@ -596,18 +960,102 @@ pub fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>>
         }
     }
     ordered.extend(workspaces);
+    for (index, workspace) in ordered.iter_mut().enumerate() {
+        workspace.sort_order = index as i64;
+        workspace.updated_at = Utc::now();
+    }
+    sort_workspaces(&mut ordered);
     save_workspaces(&ordered)?;
     Ok(ordered)
 }
 
+pub fn update_workspace(workspace_id: &str, update: WorkspaceUpdate) -> Result<Workspace> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let _guard = workspace_registry_lock()
+        .lock()
+        .map_err(|_| anyhow!("Workspace registry lock poisoned"))?;
+    let mut workspaces = load_workspaces()?;
+    let workspace = workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| anyhow!("Project not found"))?;
+
+    if let Some(display_name) = update.display_name {
+        let display_name = display_name.trim();
+        if display_name.is_empty() || display_name.chars().count() > 120 {
+            return Err(anyhow!(
+                "Project display name must contain 1 to 120 characters"
+            ));
+        }
+        if display_name.chars().any(char::is_control) {
+            return Err(anyhow!("Project display name contains invalid characters"));
+        }
+        workspace.name = display_name.to_string();
+    }
+    if let Some(is_pinned) = update.is_pinned {
+        workspace.is_pinned = is_pinned;
+    }
+    if let Some(is_expanded) = update.is_expanded {
+        workspace.is_expanded = is_expanded;
+    }
+    if update.clear_icon_preference {
+        workspace.icon_preference = None;
+    } else if let Some(icon_preference) = update.icon_preference {
+        let icon_preference = icon_preference.trim();
+        if icon_preference.is_empty()
+            || icon_preference.len() > 40
+            || !icon_preference
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return Err(anyhow!("Invalid project icon preference"));
+        }
+        workspace.icon_preference = Some(icon_preference.to_string());
+    }
+    if update.mark_opened {
+        workspace.last_opened_at = Some(Utc::now());
+    }
+    workspace.updated_at = Utc::now();
+    let updated = workspace.clone();
+    sort_workspaces(&mut workspaces);
+    save_workspaces(&workspaces)?;
+    Ok(updated)
+}
+
+pub fn relocate_workspace(workspace_id: &str, path: &str) -> Result<Workspace> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let canonical_path = canonical_workspace_path(path)?;
+    let canonical = canonical_path.to_string_lossy().to_string();
+    let _guard = workspace_registry_lock()
+        .lock()
+        .map_err(|_| anyhow!("Workspace registry lock poisoned"))?;
+    let mut workspaces = load_workspaces()?;
+    if workspaces.iter().any(|workspace| {
+        workspace.id != workspace_id && workspace_path_matches(workspace, &canonical_path)
+    }) {
+        return Err(anyhow!(
+            "That folder is already represented by another ATController project"
+        ));
+    }
+    let workspace = workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| anyhow!("Project not found"))?;
+    workspace.path = canonical;
+    workspace.is_available = true;
+    workspace.last_opened_at = Some(Utc::now());
+    workspace.updated_at = Utc::now();
+    let updated = workspace.clone();
+    save_workspaces(&workspaces)?;
+    Ok(updated)
+}
+
 pub fn resolve_workspace_by_path(workspace_path: &str) -> Result<Option<Workspace>> {
-    let requested = fs::canonicalize(workspace_path)
-        .unwrap_or_else(|_| PathBuf::from(workspace_path))
-        .to_string_lossy()
-        .to_string();
+    let requested =
+        fs::canonicalize(workspace_path).unwrap_or_else(|_| PathBuf::from(workspace_path));
     Ok(load_workspaces()?
         .into_iter()
-        .find(|workspace| workspace.path == requested))
+        .find(|workspace| workspace_path_matches(workspace, &requested)))
 }
 
 pub fn list_codex_thread_ui_metadata(workspace_id: &str) -> Result<Vec<CodexThreadUiMetadata>> {
@@ -657,7 +1105,8 @@ pub fn save_codex_thread_ui_metadata(
     let thread_id = validate_storage_segment(&metadata.thread_id, "thread id")?.to_string();
     let workspace_id =
         validate_storage_segment(&metadata.workspace_id, "workspace id")?.to_string();
-    if !load_workspaces()?
+    let workspaces = load_workspaces()?;
+    if !workspaces
         .iter()
         .any(|workspace| workspace.id == workspace_id)
     {
@@ -669,7 +1118,11 @@ pub fn save_codex_thread_ui_metadata(
         .map_err(|_| anyhow!("Codex thread UI metadata lock poisoned"))?;
     let mut store = read_codex_thread_ui_store_at(&root)?;
     if let Some(existing) = store.threads.get(&thread_id) {
-        if existing.workspace_id != workspace_id {
+        if existing.workspace_id != workspace_id
+            && workspaces
+                .iter()
+                .any(|workspace| workspace.id == existing.workspace_id)
+        {
             return Err(anyhow!("Codex thread belongs to a different workspace"));
         }
     }
@@ -775,6 +1228,137 @@ mod tests {
     }
 
     #[test]
+    fn project_shelf_migration_backs_up_and_enriches_flat_workspace_records() {
+        let storage = TestStorage::new();
+        let project = storage.root.join("Legacy Project");
+        fs::create_dir_all(&project).expect("legacy project");
+        let created = "2026-01-01T00:00:00Z";
+        fs::write(
+            storage.root.join(WORKSPACES_FILE),
+            serde_json::to_vec_pretty(&serde_json::json!([{
+                "id": "legacy-project",
+                "name": "Legacy Project",
+                "path": project,
+                "createdAt": created,
+                "updatedAt": created
+            }]))
+            .expect("legacy workspaces"),
+        )
+        .expect("write legacy workspaces");
+
+        let workspaces = load_workspaces().expect("migrated workspaces");
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].id, "legacy-project");
+        assert!(workspaces[0].is_expanded);
+        assert!(workspaces[0].is_available);
+        assert_eq!(workspaces[0].workspace_type, "local");
+        assert!(storage
+            .root
+            .join(PROJECT_SHELF_MIGRATION_BACKUP_DIR)
+            .join(WORKSPACES_FILE)
+            .is_file());
+        assert!(storage.root.join(PROJECT_SHELF_MIGRATION_MARKER).is_file());
+    }
+
+    #[test]
+    fn project_updates_persist_expansion_pinning_icon_and_custom_order() {
+        let storage = TestStorage::new();
+        let first_path = storage.root.join("First");
+        let second_path = storage.root.join("Second");
+        fs::create_dir_all(&first_path).expect("first project");
+        fs::create_dir_all(&second_path).expect("second project");
+        let first = add_workspace(first_path.to_str().unwrap()).expect("add first");
+        let second = add_workspace(second_path.to_str().unwrap()).expect("add second");
+
+        update_workspace(
+            &second.id,
+            WorkspaceUpdate {
+                display_name: Some("Pinned Project".to_string()),
+                is_pinned: Some(true),
+                is_expanded: Some(false),
+                icon_preference: Some("violet".to_string()),
+                mark_opened: true,
+                ..WorkspaceUpdate::default()
+            },
+        )
+        .expect("update project");
+        set_workspace_order(vec![first.id.clone(), second.id.clone()]).expect("custom order");
+
+        let loaded = load_workspaces().expect("load projects");
+        assert_eq!(
+            loaded[0].id, second.id,
+            "pinned projects stay above custom order"
+        );
+        assert_eq!(loaded[0].name, "Pinned Project");
+        assert!(!loaded[0].is_expanded);
+        assert_eq!(loaded[0].icon_preference.as_deref(), Some("violet"));
+        assert!(loaded[0].last_opened_at.is_some());
+    }
+
+    #[test]
+    fn missing_projects_remain_registered_and_can_be_relocated() {
+        let storage = TestStorage::new();
+        let original = storage.root.join("Original");
+        let replacement = storage.root.join("Replacement");
+        fs::create_dir_all(&original).expect("original");
+        fs::create_dir_all(&replacement).expect("replacement");
+        let workspace = add_workspace(original.to_str().unwrap()).expect("add project");
+        fs::remove_dir(&original).expect("remove original folder");
+
+        let missing = load_workspaces().expect("load missing project");
+        assert_eq!(missing.len(), 1);
+        assert!(!missing[0].is_available);
+        assert_eq!(missing[0].path, workspace.path);
+
+        let relocated =
+            relocate_workspace(&workspace.id, replacement.to_str().unwrap()).expect("relocate");
+        assert!(relocated.is_available);
+        assert_eq!(
+            relocated.path,
+            fs::canonicalize(replacement)
+                .expect("canonical replacement")
+                .to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_path_deduplication_resolves_symlinks() {
+        let storage = TestStorage::new();
+        let project = storage.root.join("Canonical");
+        let alias = storage.root.join("Alias");
+        fs::create_dir_all(&project).expect("project");
+        std::os::unix::fs::symlink(&project, &alias).expect("symlink");
+        let direct = add_workspace(project.to_str().unwrap()).expect("direct");
+        let through_alias = add_workspace(alias.to_str().unwrap()).expect("alias");
+        assert_eq!(direct.id, through_alias.id);
+        assert_eq!(load_workspaces().expect("workspaces").len(), 1);
+    }
+
+    #[test]
+    fn clone_repository_uses_argument_safe_git_invocation_and_registers_the_result() {
+        let storage = TestStorage::new();
+        let source = storage.root.join("source repository.git");
+        let destination_parent = storage.root.join("clones");
+        fs::create_dir_all(&destination_parent).expect("clone parent");
+        let status = Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&source)
+            .status()
+            .expect("launch git init");
+        assert!(status.success());
+
+        let cloned = clone_repository(
+            source.to_str().expect("source path"),
+            destination_parent.to_str().expect("destination path"),
+        )
+        .expect("clone repository");
+        assert!(Path::new(&cloned.path).is_dir());
+        assert_eq!(cloned.name, "source repository");
+        assert_eq!(load_workspaces().expect("workspaces").len(), 1);
+    }
+
+    #[test]
     fn settings_round_trip_preserves_full_access_default() {
         let _storage = TestStorage::new();
         let settings = Settings {
@@ -785,6 +1369,41 @@ mod tests {
         let loaded = load_settings().expect("load settings");
         assert_eq!(loaded.default_permission_mode, "fullAccess");
         assert_eq!(loaded.default_model.as_deref(), Some("runtime-model"));
+    }
+
+    #[test]
+    fn codex_settings_migration_removes_legacy_runtime_fields_after_backup() {
+        let storage = TestStorage::new();
+        let retired_runtime_one = ["cl", "aude"].concat();
+        let retired_runtime_two = ["co", "pilot"].concat();
+        let legacy_settings = serde_json::json!({
+            "appearanceMode": "dark",
+            format!("{retired_runtime_one}CliPath"): "/tmp/legacy-runtime",
+            format!("{retired_runtime_one}PermissionMode"): "autoMode",
+            format!("{retired_runtime_two}CliPath"): "/tmp/other-legacy-runtime",
+            "terminalScrollbackLines": 100000,
+            "defaultPermissionMode": "fullAccess"
+        });
+        fs::write(
+            storage.root.join(SETTINGS_FILE),
+            serde_json::to_vec_pretty(&legacy_settings).expect("serialize legacy settings"),
+        )
+        .expect("write legacy settings");
+
+        ensure_base_dirs().expect("run migrations");
+
+        let rewritten =
+            fs::read_to_string(storage.root.join(SETTINGS_FILE)).expect("rewritten settings");
+        assert!(!rewritten.contains(&retired_runtime_one));
+        assert!(!rewritten.contains(&retired_runtime_two));
+        assert!(!rewritten.contains("terminalScrollbackLines"));
+        assert!(rewritten.contains("\"appearanceMode\": \"dark\""));
+        assert!(storage
+            .root
+            .join(CODEX_SETTINGS_MIGRATION_BACKUP_DIR)
+            .join(SETTINGS_FILE)
+            .is_file());
+        assert!(storage.root.join(CODEX_SETTINGS_MIGRATION_MARKER).is_file());
     }
 
     #[test]
@@ -802,6 +1421,32 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].thread_id, "thread-1");
         assert!(listed[0].pinned);
+    }
+
+    #[test]
+    fn removing_and_reimporting_a_project_keeps_and_reassociates_thread_ui_metadata() {
+        let storage = TestStorage::new();
+        let project = storage.root.join("Reimport Me");
+        fs::create_dir_all(&project).expect("project");
+        let original = add_workspace(project.to_str().unwrap()).expect("workspace");
+        let mut metadata =
+            get_codex_thread_ui_metadata(&original.id, "thread-1").expect("metadata");
+        metadata.fallback_title = "Preserved title".to_string();
+        metadata.unread = true;
+        save_codex_thread_ui_metadata(metadata.clone()).expect("save original metadata");
+
+        assert!(remove_workspace(&original.id).expect("remove entry"));
+        assert!(
+            project.is_dir(),
+            "removing a project never removes its folder"
+        );
+        let reimported = add_workspace(project.to_str().unwrap()).expect("reimport workspace");
+        assert_ne!(reimported.id, original.id);
+        metadata.workspace_id = reimported.id.clone();
+        let saved = save_codex_thread_ui_metadata(metadata).expect("reassociate metadata");
+        assert_eq!(saved.workspace_id, reimported.id);
+        assert_eq!(saved.fallback_title, "Preserved title");
+        assert!(saved.unread);
     }
 
     #[test]

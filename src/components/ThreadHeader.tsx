@@ -19,6 +19,7 @@ interface ThreadHeaderProps {
   disconnected: boolean;
   inspectorOpen: boolean;
   onRename: () => void;
+  onSelectProject: () => void;
   onOpenMenu: (x: number, y: number) => void;
   onToggleInspector: () => void;
   onOpenTerminal: () => void;
@@ -46,6 +47,7 @@ export function ThreadHeader({
   disconnected,
   inspectorOpen,
   onRename,
+  onSelectProject,
   onOpenMenu,
   onToggleInspector,
   onOpenTerminal
@@ -70,7 +72,14 @@ export function ThreadHeader({
           <strong>{thread.title}</strong>
         </button>
         <div className="thread-subtitle">
-          <span>{workspace.name}</span>
+          <button
+            type="button"
+            className="thread-project-button"
+            title="Reveal project in the sidebar"
+            onClick={onSelectProject}
+          >
+            {workspace.name}
+          </button>
           {gitInfo?.branch ? <><span className="metadata-separator">/</span><span>{gitInfo.branch}</span></> : null}
           <span className={`session-status ${status}`}><i />{status}</span>
         </div>

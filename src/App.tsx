@@ -12,15 +12,27 @@ import { confirm, open } from '@tauri-apps/plugin-dialog';
 
 import './styles.css';
 import { AppIcon } from './components/AppIcon';
-import { CodexSidebar } from './components/CodexSidebar';
+import {
+  CodexSidebar,
+  type ProjectAddAction,
+  type ProjectsMenuAction
+} from './components/CodexSidebar';
+import { CloneRepositoryDialog } from './components/CloneRepositoryDialog';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
 import { ControlCenterDialog } from './components/ControlCenterDialog';
 import { ConversationTimeline } from './components/ConversationTimeline';
 import { InspectorPanel } from './components/InspectorPanel';
+import { ManageProjectsDialog } from './components/ManageProjectsDialog';
 import {
   MessageComposer,
   type ComposerAttachment
 } from './components/MessageComposer';
+import {
+  ProjectContextMenu,
+  type ProjectMenuAction
+} from './components/ProjectContextMenu';
+import { ProjectIconDialog } from './components/ProjectIconDialog';
+import { ProjectImportDialog } from './components/ProjectImportDialog';
 import {
   ThreadContextMenu,
   type ThreadMenuAction
@@ -32,9 +44,14 @@ import {
   normalizeAppearanceMode,
   persistAppearanceMode
 } from './lib/appearance';
+import {
+  bootstrapCodexRuntime,
+  readStableRuntimeDiagnostics
+} from './lib/runtimeBootstrap';
 import { codexStore, useCodexStore } from './stores/codexStore';
 import type {
   CodexApprovalRequest,
+  CodexDiscoveredProject,
   CodexEvent,
   CodexRuntimeCatalog,
   CodexSkill,
@@ -45,6 +62,7 @@ import type {
   GitInfo,
   GitWorkspaceStatus,
   PermissionMode,
+  ProjectSortMode,
   ResumeCommandRequest,
   ServerRequestResponse,
   Settings,
@@ -57,6 +75,7 @@ const SELECTED_WORKSPACE_KEY = 'atcontroller:selected-workspace-v2';
 const SELECTED_THREAD_KEY = 'atcontroller:selected-codex-thread-v2';
 const SIDEBAR_WIDTH_KEY = 'atcontroller:sidebar-width-v2';
 const INSPECTOR_OPEN_KEY = 'atcontroller:inspector-open-v2';
+const PROJECT_SORT_KEY = 'atcontroller:project-sort-v1';
 
 interface Toast {
   id: string;
@@ -72,6 +91,17 @@ interface ContextMenuState {
 
 interface RenameState {
   threadId: string;
+  value: string;
+}
+
+interface ProjectContextMenuState {
+  workspaceId: string;
+  x: number;
+  y: number;
+}
+
+interface ProjectRenameState {
+  workspaceId: string;
   value: string;
 }
 
@@ -140,6 +170,7 @@ function createUiMetadata(
     fallbackTitle: thread.title || 'New thread',
     pinned: false,
     unread: false,
+    archived: thread.archived,
     draft: '',
     promptHistory: [],
     permissionMode: preferences.permissionMode,
@@ -213,14 +244,14 @@ export default function App() {
     () => window.localStorage.getItem(SELECTED_WORKSPACE_KEY)
   );
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
-  const [visibleThreadIds, setVisibleThreadIds] = useState<string[]>([]);
+  const [threadIdsByWorkspace, setThreadIdsByWorkspace] = useState<Record<string, string[]>>({});
+  const [loadingWorkspaceIds, setLoadingWorkspaceIds] = useState<Set<string>>(new Set());
   const [metadata, setMetadata] = useState<Record<string, CodexThreadUiMetadata>>({});
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [catalog, setCatalog] = useState<CodexRuntimeCatalog | null>(null);
   const [dataRoot, setDataRoot] = useState('');
   const [filter, setFilter] = useState('');
   const [loading, setLoading] = useState(true);
-  const [loadingThreads, setLoadingThreads] = useState(false);
   const [recoveringThread, setRecoveringThread] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
@@ -230,7 +261,28 @@ export default function App() {
   const [runtimeSkills, setRuntimeSkills] = useState<CodexSkill[]>([]);
   const [skillsByThread, setSkillsByThread] = useState<Record<string, CodexSkill[]>>({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [projectContextMenu, setProjectContextMenu] =
+    useState<ProjectContextMenuState | null>(null);
   const [rename, setRename] = useState<RenameState | null>(null);
+  const [projectRename, setProjectRename] = useState<ProjectRenameState | null>(null);
+  const [projectIconWorkspaceId, setProjectIconWorkspaceId] = useState<string | null>(null);
+  const [projectImportOpen, setProjectImportOpen] = useState(false);
+  const [discoveredProjects, setDiscoveredProjects] = useState<CodexDiscoveredProject[]>([]);
+  const [projectImportLoading, setProjectImportLoading] = useState(false);
+  const [projectImportBusy, setProjectImportBusy] = useState(false);
+  const [projectImportError, setProjectImportError] = useState<string | null>(null);
+  const [cloneOpen, setCloneOpen] = useState(false);
+  const [cloneDestinationParent, setCloneDestinationParent] = useState('');
+  const [cloneBusy, setCloneBusy] = useState(false);
+  const [cloneError, setCloneError] = useState<string | null>(null);
+  const [manageProjectsOpen, setManageProjectsOpen] = useState(false);
+  const [managedWorkspaceId, setManagedWorkspaceId] = useState<string | null>(null);
+  const [projectSortMode, setProjectSortMode] = useState<ProjectSortMode>(() => {
+    const stored = window.localStorage.getItem(PROJECT_SORT_KEY);
+    return stored === 'name' || stored === 'recent' || stored === 'running'
+      ? stored
+      : 'custom';
+  });
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [controlCenter, setControlCenter] = useState<'settings' | 'diagnostics' | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
@@ -245,6 +297,7 @@ export default function App() {
     () => window.localStorage.getItem(INSPECTOR_OPEN_KEY) !== 'false'
   );
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null);
+  const [gitInfoByWorkspace, setGitInfoByWorkspace] = useState<Record<string, GitInfo | null>>({});
   const [gitStatus, setGitStatus] = useState<GitWorkspaceStatus | null>(null);
   const [gitBranches, setGitBranches] = useState<GitBranchEntry[]>([]);
 
@@ -260,26 +313,69 @@ export default function App() {
     (approval) => approval.threadId === selectedThreadId
   );
   const selectedRunningTurn = lastRunningTurn(selectedThread);
-  const visibleThreads = visibleThreadIds
-    .map((threadId) => codex.threads[threadId])
-    .filter((thread): thread is CodexThread => Boolean(thread));
+  const threadsByWorkspace = useMemo(() => {
+    const result: Record<string, CodexThread[]> = Object.fromEntries(
+      workspaces.map((workspace) => [workspace.id, []])
+    );
+    const assigned = new Set<string>();
+    for (const workspace of workspaces) {
+      const ids = threadIdsByWorkspace[workspace.id] ?? [];
+      for (const threadId of ids) {
+        const thread = codex.threads[threadId];
+        if (thread && !assigned.has(thread.id)) {
+          result[workspace.id].push(thread);
+          assigned.add(thread.id);
+        }
+      }
+    }
+    for (const thread of Object.values(codex.threads)) {
+      if (assigned.has(thread.id)) continue;
+      const workspace = workspaces.find((candidate) =>
+        workspaceMatchesThread(candidate, thread, metadata[thread.id])
+      );
+      if (!workspace) continue;
+      result[workspace.id].push(thread);
+      assigned.add(thread.id);
+    }
+    for (const threads of Object.values(result)) {
+      threads.sort(
+        (left, right) =>
+          (right.recencyAt ?? right.updatedAt) - (left.recencyAt ?? left.updatedAt)
+      );
+    }
+    return result;
+  }, [codex.threads, metadata, threadIdsByWorkspace, workspaces]);
+  const visibleThreads = selectedWorkspaceId
+    ? threadsByWorkspace[selectedWorkspaceId] ?? []
+    : [];
+  const allSidebarThreads = useMemo(
+    () => Object.values(threadsByWorkspace).flat(),
+    [threadsByWorkspace]
+  );
+  const loadingThreads = selectedWorkspaceId
+    ? loadingWorkspaceIds.has(selectedWorkspaceId)
+    : false;
   const connected = codex.diagnostics?.connectionState === 'ready';
   const currentAttachments = selectedThreadId ? attachmentsByThread[selectedThreadId] ?? [] : [];
   const currentSkills = selectedThreadId ? skillsByThread[selectedThreadId] ?? [] : [];
 
   const selectedWorkspaceRef = useRef<Workspace | undefined>(selectedWorkspace);
+  const workspacesRef = useRef<Workspace[]>(workspaces);
   const selectedThreadIdRef = useRef<string | null>(selectedThreadId);
   const metadataRef = useRef(metadata);
   const settingsRef = useRef(settings);
   const connectionStateRef = useRef(codex.diagnostics?.connectionState ?? 'stopped');
+  const runtimeEventRevision = useRef(0);
   const gitRefreshTimer = useRef<number | null>(null);
-  const threadRefreshSequence = useRef(0);
+  const threadRefreshSequence = useRef<Record<string, number>>({});
   const restoredWorkspace = useRef<string | null>(null);
-  const runtimeThreadFilter = useRef('');
 
   useEffect(() => {
     selectedWorkspaceRef.current = selectedWorkspace;
   }, [selectedWorkspace]);
+  useEffect(() => {
+    workspacesRef.current = workspaces;
+  }, [workspaces]);
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
@@ -325,6 +421,30 @@ export default function App() {
     [showToast]
   );
 
+  const applyWorkspace = useCallback((workspace: Workspace) => {
+    setWorkspaces((current) => {
+      const next = current.some((candidate) => candidate.id === workspace.id)
+        ? current.map((candidate) => candidate.id === workspace.id ? workspace : candidate)
+        : [...current, workspace];
+      workspacesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const findWorkspaceForThread = useCallback((threadId: string, thread?: CodexThread) => {
+    const ui = metadataRef.current[threadId];
+    if (ui) {
+      const byMetadata = workspacesRef.current.find(
+        (workspace) => workspace.id === ui.workspaceId
+      );
+      if (byMetadata) return byMetadata;
+    }
+    const known = thread ?? codexStore.getSnapshot().threads[threadId];
+    return known
+      ? workspacesRef.current.find((workspace) => workspaceMatchesThread(workspace, known, ui))
+      : undefined;
+  }, []);
+
   const refreshGit = useCallback(async (workspace?: Workspace) => {
     const target = workspace ?? selectedWorkspaceRef.current;
     if (!target) {
@@ -339,17 +459,32 @@ export default function App() {
         api.gitWorkspaceStatus(target.path),
         api.gitListBranches(target.path)
       ]);
+      setGitInfoByWorkspace((current) => ({ ...current, [target.id]: info }));
       if (selectedWorkspaceRef.current?.id === target.id) {
         setGitInfo(info);
         setGitStatus(status);
         setGitBranches(branches);
       }
     } catch {
+      setGitInfoByWorkspace((current) => ({ ...current, [target.id]: null }));
       if (selectedWorkspaceRef.current?.id === target.id) {
         setGitInfo(null);
         setGitStatus(null);
         setGitBranches([]);
       }
+    }
+  }, []);
+
+  const refreshProjectGit = useCallback(async (workspace: Workspace) => {
+    if (!workspace.isAvailable) {
+      setGitInfoByWorkspace((current) => ({ ...current, [workspace.id]: null }));
+      return;
+    }
+    try {
+      const info = await api.getGitInfo(workspace.path);
+      setGitInfoByWorkspace((current) => ({ ...current, [workspace.id]: info }));
+    } catch {
+      setGitInfoByWorkspace((current) => ({ ...current, [workspace.id]: null }));
     }
   }, []);
 
@@ -390,10 +525,21 @@ export default function App() {
 
   const refreshThreads = useCallback(
     async (workspace: Workspace, searchTerm?: string) => {
-      const refreshSequence = ++threadRefreshSequence.current;
-      setLoadingThreads(true);
-      setThreadError(null);
+      const refreshSequence = (threadRefreshSequence.current[workspace.id] ?? 0) + 1;
+      threadRefreshSequence.current[workspace.id] = refreshSequence;
+      setLoadingWorkspaceIds((current) => {
+        const next = new Set(current);
+        next.add(workspace.id);
+        return next;
+      });
+      if (selectedWorkspaceRef.current?.id === workspace.id) {
+        setThreadError(null);
+      }
       try {
+        if (!workspace.isAvailable) {
+          setThreadIdsByWorkspace((current) => ({ ...current, [workspace.id]: [] }));
+          return;
+        }
         const listAll = async (archived: boolean) => {
           const data: CodexThread[] = [];
           let cursor: string | null = null;
@@ -416,25 +562,41 @@ export default function App() {
           listAll(true),
           api.listCodexThreadUiMetadata(workspace.id)
         ]);
-        if (
-          refreshSequence !== threadRefreshSequence.current ||
-          selectedWorkspaceRef.current?.id !== workspace.id
-        ) {
+        if (refreshSequence !== threadRefreshSequence.current[workspace.id]) {
           return;
         }
         codexStore.replaceWorkspaceThreads(workspace.path, false, activePage);
         codexStore.replaceWorkspaceThreads(workspace.path, true, archivedPage);
-        const uiMap = Object.fromEntries(uiMetadata.map((item) => [item.threadId, item]));
+        const archivedIds = new Set(archivedPage.map((thread) => thread.id));
+        const uiMap = Object.fromEntries(
+          uiMetadata.map((item) => [
+            item.threadId,
+            {
+              ...item,
+              archived: archivedIds.has(item.threadId)
+            }
+          ])
+        );
         metadataRef.current = { ...metadataRef.current, ...uiMap };
         setMetadata((current) => ({ ...current, ...uiMap }));
-        setVisibleThreadIds([...activePage, ...archivedPage].map((thread) => thread.id));
+        setThreadIdsByWorkspace((current) => ({
+          ...current,
+          [workspace.id]: [...new Set([...activePage, ...archivedPage].map((thread) => thread.id))]
+        }));
       } catch (error) {
-        if (refreshSequence === threadRefreshSequence.current) {
+        if (
+          refreshSequence === threadRefreshSequence.current[workspace.id] &&
+          selectedWorkspaceRef.current?.id === workspace.id
+        ) {
           setThreadError(String(error));
         }
       } finally {
-        if (refreshSequence === threadRefreshSequence.current) {
-          setLoadingThreads(false);
+        if (refreshSequence === threadRefreshSequence.current[workspace.id]) {
+          setLoadingWorkspaceIds((current) => {
+            const next = new Set(current);
+            next.delete(workspace.id);
+            return next;
+          });
         }
       }
     },
@@ -448,7 +610,44 @@ export default function App() {
       preferences: ThreadPreferences
     ): Promise<CodexThreadUiMetadata> => {
       const existing = metadataRef.current[thread.id];
-      if (existing) return existing;
+      if (existing?.workspaceId === workspace.id) {
+        if (existing.archived === thread.archived) return existing;
+        const synchronized = {
+          ...existing,
+          archived: thread.archived,
+          updatedAt: nowIso()
+        };
+        metadataRef.current = {
+          ...metadataRef.current,
+          [thread.id]: synchronized
+        };
+        setMetadata((current) => ({ ...current, [thread.id]: synchronized }));
+        try {
+          return await api.saveCodexThreadUiMetadata(synchronized);
+        } catch {
+          return synchronized;
+        }
+      }
+      if (existing) {
+        const reassociated = {
+          ...existing,
+          workspaceId: workspace.id,
+          updatedAt: nowIso()
+        };
+        metadataRef.current = {
+          ...metadataRef.current,
+          [thread.id]: reassociated
+        };
+        setMetadata((current) => ({ ...current, [thread.id]: reassociated }));
+        try {
+          const saved = await api.saveCodexThreadUiMetadata(reassociated);
+          metadataRef.current = { ...metadataRef.current, [thread.id]: saved };
+          setMetadata((current) => ({ ...current, [thread.id]: saved }));
+          return saved;
+        } catch {
+          return reassociated;
+        }
+      }
       const created = createUiMetadata(workspace, thread, preferences);
       metadataRef.current = { ...metadataRef.current, [thread.id]: created };
       setMetadata((current) => ({ ...current, [thread.id]: created }));
@@ -465,9 +664,32 @@ export default function App() {
   );
 
   const openThread = useCallback(
-    async (threadId: string) => {
-      const workspace = selectedWorkspaceRef.current;
-      if (!workspace) return;
+    async (threadId: string, workspaceOverride?: Workspace) => {
+      const existing = codexStore.getSnapshot().threads[threadId];
+      const workspace =
+        workspaceOverride ?? findWorkspaceForThread(threadId, existing);
+      if (!workspace) {
+        setThreadError('ATController could not associate this Codex thread with a project.');
+        return;
+      }
+      if (!workspace.isAvailable) {
+        setThreadError(`The project folder for ${workspace.name} is unavailable.`);
+        return;
+      }
+      if (selectedWorkspaceRef.current?.id !== workspace.id) {
+        selectedWorkspaceRef.current = workspace;
+        setSelectedWorkspaceId(workspace.id);
+        window.localStorage.setItem(SELECTED_WORKSPACE_KEY, workspace.id);
+      }
+      if (!workspace.isExpanded) {
+        const expanded = { ...workspace, isExpanded: true };
+        selectedWorkspaceRef.current = expanded;
+        applyWorkspace(expanded);
+        void api
+          .updateWorkspace(workspace.id, { isExpanded: true, markOpened: true })
+          .then(applyWorkspace)
+          .catch(() => undefined);
+      }
       setSelectedThreadId(threadId);
       selectedThreadIdRef.current = threadId;
       codexStore.setActiveThread(threadId);
@@ -477,13 +699,35 @@ export default function App() {
       );
       setRecoveringThread(true);
       setThreadError(null);
-      const existing = codexStore.getSnapshot().threads[threadId];
       const archived = existing?.archived === true;
-      const preferences = preferencesFromMetadata(metadataRef.current[threadId], settings);
+      const preferences = preferencesFromMetadata(
+        metadataRef.current[threadId],
+        settingsRef.current
+      );
       try {
-        const read = await api.readCodexThread(threadId, true);
-        const hydrated = archived ? { ...read, archived: true } : read;
-        codexStore.upsertThreads([hydrated]);
+        const snapshot = codexStore.getSnapshot();
+        let hydrated = snapshot.threads[threadId] ?? existing;
+        if (archived) {
+          hydrated = {
+            ...(await api.readCodexThread(threadId, true)),
+            archived: true
+          };
+          codexStore.upsertThreads([hydrated]);
+        } else if (!snapshot.sessions[threadId]) {
+          // `thread/resume` includes full turns. Reading the thread first would
+          // transfer and normalize the complete history twice, which is
+          // especially expensive for long-running Codex sessions.
+          const session = await api.resumeCodexThread(
+            workspace.path,
+            threadId,
+            preferences
+          );
+          hydrated = session.thread;
+          codexStore.setSession(session);
+        }
+        if (!hydrated) {
+          throw new Error('Codex returned no thread history');
+        }
         const ui = await ensureMetadata(workspace, hydrated, preferences);
         if (ui.unread || !ui.lastViewedAt) {
           void persistMetadata({
@@ -493,10 +737,11 @@ export default function App() {
             updatedAt: nowIso()
           });
         }
-        if (!archived) {
-          const session = await api.resumeCodexThread(workspace.path, threadId, preferences);
-          codexStore.setSession(session);
-        }
+        requestAnimationFrame(() =>
+          document
+            .querySelector<HTMLElement>(`[data-thread-id="${threadId}"]`)
+            ?.scrollIntoView({ block: 'nearest' })
+        );
       } catch (error) {
         if (existing) codexStore.upsertThreads([existing]);
         setThreadError(`Unable to resume this Codex thread: ${String(error)}`);
@@ -504,24 +749,42 @@ export default function App() {
         setRecoveringThread(false);
       }
     },
-    [ensureMetadata, persistMetadata, settings]
+    [applyWorkspace, ensureMetadata, findWorkspaceForThread, persistMetadata]
   );
 
-  const createThread = useCallback(async () => {
-    const workspace = selectedWorkspaceRef.current;
+  const createThread = useCallback(async (workspaceOverride?: Workspace) => {
+    const workspace = workspaceOverride ?? selectedWorkspaceRef.current;
     if (!workspace) {
       showToast('Add a local project first', 'error');
       return;
     }
+    if (!workspace.isAvailable) {
+      showToast(`Locate the folder for ${workspace.name} before starting a thread`, 'error');
+      return;
+    }
+    if (selectedWorkspaceRef.current?.id !== workspace.id) {
+      selectedWorkspaceRef.current = workspace;
+      setSelectedWorkspaceId(workspace.id);
+      window.localStorage.setItem(SELECTED_WORKSPACE_KEY, workspace.id);
+    }
+    if (!workspace.isExpanded) {
+      void api
+        .updateWorkspace(workspace.id, { isExpanded: true, markOpened: true })
+        .then(applyWorkspace)
+        .catch(() => undefined);
+    }
     setThreadError(null);
     setRecoveringThread(true);
     try {
-      const preferences = preferencesFromSettings(settings);
+      const preferences = preferencesFromSettings(settingsRef.current);
       const session = await api.startCodexThread(workspace.path, preferences, false);
       codexStore.setSession(session);
-      setVisibleThreadIds((current) =>
-        current.includes(session.thread.id) ? current : [session.thread.id, ...current]
-      );
+      setThreadIdsByWorkspace((current) => ({
+        ...current,
+        [workspace.id]: current[workspace.id]?.includes(session.thread.id)
+          ? current[workspace.id]
+          : [session.thread.id, ...(current[workspace.id] ?? [])]
+      }));
       await ensureMetadata(workspace, session.thread, preferences);
       setSelectedThreadId(session.thread.id);
       selectedThreadIdRef.current = session.thread.id;
@@ -536,19 +799,87 @@ export default function App() {
     } finally {
       setRecoveringThread(false);
     }
-  }, [ensureMetadata, settings, showToast]);
+  }, [applyWorkspace, ensureMetadata, showToast]);
+
+  const selectProject = useCallback(
+    (workspaceId: string) => {
+      const workspace = workspacesRef.current.find(
+        (candidate) => candidate.id === workspaceId
+      );
+      if (!workspace) return;
+      const currentThreadId = selectedThreadIdRef.current;
+      const currentThread = currentThreadId
+        ? codexStore.getSnapshot().threads[currentThreadId]
+        : undefined;
+      if (
+        currentThreadId &&
+        (!currentThread ||
+          !workspaceMatchesThread(
+            workspace,
+            currentThread,
+            metadataRef.current[currentThreadId]
+          ))
+      ) {
+        selectedThreadIdRef.current = null;
+        setSelectedThreadId(null);
+        codexStore.setActiveThread(null);
+      }
+      selectedWorkspaceRef.current = workspace;
+      setSelectedWorkspaceId(workspace.id);
+      window.localStorage.setItem(SELECTED_WORKSPACE_KEY, workspace.id);
+      void api
+        .updateWorkspace(workspace.id, {
+          isExpanded: workspace.isExpanded ? undefined : true,
+          markOpened: true
+        })
+        .then(applyWorkspace)
+        .catch(() => undefined);
+    },
+    [applyWorkspace]
+  );
+
+  const applyRuntimeDiagnostics = useCallback(
+    (diagnostics: Parameters<typeof codexStore.setDiagnostics>[0], refreshCatalog = true) => {
+      const previous = connectionStateRef.current;
+      connectionStateRef.current = diagnostics.connectionState;
+      codexStore.setDiagnostics(diagnostics);
+      if (diagnostics.connectionState !== 'ready') return;
+
+      setFatalError(null);
+      if (refreshCatalog) {
+        void api.getCodexCatalog().then(setCatalog).catch(() => undefined);
+      }
+      if (
+        ['degraded', 'restarting', 'failed'].includes(previous) &&
+        selectedThreadIdRef.current
+      ) {
+        void openThread(selectedThreadIdRef.current);
+      }
+    },
+    [openThread]
+  );
+
+  const reconcileRuntimeDiagnostics = useCallback(async () => {
+    const diagnostics = await readStableRuntimeDiagnostics(
+      api.getCodexDiagnostics,
+      () => runtimeEventRevision.current
+    );
+    applyRuntimeDiagnostics(diagnostics);
+  }, [applyRuntimeDiagnostics]);
 
   useEffect(() => {
     let cancelled = false;
     void Promise.allSettled([
       api.getSettings(),
       api.listWorkspaces(),
-      api.getCodexDiagnostics(),
       api.getAppStorageRoot(),
-      api.getCodexCatalog()
+      bootstrapCodexRuntime({
+        getCatalog: api.getCodexCatalog,
+        getDiagnostics: api.getCodexDiagnostics
+      })
     ]).then((results) => {
       if (cancelled) return;
-      const [settingsResult, workspacesResult, diagnosticsResult, rootResult, catalogResult] = results;
+      const [settingsResult, workspacesResult, rootResult, runtimeResult] = results;
       if (settingsResult.status === 'fulfilled') {
         setSettings(settingsResult.value);
         const appearance = normalizeAppearanceMode(settingsResult.value.appearanceMode);
@@ -557,6 +888,7 @@ export default function App() {
       }
       if (workspacesResult.status === 'fulfilled') {
         const locals = workspacesResult.value;
+        workspacesRef.current = locals;
         setWorkspaces(locals);
         setSelectedWorkspaceId((current) => {
           const next = locals.some((workspace) => workspace.id === current)
@@ -568,14 +900,13 @@ export default function App() {
       } else {
         setFatalError(`Could not read ATController projects: ${String(workspacesResult.reason)}`);
       }
-      if (diagnosticsResult.status === 'fulfilled') {
-        codexStore.setDiagnostics(diagnosticsResult.value);
-      }
       if (rootResult.status === 'fulfilled') setDataRoot(rootResult.value);
-      if (catalogResult.status === 'fulfilled') {
-        setCatalog(catalogResult.value);
+      if (runtimeResult.status === 'fulfilled') {
+        setCatalog(runtimeResult.value.catalog);
+        applyRuntimeDiagnostics(runtimeResult.value.diagnostics, false);
       } else {
-        setFatalError(`Codex app server is unavailable: ${String(catalogResult.reason)}`);
+        setFatalError(`Codex app server is unavailable: ${String(runtimeResult.reason)}`);
+        void reconcileRuntimeDiagnostics().catch(() => undefined);
       }
       setLoading(false);
     });
@@ -589,11 +920,20 @@ export default function App() {
     const unlisten: Array<() => void> = [];
     void apiModule.onCodexEvent((event: CodexEvent) => {
       codexStore.queueEvent(event);
-      const workspace = selectedWorkspaceRef.current;
-      if (event.thread && workspace && workspaceMatchesThread(workspace, event.thread, metadataRef.current[event.thread.id])) {
-        setVisibleThreadIds((current) =>
-          current.includes(event.thread!.id) ? current : [event.thread!.id, ...current]
-        );
+      const eventThread =
+        event.thread ??
+        (event.threadId ? codexStore.getSnapshot().threads[event.threadId] : undefined);
+      const eventWorkspace =
+        event.threadId || eventThread
+          ? findWorkspaceForThread(event.threadId ?? eventThread!.id, eventThread)
+          : undefined;
+      if (eventThread && eventWorkspace) {
+        setThreadIdsByWorkspace((current) => ({
+          ...current,
+          [eventWorkspace.id]: current[eventWorkspace.id]?.includes(eventThread.id)
+            ? current[eventWorkspace.id]
+            : [eventThread.id, ...(current[eventWorkspace.id] ?? [])]
+        }));
       }
       if (
         event.kind === 'turnCompleted' &&
@@ -602,7 +942,7 @@ export default function App() {
       ) {
         const completedThread =
           event.thread ?? codexStore.getSnapshot().threads[event.threadId];
-        const workspace = selectedWorkspaceRef.current;
+        const workspace = findWorkspaceForThread(event.threadId, completedThread);
         const markUnread = async () => {
           const existing = metadataRef.current[event.threadId!];
           if (existing) {
@@ -638,7 +978,8 @@ export default function App() {
         event.kind === 'turnDiffUpdated' ||
         event.item?.kind === 'fileChange'
       ) {
-        scheduleGitRefresh();
+        if (eventWorkspace?.id === selectedWorkspaceRef.current?.id) scheduleGitRefresh();
+        else if (eventWorkspace) void refreshProjectGit(eventWorkspace);
       }
       if (
         event.kind === 'accountUpdated' ||
@@ -648,29 +989,30 @@ export default function App() {
         void api.getCodexCatalog().then(setCatalog).catch(() => undefined);
       }
     }).then((stop) => (disposed ? releaseTauriListener(stop) : unlisten.push(stop)));
-    void apiModule.onCodexRuntimeState((diagnostics) => {
-      const previous = connectionStateRef.current;
-      connectionStateRef.current = diagnostics.connectionState;
-      codexStore.setDiagnostics(diagnostics);
-      if (diagnostics.connectionState === 'ready') {
-        setFatalError(null);
-        void api.getCodexCatalog().then(setCatalog).catch(() => undefined);
-        if (
-          ['degraded', 'restarting', 'failed'].includes(previous) &&
-          selectedThreadIdRef.current
-        ) {
-          void openThread(selectedThreadIdRef.current);
+    void apiModule
+      .onCodexRuntimeState((diagnostics) => {
+        runtimeEventRevision.current += 1;
+        applyRuntimeDiagnostics(diagnostics);
+      })
+      .then((stop) => {
+        if (disposed) {
+          releaseTauriListener(stop);
+          return;
         }
-      }
-    }).then((stop) => (disposed ? releaseTauriListener(stop) : unlisten.push(stop)));
+        unlisten.push(stop);
+        void reconcileRuntimeDiagnostics().catch(() => undefined);
+      });
     return () => {
       disposed = true;
       unlisten.forEach(releaseTauriListener);
     };
   }, [
     ensureMetadata,
-    openThread,
+    applyRuntimeDiagnostics,
+    findWorkspaceForThread,
     persistMetadata,
+    reconcileRuntimeDiagnostics,
+    refreshProjectGit,
     scheduleGitRefresh,
     updateMetadata
   ]);
@@ -687,14 +1029,25 @@ export default function App() {
   }, [refreshGit, refreshThreads]);
 
   useEffect(() => {
+    if (!connected) return;
+    for (const workspace of workspaces) {
+      if (!workspace.isAvailable) continue;
+      void refreshThreads(workspace);
+      void refreshProjectGit(workspace);
+    }
+  }, [
+    connected,
+    refreshProjectGit,
+    refreshThreads,
+    workspaces
+      .map((workspace) => `${workspace.id}:${workspace.path}:${workspace.isAvailable}`)
+      .join('|')
+  ]);
+
+  useEffect(() => {
     if (!selectedWorkspace) return;
     window.localStorage.setItem(SELECTED_WORKSPACE_KEY, selectedWorkspace.id);
-    setSelectedThreadId(null);
-    selectedThreadIdRef.current = null;
-    codexStore.setActiveThread(null);
-    setVisibleThreadIds([]);
     restoredWorkspace.current = null;
-    void refreshThreads(selectedWorkspace);
     void refreshGit(selectedWorkspace);
     void api
       .listCodexRuntimeSkills(selectedWorkspace.path)
@@ -703,20 +1056,14 @@ export default function App() {
   }, [refreshGit, refreshThreads, selectedWorkspace?.id]);
 
   useEffect(() => {
-    if (!selectedWorkspace) return;
-    const query = filter.trim();
-    if (!query && !runtimeThreadFilter.current) return;
-    const workspace = selectedWorkspace;
-    const timer = window.setTimeout(() => {
-      runtimeThreadFilter.current = query;
-      void refreshThreads(workspace, query || undefined);
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [filter, refreshThreads, selectedWorkspace?.id]);
-
-  useEffect(() => {
-    if (!selectedWorkspace || loadingThreads || restoredWorkspace.current === selectedWorkspace.id) return;
+    if (
+      !selectedWorkspace ||
+      loadingThreads ||
+      !Object.prototype.hasOwnProperty.call(threadIdsByWorkspace, selectedWorkspace.id) ||
+      restoredWorkspace.current === selectedWorkspace.id
+    ) return;
     restoredWorkspace.current = selectedWorkspace.id;
+    const visibleThreadIds = threadIdsByWorkspace[selectedWorkspace.id] ?? [];
     let restoredId: string | null = null;
     try {
       const stored = JSON.parse(window.localStorage.getItem(SELECTED_THREAD_KEY) ?? 'null') as {
@@ -731,8 +1078,13 @@ export default function App() {
     }
     const firstActive = visibleThreads.find((thread) => !thread.archived)?.id;
     const target = restoredId ?? firstActive ?? null;
-    if (target) void openThread(target);
-  }, [loadingThreads, openThread, selectedWorkspace, visibleThreadIds.join('|')]);
+    if (target) void openThread(target, selectedWorkspace);
+  }, [
+    loadingThreads,
+    openThread,
+    selectedWorkspace,
+    (selectedWorkspace ? threadIdsByWorkspace[selectedWorkspace.id] ?? [] : []).join('|')
+  ]);
 
   useEffect(() => {
     window.localStorage.setItem(INSPECTOR_OPEN_KEY, String(inspectorOpen));
@@ -977,15 +1329,492 @@ export default function App() {
     if (typeof selected !== 'string') return;
     try {
       const workspace = await api.addWorkspace(selected);
-      setWorkspaces((current) => {
-        const withoutDuplicate = current.filter((candidate) => candidate.id !== workspace.id);
-        return [...withoutDuplicate, workspace];
-      });
+      applyWorkspace(workspace);
+      selectedWorkspaceRef.current = workspace;
       setSelectedWorkspaceId(workspace.id);
+      window.localStorage.setItem(SELECTED_WORKSPACE_KEY, workspace.id);
+      if (connected) {
+        void refreshThreads(workspace);
+        void refreshProjectGit(workspace);
+      }
     } catch (error) {
       showToast(`Could not add project: ${String(error)}`, 'error');
     }
-  }, [showToast]);
+  }, [applyWorkspace, connected, refreshProjectGit, refreshThreads, showToast]);
+
+  const updateProject = useCallback(
+    async (
+      workspaceId: string,
+      update: Parameters<typeof api.updateWorkspace>[1],
+      optimistic?: Partial<Workspace>
+    ) => {
+      const current = workspacesRef.current.find(
+        (workspace) => workspace.id === workspaceId
+      );
+      if (!current) return null;
+      if (optimistic) applyWorkspace({ ...current, ...optimistic });
+      try {
+        const saved = await api.updateWorkspace(workspaceId, update);
+        applyWorkspace(saved);
+        if (selectedWorkspaceRef.current?.id === saved.id) {
+          selectedWorkspaceRef.current = saved;
+        }
+        return saved;
+      } catch (error) {
+        if (optimistic) applyWorkspace(current);
+        showToast(`Could not update ${current.name}: ${String(error)}`, 'error');
+        return null;
+      }
+    },
+    [applyWorkspace, showToast]
+  );
+
+  const toggleProject = useCallback(
+    (workspaceId: string, expanded: boolean) => {
+      void updateProject(
+        workspaceId,
+        { isExpanded: expanded },
+        { isExpanded: expanded }
+      );
+    },
+    [updateProject]
+  );
+
+  const reorderProjects = useCallback(
+    async (workspaceIds: string[]) => {
+      const byId = new Map(workspacesRef.current.map((workspace) => [workspace.id, workspace]));
+      const optimistic = workspaceIds
+        .map((id, index) => {
+          const workspace = byId.get(id);
+          return workspace ? { ...workspace, sortOrder: index } : null;
+        })
+        .filter((workspace): workspace is Workspace => Boolean(workspace));
+      for (const workspace of workspacesRef.current) {
+        if (!workspaceIds.includes(workspace.id)) optimistic.push(workspace);
+      }
+      workspacesRef.current = optimistic;
+      setWorkspaces(optimistic);
+      try {
+        const saved = await api.setWorkspaceOrder(workspaceIds);
+        workspacesRef.current = saved;
+        setWorkspaces(saved);
+      } catch (error) {
+        const restored = await api.listWorkspaces().catch(() => workspacesRef.current);
+        workspacesRef.current = restored;
+        setWorkspaces(restored);
+        showToast(`Could not reorder projects: ${String(error)}`, 'error');
+      }
+    },
+    [showToast]
+  );
+
+  const copyProjectPath = useCallback(
+    async (workspaceId: string) => {
+      const workspace = workspacesRef.current.find(
+        (candidate) => candidate.id === workspaceId
+      );
+      if (workspace) await copyText(workspace.path, 'Project path');
+    },
+    [copyText]
+  );
+
+  const removeProject = useCallback(
+    async (workspaceId: string) => {
+      const workspace = workspacesRef.current.find(
+        (candidate) => candidate.id === workspaceId
+      );
+      if (!workspace) return;
+      const approved = await confirm(
+        `Remove “${workspace.name}” from ATController?\n\nThe folder, Git repository, files, and Codex threads will remain untouched and can be imported again later.`,
+        {
+          title: 'Remove project from ATController',
+          kind: 'warning',
+          okLabel: 'Remove Project'
+        }
+      );
+      if (!approved) return;
+      try {
+        await api.removeWorkspace(workspace.id);
+        const next = workspacesRef.current.filter(
+          (candidate) => candidate.id !== workspace.id
+        );
+        workspacesRef.current = next;
+        setWorkspaces(next);
+        setThreadIdsByWorkspace((current) => {
+          const copy = { ...current };
+          delete copy[workspace.id];
+          return copy;
+        });
+        if (selectedWorkspaceRef.current?.id === workspace.id) {
+          const replacement = next[0];
+          selectedWorkspaceRef.current = replacement;
+          setSelectedWorkspaceId(replacement?.id ?? null);
+          selectedThreadIdRef.current = null;
+          setSelectedThreadId(null);
+          codexStore.setActiveThread(null);
+          if (replacement) {
+            window.localStorage.setItem(SELECTED_WORKSPACE_KEY, replacement.id);
+          } else {
+            window.localStorage.removeItem(SELECTED_WORKSPACE_KEY);
+          }
+        }
+        showToast(
+          `${workspace.name} was removed from ATController. Its files and Codex threads were not deleted.`,
+          'success'
+        );
+      } catch (error) {
+        showToast(`Could not remove project: ${String(error)}`, 'error');
+      }
+    },
+    [showToast]
+  );
+
+  const locateProject = useCallback(
+    async (workspaceId: string) => {
+      const workspace = workspacesRef.current.find(
+        (candidate) => candidate.id === workspaceId
+      );
+      if (!workspace) return;
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: `Locate ${workspace.name}`
+      });
+      if (typeof selected !== 'string') return;
+      try {
+        const relocated = await api.relocateWorkspace(workspace.id, selected);
+        applyWorkspace(relocated);
+        if (selectedWorkspaceRef.current?.id === workspace.id) {
+          selectedWorkspaceRef.current = relocated;
+        }
+        if (connected) {
+          void refreshThreads(relocated);
+          void refreshProjectGit(relocated);
+        }
+        showToast(`${workspace.name} is available again`, 'success');
+      } catch (error) {
+        showToast(`Could not locate project: ${String(error)}`, 'error');
+      }
+    },
+    [applyWorkspace, connected, refreshProjectGit, refreshThreads, showToast]
+  );
+
+  const scanCodexProjects = useCallback(async () => {
+    setProjectImportLoading(true);
+    setProjectImportError(null);
+    try {
+      setDiscoveredProjects(await api.discoverCodexProjects());
+    } catch (error) {
+      setProjectImportError(String(error));
+    } finally {
+      setProjectImportLoading(false);
+    }
+  }, []);
+
+  const openProjectImport = useCallback(() => {
+    setProjectImportOpen(true);
+    void scanCodexProjects();
+  }, [scanCodexProjects]);
+
+  const importCodexProjects = useCallback(
+    async (workspacePaths: string[]) => {
+      setProjectImportBusy(true);
+      const imported: Workspace[] = [];
+      const skipped: string[] = [];
+      for (const path of workspacePaths) {
+        try {
+          const workspace = await api.addWorkspace(path);
+          imported.push(workspace);
+        } catch (error) {
+          skipped.push(`${path}: ${String(error)}`);
+        }
+      }
+      try {
+        const all = await api.listWorkspaces();
+        workspacesRef.current = all;
+        setWorkspaces(all);
+        const selected = imported[imported.length - 1];
+        if (selected) {
+          selectedWorkspaceRef.current = selected;
+          setSelectedWorkspaceId(selected.id);
+          window.localStorage.setItem(SELECTED_WORKSPACE_KEY, selected.id);
+        }
+        for (const workspace of imported) {
+          if (connected) {
+            void refreshThreads(workspace);
+            void refreshProjectGit(workspace);
+          }
+        }
+        if (skipped.length) {
+          showToast(
+            `Imported ${imported.length} project${imported.length === 1 ? '' : 's'}. Skipped: ${skipped.slice(0, 2).join(' · ')}${skipped.length > 2 ? ` · and ${skipped.length - 2} more` : ''}`,
+            imported.length ? 'neutral' : 'error'
+          );
+        } else {
+          showToast(
+            `Imported ${imported.length} Codex project${imported.length === 1 ? '' : 's'}`,
+            'success'
+          );
+        }
+        setProjectImportOpen(false);
+      } finally {
+        setProjectImportBusy(false);
+      }
+    },
+    [connected, refreshProjectGit, refreshThreads, showToast]
+  );
+
+  const openCloneDialog = useCallback(() => {
+    const selectedPath = selectedWorkspaceRef.current?.path ?? '';
+    const parent = selectedPath.includes('/')
+      ? selectedPath.slice(0, selectedPath.lastIndexOf('/')) || '/'
+      : '';
+    setCloneDestinationParent(parent);
+    setCloneError(null);
+    setCloneOpen(true);
+  }, []);
+
+  const chooseCloneDestination = useCallback(async () => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: 'Choose where to clone the repository'
+    });
+    if (typeof selected === 'string') setCloneDestinationParent(selected);
+  }, []);
+
+  const cloneRepository = useCallback(
+    async (repository: string) => {
+      setCloneBusy(true);
+      setCloneError(null);
+      try {
+        const workspace = await api.cloneRepository(
+          repository,
+          cloneDestinationParent
+        );
+        applyWorkspace(workspace);
+        selectedWorkspaceRef.current = workspace;
+        setSelectedWorkspaceId(workspace.id);
+        window.localStorage.setItem(SELECTED_WORKSPACE_KEY, workspace.id);
+        setCloneOpen(false);
+        if (connected) {
+          void refreshThreads(workspace);
+          void refreshProjectGit(workspace);
+        }
+        showToast(`${workspace.name} cloned and added`, 'success');
+      } catch (error) {
+        setCloneError(String(error));
+      } finally {
+        setCloneBusy(false);
+      }
+    },
+    [
+      applyWorkspace,
+      cloneDestinationParent,
+      connected,
+      refreshProjectGit,
+      refreshThreads,
+      showToast
+    ]
+  );
+
+  const renameProject = useCallback((workspaceId: string) => {
+    const workspace = workspacesRef.current.find(
+      (candidate) => candidate.id === workspaceId
+    );
+    if (workspace) setProjectRename({ workspaceId, value: workspace.name });
+  }, []);
+
+  const submitProjectRename = useCallback(async () => {
+    if (!projectRename?.value.trim()) return;
+    const saved = await updateProject(
+      projectRename.workspaceId,
+      { displayName: projectRename.value.trim() },
+      { name: projectRename.value.trim() }
+    );
+    if (saved) setProjectRename(null);
+  }, [projectRename, updateProject]);
+
+  const setProjectIcon = useCallback(
+    async (preference: string | null) => {
+      if (!projectIconWorkspaceId) return;
+      const saved = await updateProject(
+        projectIconWorkspaceId,
+        preference
+          ? { iconPreference: preference }
+          : { clearIconPreference: true },
+        { iconPreference: preference }
+      );
+      if (saved) setProjectIconWorkspaceId(null);
+    },
+    [projectIconWorkspaceId, updateProject]
+  );
+
+  const moveManagedProject = useCallback(
+    (workspaceId: string, direction: -1 | 1) => {
+      const order = [...workspacesRef.current]
+        .sort((left, right) => left.sortOrder - right.sortOrder)
+        .map((workspace) => workspace.id);
+      const index = order.indexOf(workspaceId);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= order.length) return;
+      [order[index], order[target]] = [order[target], order[index]];
+      setProjectSortMode('custom');
+      window.localStorage.setItem(PROJECT_SORT_KEY, 'custom');
+      void reorderProjects(order);
+    },
+    [reorderProjects]
+  );
+
+  const handleProjectsMenuAction = useCallback(
+    (action: ProjectsMenuAction) => {
+      if (action.startsWith('sort')) {
+        const mode: ProjectSortMode =
+          action === 'sortName'
+            ? 'name'
+            : action === 'sortRecent'
+              ? 'recent'
+              : action === 'sortRunning'
+                ? 'running'
+                : 'custom';
+        setProjectSortMode(mode);
+        window.localStorage.setItem(PROJECT_SORT_KEY, mode);
+        return;
+      }
+      if (action === 'manageProjects') {
+        setManagedWorkspaceId(null);
+        setManageProjectsOpen(true);
+        return;
+      }
+      const expanded = action === 'expandAll';
+      const current = workspacesRef.current;
+      const optimistic = current.map((workspace) => ({ ...workspace, isExpanded: expanded }));
+      workspacesRef.current = optimistic;
+      setWorkspaces(optimistic);
+      void Promise.all(
+        current.map((workspace) =>
+          api.updateWorkspace(workspace.id, { isExpanded: expanded })
+        )
+      )
+        .then((saved) => {
+          const byId = new Map(saved.map((workspace) => [workspace.id, workspace]));
+          const next = workspacesRef.current.map(
+            (workspace) => byId.get(workspace.id) ?? workspace
+          );
+          workspacesRef.current = next;
+          setWorkspaces(next);
+        })
+        .catch((error) =>
+          showToast(`Could not update project shelves: ${String(error)}`, 'error')
+        );
+    },
+    [showToast]
+  );
+
+  const handleProjectAddAction = useCallback(
+    (action: ProjectAddAction) => {
+      if (action === 'openFolder') void pickProject();
+      else if (action === 'importProjects') openProjectImport();
+      else openCloneDialog();
+    },
+    [openCloneDialog, openProjectImport, pickProject]
+  );
+
+  const runProjectAction = useCallback(
+    async (workspace: Workspace, action: ProjectMenuAction) => {
+      try {
+        switch (action) {
+          case 'newThread':
+            await createThread(workspace);
+            break;
+          case 'openProject':
+            selectProject(workspace.id);
+            break;
+          case 'openTerminal':
+            await api.openInTerminal(workspace.path);
+            break;
+          case 'revealFinder':
+            await api.openInFinder(workspace.path);
+            break;
+          case 'copyPath':
+            await copyProjectPath(workspace.id);
+            break;
+          case 'copyShellCommand': {
+            const command = await api.buildProjectShellCommand(workspace.id);
+            await copyText(command, 'Project shell command');
+            break;
+          }
+          case 'refreshGit':
+            await refreshProjectGit(workspace);
+            if (selectedWorkspaceRef.current?.id === workspace.id) {
+              await refreshGit(workspace);
+            }
+            showToast('Git status refreshed', 'success');
+            break;
+          case 'importThreads':
+            await refreshThreads(workspace);
+            showToast(`Codex threads refreshed for ${workspace.name}`, 'success');
+            break;
+          case 'rename':
+            renameProject(workspace.id);
+            break;
+          case 'changeIcon':
+            setProjectIconWorkspaceId(workspace.id);
+            break;
+          case 'pin':
+            await updateProject(
+              workspace.id,
+              { isPinned: !workspace.isPinned },
+              { isPinned: !workspace.isPinned }
+            );
+            break;
+          case 'collapseOthers': {
+            selectProject(workspace.id);
+            const next = workspacesRef.current.map((candidate) => ({
+              ...candidate,
+              isExpanded: candidate.id === workspace.id
+            }));
+            workspacesRef.current = next;
+            setWorkspaces(next);
+            await Promise.all(
+              next.map((candidate) =>
+                api.updateWorkspace(candidate.id, {
+                  isExpanded: candidate.id === workspace.id
+                })
+              )
+            );
+            break;
+          }
+          case 'projectSettings':
+            setManagedWorkspaceId(workspace.id);
+            setManageProjectsOpen(true);
+            break;
+          case 'locateFolder':
+            await locateProject(workspace.id);
+            break;
+          case 'remove':
+            await removeProject(workspace.id);
+            break;
+        }
+      } catch (error) {
+        showToast(`${String(error)}`, 'error');
+      }
+    },
+    [
+      copyProjectPath,
+      copyText,
+      createThread,
+      locateProject,
+      refreshGit,
+      refreshProjectGit,
+      refreshThreads,
+      removeProject,
+      renameProject,
+      selectProject,
+      showToast,
+      updateProject
+    ]
+  );
 
   const startChatgptLogin = useCallback(async () => {
     setLoginBusy(true);
@@ -1076,13 +1905,13 @@ export default function App() {
 
   const runThreadAction = useCallback(
     async (thread: CodexThread, action: ThreadMenuAction) => {
-      const workspace = selectedWorkspaceRef.current;
+      const workspace = findWorkspaceForThread(thread.id, thread);
       if (!workspace) return;
       const ui = metadataRef.current[thread.id];
       try {
         switch (action) {
           case 'open':
-            await openThread(thread.id);
+            await openThread(thread.id, workspace);
             break;
           case 'rename':
             renameThread(thread.id);
@@ -1133,7 +1962,7 @@ export default function App() {
             setControlBusy(false);
             break;
           case 'startFresh':
-            await createThread();
+            await createThread(workspace);
             break;
           case 'fork': {
             const lastTurnId =
@@ -1146,19 +1975,27 @@ export default function App() {
               preferences
             );
             codexStore.setSession(session);
-            setVisibleThreadIds((current) =>
-              current.includes(session.thread.id)
-                ? current
-                : [session.thread.id, ...current]
-            );
+            setThreadIdsByWorkspace((current) => ({
+              ...current,
+              [workspace.id]: current[workspace.id]?.includes(session.thread.id)
+                ? current[workspace.id]
+                : [session.thread.id, ...(current[workspace.id] ?? [])]
+            }));
             await ensureMetadata(workspace, session.thread, preferences);
-            await openThread(session.thread.id);
+            await openThread(session.thread.id, workspace);
             showToast('Forked Codex thread', 'success');
             break;
           }
           case 'archive':
             await api.archiveCodexThread(thread.id);
             codexStore.upsertThreads([{ ...thread, archived: true }]);
+            if (ui) {
+              await persistMetadata({
+                ...ui,
+                archived: true,
+                updatedAt: nowIso()
+              });
+            }
             if (selectedThreadIdRef.current === thread.id) {
               setSelectedThreadId(null);
               codexStore.setActiveThread(null);
@@ -1171,9 +2008,16 @@ export default function App() {
             try {
               const restored = await api.unarchiveCodexThread(thread.id);
               codexStore.upsertThreads([restored]);
+              if (ui) {
+                await persistMetadata({
+                  ...ui,
+                  archived: false,
+                  updatedAt: nowIso()
+                });
+              }
               await refreshThreads(workspace);
               if (reopening) {
-                await openThread(thread.id);
+                await openThread(thread.id, workspace);
               }
             } finally {
               if (reopening) setRecoveringThread(false);
@@ -1187,7 +2031,12 @@ export default function App() {
             );
             if (!approved) break;
             await api.deleteCodexThread(thread.id);
-            setVisibleThreadIds((current) => current.filter((threadId) => threadId !== thread.id));
+            setThreadIdsByWorkspace((current) => ({
+              ...current,
+              [workspace.id]: (current[workspace.id] ?? []).filter(
+                (threadId) => threadId !== thread.id
+              )
+            }));
             if (selectedThreadIdRef.current === thread.id) {
               setSelectedThreadId(null);
               codexStore.setActiveThread(null);
@@ -1204,6 +2053,7 @@ export default function App() {
       copyText,
       createThread,
       ensureMetadata,
+      findWorkspaceForThread,
       openThread,
       persistMetadata,
       refreshThreads,
@@ -1256,6 +2106,31 @@ export default function App() {
         shortcut: '⌘O',
         icon: 'folder',
         run: () => void pickProject()
+      },
+      {
+        id: 'import-projects',
+        label: 'Import Existing Codex Projects',
+        description: 'Discover projects from local Codex thread history',
+        shortcut: '⇧⌘O',
+        icon: 'history',
+        run: openProjectImport
+      },
+      {
+        id: 'clone-repository',
+        label: 'Clone Repository',
+        description: 'Clone and add a local ATController project',
+        icon: 'code',
+        run: openCloneDialog
+      },
+      {
+        id: 'manage-projects',
+        label: 'Manage Projects',
+        description: 'Rename, reorder, pin, import, or remove project entries',
+        icon: 'folder',
+        run: () => {
+          setManagedWorkspaceId(selectedWorkspace?.id ?? null);
+          setManageProjectsOpen(true);
+        }
       },
       {
         id: 'new-thread',
@@ -1410,11 +2285,14 @@ export default function App() {
           updatePreferences({ ...selectedPreferences, serviceTier: tier.id })
       });
     }
-    for (const thread of visibleThreads.slice(0, 12)) {
+    for (const thread of allSidebarThreads.slice(0, 30)) {
+      const workspace = workspaces.find((candidate) =>
+        workspaceMatchesThread(candidate, thread, metadata[thread.id])
+      );
       actions.push({
         id: `thread-${thread.id}`,
         label: thread.title,
-        description: `Switch thread · ${selectedWorkspace?.name ?? ''}`,
+        description: `Switch thread · ${workspace?.name ?? 'Project'}`,
         icon: 'history',
         keywords: thread.preview,
         run: () => void openThread(thread.id)
@@ -1423,8 +2301,12 @@ export default function App() {
     return actions;
   }, [
     createThread,
+    allSidebarThreads,
     catalog,
+    metadata,
+    openCloneDialog,
     openThread,
+    openProjectImport,
     pickProject,
     renameThread,
     restartRuntime,
@@ -1434,7 +2316,7 @@ export default function App() {
     selectedWorkspace,
     openProjectTerminal,
     updatePreferences,
-    visibleThreads
+    workspaces
   ]);
 
   useEffect(() => {
@@ -1444,6 +2326,9 @@ export default function App() {
       if (key === 'n' && !event.shiftKey) {
         event.preventDefault();
         void createThread();
+      } else if (key === 'o' && event.shiftKey) {
+        event.preventDefault();
+        openProjectImport();
       } else if (key === 'o') {
         event.preventDefault();
         void pickProject();
@@ -1480,6 +2365,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleShortcut);
   }, [
     createThread,
+    openProjectImport,
     pickProject,
     renameThread,
     runThreadAction,
@@ -1529,18 +2415,40 @@ export default function App() {
         workspaces={workspaces}
         selectedWorkspaceId={selectedWorkspaceId}
         selectedThreadId={selectedThreadId}
-        threads={visibleThreads}
+        threadsByWorkspace={threadsByWorkspace}
         metadata={metadata}
         approvals={codex.approvals as Record<string, CodexApprovalRequest>}
+        gitInfoByWorkspace={gitInfoByWorkspace}
+        loadingWorkspaceIds={loadingWorkspaceIds}
         filter={filter}
+        sortMode={projectSortMode}
         connectionState={codex.diagnostics?.connectionState ?? 'stopped'}
         collapsed={sidebarCollapsed}
-        onSelectWorkspace={setSelectedWorkspaceId}
-        onAddWorkspace={() => void pickProject()}
-        onNewThread={() => void createThread()}
-        onSelectThread={(threadId) => void openThread(threadId)}
+        onSelectWorkspace={selectProject}
+        onToggleWorkspace={toggleProject}
+        onAddAction={handleProjectAddAction}
+        onProjectsMenuAction={handleProjectsMenuAction}
+        onNewThread={(workspaceId) => {
+          const workspace = workspaceId
+            ? workspacesRef.current.find((candidate) => candidate.id === workspaceId)
+            : selectedWorkspaceRef.current;
+          void createThread(workspace);
+        }}
+        onSelectThread={(workspaceId, threadId) => {
+          const workspace = workspacesRef.current.find(
+            (candidate) => candidate.id === workspaceId
+          );
+          void openThread(threadId, workspace);
+        }}
         onRenameThread={renameThread}
         onOpenThreadMenu={(threadId, x, y) => setContextMenu({ threadId, x, y })}
+        onOpenProjectMenu={(workspaceId, x, y) =>
+          setProjectContextMenu({ workspaceId, x, y })
+        }
+        onReorderWorkspaces={(workspaceIds) => void reorderProjects(workspaceIds)}
+        onLocateWorkspace={(workspaceId) => void locateProject(workspaceId)}
+        onRemoveWorkspace={(workspaceId) => void removeProject(workspaceId)}
+        onCopyWorkspacePath={(workspaceId) => void copyProjectPath(workspaceId)}
         onFilterChange={setFilter}
         onOpenSettings={() => setControlCenter('settings')}
         onOpenDiagnostics={() => setControlCenter('diagnostics')}
@@ -1569,6 +2477,13 @@ export default function App() {
           />
         ) : !selectedWorkspace ? (
           <EmptyWorkspace kind="folder" detail="Select a project" action="Choose Project" onAction={() => void pickProject()} />
+        ) : !selectedWorkspace.isAvailable ? (
+          <EmptyWorkspace
+            kind="warning"
+            detail={`${selectedWorkspace.name} is unavailable`}
+            action="Locate Folder"
+            onAction={() => void locateProject(selectedWorkspace.id)}
+          />
         ) : !selectedThread ? (
           <EmptyWorkspace
             kind="history"
@@ -1588,6 +2503,16 @@ export default function App() {
               disconnected={!connected}
               inspectorOpen={inspectorOpen}
               onRename={() => renameThread(selectedThread.id)}
+              onSelectProject={() => {
+                selectProject(selectedWorkspace.id);
+                requestAnimationFrame(() =>
+                  document
+                    .querySelector<HTMLElement>(
+                      `[data-project-shelf="${selectedWorkspace.id}"]`
+                    )
+                    ?.scrollIntoView({ block: 'nearest' })
+                );
+              }}
               onOpenMenu={(x, y) => setContextMenu({ threadId: selectedThread.id, x, y })}
               onToggleInspector={() => setInspectorOpen((value) => !value)}
               onOpenTerminal={() => void openProjectTerminal()}
@@ -1611,6 +2536,7 @@ export default function App() {
                   thread={selectedThread}
                   approvals={selectedApprovals}
                   usage={codex.usage[selectedThread.id]}
+                  recovering={recoveringThread}
                   onRespondToApproval={(approval, decision) => void respondToApproval(approval, decision)}
                   onRespondToUserInput={(approval, answers) => void respondToUserInput(approval, answers)}
                   onCopy={(value, label) => void copyText(value, label)}
@@ -1695,16 +2621,39 @@ export default function App() {
 
       {contextMenu ? (() => {
         const thread = codex.threads[contextMenu.threadId];
-        if (!thread || !selectedWorkspace) return null;
+        const workspace = thread
+          ? findWorkspaceForThread(thread.id, thread)
+          : undefined;
+        if (!thread || !workspace) return null;
         return (
           <ThreadContextMenu
             thread={thread}
-            workspace={selectedWorkspace}
+            workspace={workspace}
             metadata={metadata[thread.id]}
             x={contextMenu.x}
             y={contextMenu.y}
             onAction={(action) => void runThreadAction(thread, action)}
             onClose={() => setContextMenu(null)}
+          />
+        );
+      })() : null}
+
+      {projectContextMenu ? (() => {
+        const workspace = workspaces.find(
+          (candidate) => candidate.id === projectContextMenu.workspaceId
+        );
+        if (!workspace) return null;
+        return (
+          <ProjectContextMenu
+            workspace={workspace}
+            hasGit={
+              Boolean(gitInfoByWorkspace[workspace.id]) ||
+              !Object.prototype.hasOwnProperty.call(gitInfoByWorkspace, workspace.id)
+            }
+            x={projectContextMenu.x}
+            y={projectContextMenu.y}
+            onAction={(action) => void runProjectAction(workspace, action)}
+            onClose={() => setProjectContextMenu(null)}
           />
         );
       })() : null}
@@ -1737,6 +2686,119 @@ export default function App() {
           </form>
         </div>
       ) : null}
+
+      {projectRename ? (
+        <div className="modal-backdrop" onPointerDown={() => setProjectRename(null)}>
+          <form
+            className="rename-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-project-title"
+            onPointerDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitProjectRename();
+            }}
+          >
+            <h2 id="rename-project-title">Rename project</h2>
+            <input
+              value={projectRename.value}
+              maxLength={120}
+              autoFocus
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) =>
+                setProjectRename({ ...projectRename, value: event.target.value })
+              }
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') setProjectRename(null);
+              }}
+            />
+            <footer>
+              <button type="button" className="ghost-button" onClick={() => setProjectRename(null)}>Cancel</button>
+              <button type="submit" className="primary-button" disabled={!projectRename.value.trim()}>Rename</button>
+            </footer>
+          </form>
+        </div>
+      ) : null}
+
+      <ProjectImportDialog
+        open={projectImportOpen}
+        projects={discoveredProjects}
+        loading={projectImportLoading}
+        busy={projectImportBusy}
+        error={projectImportError}
+        onRefresh={() => void scanCodexProjects()}
+        onImport={(paths) => void importCodexProjects(paths)}
+        onClose={() => {
+          if (!projectImportBusy) setProjectImportOpen(false);
+        }}
+      />
+      <CloneRepositoryDialog
+        open={cloneOpen}
+        destinationParent={cloneDestinationParent}
+        busy={cloneBusy}
+        error={cloneError}
+        onChooseDestination={() => void chooseCloneDestination()}
+        onClone={(repository) => void cloneRepository(repository)}
+        onClose={() => {
+          if (!cloneBusy) setCloneOpen(false);
+        }}
+      />
+      <ManageProjectsDialog
+        open={manageProjectsOpen}
+        workspaces={workspaces}
+        threadsByWorkspace={threadsByWorkspace}
+        gitInfoByWorkspace={gitInfoByWorkspace}
+        focusedWorkspaceId={managedWorkspaceId}
+        onOpen={(workspaceId) => {
+          selectProject(workspaceId);
+          setManageProjectsOpen(false);
+        }}
+        onReveal={(workspaceId) => {
+          const workspace = workspacesRef.current.find(
+            (candidate) => candidate.id === workspaceId
+          );
+          if (workspace) {
+            void api
+              .openInFinder(workspace.path)
+              .catch((error) => showToast(`Could not reveal project: ${String(error)}`, 'error'));
+          }
+        }}
+        onRename={(workspaceId) => {
+          setManageProjectsOpen(false);
+          renameProject(workspaceId);
+        }}
+        onTogglePin={(workspaceId) => {
+          const workspace = workspacesRef.current.find(
+            (candidate) => candidate.id === workspaceId
+          );
+          if (workspace) {
+            void updateProject(
+              workspace.id,
+              { isPinned: !workspace.isPinned },
+              { isPinned: !workspace.isPinned }
+            );
+          }
+        }}
+        onMove={moveManagedProject}
+        onImportThreads={(workspaceId) => {
+          const workspace = workspacesRef.current.find(
+            (candidate) => candidate.id === workspaceId
+          );
+          if (workspace) void refreshThreads(workspace);
+        }}
+        onRemove={(workspaceId) => void removeProject(workspaceId)}
+        onClose={() => setManageProjectsOpen(false)}
+      />
+      <ProjectIconDialog
+        workspace={
+          projectIconWorkspaceId
+            ? workspaces.find((workspace) => workspace.id === projectIconWorkspaceId) ?? null
+            : null
+        }
+        onSelect={(preference) => void setProjectIcon(preference)}
+        onClose={() => setProjectIconWorkspaceId(null)}
+      />
 
       <CommandPalette open={paletteOpen} actions={paletteActions} onClose={() => setPaletteOpen(false)} />
       <ControlCenterDialog

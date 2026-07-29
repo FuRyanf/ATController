@@ -44,6 +44,7 @@ const metadata: CodexThreadUiMetadata = {
   fallbackTitle: thread.title,
   pinned: false,
   unread: true,
+  archived: false,
   draft: '',
   promptHistory: [],
   permissionMode: 'fullAccess',

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  CodexDiscoveredProject,
   CodexDiagnostics,
   CodexEvent,
   CodexLoginSession,
@@ -21,7 +22,8 @@ import type {
   ServerRequestResponse,
   Settings,
   ThreadPreferences,
-  Workspace
+  Workspace,
+  WorkspaceUpdate
 } from '../types';
 
 export const events = {
@@ -55,6 +57,8 @@ export const api = {
       cursor: params.cursor ?? null,
       limit: params.limit ?? 100
     }),
+  discoverCodexProjects: () =>
+    invoke<CodexDiscoveredProject[]>('codex_discover_projects'),
   readCodexThread: (threadId: string, includeTurns = true) =>
     invoke<CodexThread>('codex_read_thread', { threadId, includeTurns }),
   startCodexThread: (
@@ -139,8 +143,16 @@ export const api = {
     invoke<CodexThreadUiMetadata>('save_codex_thread_ui_metadata', { metadata }),
   listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
+  updateWorkspace: (workspaceId: string, update: WorkspaceUpdate) =>
+    invoke<Workspace>('update_workspace', { workspaceId, update }),
+  relocateWorkspace: (workspaceId: string, path: string) =>
+    invoke<Workspace>('relocate_workspace', { workspaceId, path }),
+  cloneRepository: (repository: string, destinationParent: string) =>
+    invoke<Workspace>('clone_repository', { repository, destinationParent }),
   removeWorkspace: (workspaceId: string) => invoke<boolean>('remove_workspace', { workspaceId }),
   setWorkspaceOrder: (workspaceIds: string[]) => invoke<Workspace[]>('set_workspace_order', { workspaceIds }),
+  buildProjectShellCommand: (workspaceId: string) =>
+    invoke<string>('build_project_shell_command', { workspaceId }),
   setWorkspaceGitPullOnMasterForNewThreads: (workspaceId: string, enabled: boolean) =>
     invoke<Workspace>('set_workspace_git_pull_on_master_for_new_threads', { workspaceId, enabled }),
   getGitInfo: (workspacePath: string) =>

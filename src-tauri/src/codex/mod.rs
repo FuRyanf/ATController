@@ -18,8 +18,9 @@ use tokio::sync::Mutex;
 
 pub use diagnostics::{CodexDiagnostics, ConnectionState};
 pub use protocol::{
-    CodexEvent, CodexLoginSession, CodexRuntimeCatalog, CodexSkill, CodexThread, CodexThreadPage,
-    CodexThreadSession, CodexTurn, ComposerInput, ServerRequestResponse, ThreadPreferences,
+    CodexDiscoveredProject, CodexEvent, CodexLoginSession, CodexRuntimeCatalog, CodexSkill,
+    CodexThread, CodexThreadPage, CodexThreadSession, CodexTurn, ComposerInput,
+    ServerRequestResponse, ThreadPreferences,
 };
 pub use resume::{CodexResumeCommand, ResumeCommandRequest};
 use rpc::{RequestOptions, RpcConnection, RpcError, WireEvent};
@@ -638,6 +639,31 @@ mod contract_tests {
                 .as_array()
                 .is_some_and(|turns| !turns.is_empty()),
             "structured history should include the completed turn"
+        );
+        let global_listing = connection
+            .request(
+                "thread/list",
+                json!({
+                    "archived":false,
+                    "limit":100,
+                    "sortKey":"recency_at",
+                    "sortDirection":"desc",
+                    "sourceKinds":["cli","vscode","appServer"]
+                }),
+                idempotent,
+            )
+            .await
+            .expect("global thread/list should support project discovery");
+        let canonical_root =
+            std::fs::canonicalize(&root).expect("temporary project should canonicalize");
+        assert!(
+            global_listing["data"]
+                .as_array()
+                .is_some_and(|threads| threads.iter().any(|thread| {
+                    thread["id"] == thread_id
+                        && thread["cwd"].as_str() == Some(canonical_root.to_string_lossy().as_ref())
+                })),
+            "project discovery listing should retain the canonical thread id and workspace path"
         );
         connection
             .request(

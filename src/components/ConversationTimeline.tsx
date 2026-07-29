@@ -14,6 +14,7 @@ interface ConversationTimelineProps {
   thread: CodexThread;
   approvals: CodexApprovalRequest[];
   usage?: CodexTokenUsage;
+  recovering?: boolean;
   onRespondToApproval: (
     approval: CodexApprovalRequest,
     decision: 'accept' | 'acceptForSession' | 'decline' | 'cancel'
@@ -28,6 +29,9 @@ interface ConversationTimelineProps {
   onRevertFile: (path: string) => void;
   onOpenTerminal: (path: string) => void;
 }
+
+const INITIAL_VISIBLE_TURNS = 24;
+const EARLIER_TURN_PAGE_SIZE = 24;
 
 function formatDuration(durationMs?: number | null): string {
   if (durationMs == null) return '';
@@ -671,6 +675,7 @@ export function ConversationTimeline({
   thread,
   approvals,
   usage,
+  recovering = false,
   onRespondToApproval,
   onRespondToUserInput,
   onCopy,
@@ -682,7 +687,10 @@ export function ConversationTimeline({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
   const [unseenBelow, setUnseenBelow] = useState(false);
+  const [visibleTurnLimit, setVisibleTurnLimit] = useState(INITIAL_VISIBLE_TURNS);
   const latestTurn = thread.turns.length ? thread.turns[thread.turns.length - 1] : undefined;
+  const firstVisibleTurnIndex = Math.max(0, thread.turns.length - visibleTurnLimit);
+  const visibleTurns = thread.turns.slice(firstVisibleTurnIndex);
   const contentSignature = useMemo(
     () =>
       `${thread.turns.length}:${
@@ -715,6 +723,7 @@ export function ConversationTimeline({
     element.scrollTop = element.scrollHeight;
     setFollowing(true);
     setUnseenBelow(false);
+    setVisibleTurnLimit(INITIAL_VISIBLE_TURNS);
   }, [thread.id]);
 
   const threadApprovals = approvals.filter((approval) => approval.threadId === thread.id);
@@ -741,27 +750,57 @@ export function ConversationTimeline({
         }}
       >
         <div className="conversation-column">
-          {thread.turns.length === 0 ? (
+          {thread.turns.length === 0 && recovering ? (
+            <div className="timeline-empty timeline-recovering" role="status">
+              <span className="timeline-history-spinner" aria-hidden="true" />
+              <h2>Loading thread history</h2>
+              <p>Reading this conversation from the local Codex runtime…</p>
+            </div>
+          ) : thread.turns.length === 0 ? (
             <div className="timeline-empty">
               <span className="empty-kicker">Ready</span>
               <h2>Start with a task</h2>
               <p>Ask Codex to explore this project, change code, run tests, or explain what it finds.</p>
             </div>
           ) : (
-            thread.turns.map((turn) => (
-              <TurnBlock
-                key={turn.id}
-                turn={turn}
-                approvals={threadApprovals.filter((approval) => approval.turnId === turn.id)}
-                onRespondToApproval={onRespondToApproval}
-                onRespondToUserInput={onRespondToUserInput}
-                onCopy={onCopy}
-                onOpenFile={onOpenFile}
-                onRevealPath={onRevealPath}
-                onRevertFile={onRevertFile}
-                onOpenTerminal={onOpenTerminal}
-              />
-            ))
+            <>
+              {firstVisibleTurnIndex > 0 ? (
+                <button
+                  type="button"
+                  className="timeline-load-earlier"
+                  onClick={(event) => {
+                    const scrollElement = scrollRef.current;
+                    const previousHeight = scrollElement?.scrollHeight ?? 0;
+                    setVisibleTurnLimit((limit) =>
+                      Math.min(thread.turns.length, limit + EARLIER_TURN_PAGE_SIZE)
+                    );
+                    requestAnimationFrame(() => {
+                      if (scrollElement) {
+                        scrollElement.scrollTop += scrollElement.scrollHeight - previousHeight;
+                      }
+                    });
+                    event.currentTarget.blur();
+                  }}
+                >
+                  Show {Math.min(firstVisibleTurnIndex, EARLIER_TURN_PAGE_SIZE)} earlier turns
+                  <span>{firstVisibleTurnIndex} hidden</span>
+                </button>
+              ) : null}
+              {visibleTurns.map((turn) => (
+                <TurnBlock
+                  key={turn.id}
+                  turn={turn}
+                  approvals={threadApprovals.filter((approval) => approval.turnId === turn.id)}
+                  onRespondToApproval={onRespondToApproval}
+                  onRespondToUserInput={onRespondToUserInput}
+                  onCopy={onCopy}
+                  onOpenFile={onOpenFile}
+                  onRevealPath={onRevealPath}
+                  onRevertFile={onRevertFile}
+                  onOpenTerminal={onOpenTerminal}
+                />
+              ))}
+            </>
           )}
           {unassociatedApprovals.map((approval) => (
             <ApprovalCard

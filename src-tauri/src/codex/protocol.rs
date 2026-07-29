@@ -7,6 +7,12 @@ use serde_json::{json, Value};
 
 use super::process;
 
+const MAX_HISTORY_TEXT_CHARS: usize = 1_000_000;
+const MAX_HISTORY_COMMAND_OUTPUT_CHARS: usize = 512_000;
+const MAX_HISTORY_DIFF_CHARS: usize = 1_000_000;
+const MAX_HISTORY_JSON_CHARS: usize = 16_000;
+const HISTORY_TRUNCATION_MARKER: &str = "\n[Earlier content truncated by ATController]\n";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
@@ -87,6 +93,20 @@ pub struct CodexThreadPage {
     pub data: Vec<CodexThread>,
     pub next_cursor: Option<String>,
     pub backwards_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexDiscoveredProject {
+    pub name: String,
+    pub workspace_path: String,
+    pub thread_count: usize,
+    pub active_thread_count: usize,
+    pub archived_thread_count: usize,
+    pub most_recent_activity: Option<i64>,
+    pub already_added: bool,
+    pub available: bool,
+    pub thread_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -606,15 +626,25 @@ pub fn normalize_item(value: &Value) -> Result<CodexItem> {
                 .map(normalize_input_part)
                 .collect();
         }
-        "agentMessage" | "plan" => item.text = optional_string(value, "text"),
+        "agentMessage" | "plan" => {
+            item.text = optional_string(value, "text")
+                .map(|text| tail_bounded(text, MAX_HISTORY_TEXT_CHARS))
+        }
         "reasoning" => {
-            item.summary = string_array(value.get("summary"));
-            item.reasoning = string_array(value.get("content"));
+            item.summary = string_array(value.get("summary"))
+                .into_iter()
+                .map(|text| tail_bounded(text, MAX_HISTORY_TEXT_CHARS))
+                .collect();
+            item.reasoning = string_array(value.get("content"))
+                .into_iter()
+                .map(|text| tail_bounded(text, MAX_HISTORY_TEXT_CHARS))
+                .collect();
         }
         "commandExecution" => {
             item.command = optional_string(value, "command");
             item.cwd = optional_string(value, "cwd");
-            item.output = optional_string(value, "aggregatedOutput");
+            item.output = optional_string(value, "aggregatedOutput")
+                .map(|output| tail_bounded(output, MAX_HISTORY_COMMAND_OUTPUT_CHARS));
             item.exit_code = value.get("exitCode").and_then(Value::as_i64);
         }
         "fileChange" => {
@@ -623,11 +653,11 @@ pub fn normalize_item(value: &Value) -> Result<CodexItem> {
         "mcpToolCall" => {
             item.tool_server = optional_string(value, "server");
             item.tool_name = optional_string(value, "tool");
-            item.tool_arguments = value.get("arguments").cloned();
+            item.tool_arguments = value.get("arguments").map(bounded_json);
             item.tool_result = value
                 .get("result")
                 .filter(|result| !result.is_null())
-                .cloned();
+                .map(bounded_json);
             item.error = value
                 .get("error")
                 .filter(|error| !error.is_null())
@@ -635,18 +665,18 @@ pub fn normalize_item(value: &Value) -> Result<CodexItem> {
         }
         "dynamicToolCall" | "collabAgentToolCall" => {
             item.tool_name = optional_string(value, "tool");
-            item.tool_arguments = value.get("arguments").cloned();
-            item.tool_result = value.get("contentItems").cloned();
+            item.tool_arguments = value.get("arguments").map(bounded_json);
+            item.tool_result = value.get("contentItems").map(bounded_json);
         }
         "webSearch" => {
             item.tool_name = Some("Web search".to_string());
-            item.details = Some(value.clone());
+            item.details = Some(bounded_json(value));
         }
         "imageView" | "imageGeneration" => {
-            item.details = Some(value.clone());
+            item.details = Some(bounded_json(value));
         }
         _ => {
-            item.details = Some(value.clone());
+            item.details = Some(bounded_json(value));
         }
     }
     Ok(item)
@@ -655,9 +685,18 @@ pub fn normalize_item(value: &Value) -> Result<CodexItem> {
 fn normalize_input_part(value: &Value) -> CodexInputPart {
     CodexInputPart {
         kind: optional_string(value, "type").unwrap_or_else(|| "unknown".to_string()),
-        text: optional_string(value, "text"),
+        text: optional_string(value, "text").map(|text| tail_bounded(text, MAX_HISTORY_TEXT_CHARS)),
         path: optional_string(value, "path"),
-        url: optional_string(value, "url"),
+        url: optional_string(value, "url").map(|url| {
+            if url.starts_with("data:") && url.len() > 4_096 {
+                format!(
+                    "data:application/x-atcontroller-history-placeholder,{}-bytes-omitted",
+                    url.len()
+                )
+            } else {
+                tail_bounded(url, MAX_HISTORY_TEXT_CHARS)
+            }
+        }),
         name: optional_string(value, "name"),
     }
 }
@@ -671,10 +710,39 @@ fn normalize_changes(value: Option<&Value>) -> Vec<CodexFileChange> {
             Some(CodexFileChange {
                 path: optional_string(change, "path")?,
                 kind: change.get("kind").map(value_label).unwrap_or_default(),
-                diff: optional_string(change, "diff").unwrap_or_default(),
+                diff: optional_string(change, "diff")
+                    .map(|diff| tail_bounded(diff, MAX_HISTORY_DIFF_CHARS))
+                    .unwrap_or_default(),
             })
         })
         .collect()
+}
+
+fn tail_bounded(value: String, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value;
+    }
+    let keep = max_chars.saturating_sub(HISTORY_TRUNCATION_MARKER.chars().count());
+    let tail = value
+        .chars()
+        .skip(char_count.saturating_sub(keep))
+        .collect::<String>();
+    format!("{HISTORY_TRUNCATION_MARKER}{tail}")
+}
+
+fn bounded_json(value: &Value) -> Value {
+    let Ok(encoded) = serde_json::to_string(value) else {
+        return json!({ "truncated": true, "reason": "Unable to serialize structured detail" });
+    };
+    if encoded.chars().count() <= MAX_HISTORY_JSON_CHARS {
+        return value.clone();
+    }
+    json!({
+        "truncated": true,
+        "originalBytes": encoded.len(),
+        "preview": tail_bounded(encoded, MAX_HISTORY_JSON_CHARS)
+    })
 }
 
 pub fn normalize_notification(sequence: u64, method: &str, params: &Value) -> CodexEvent {
@@ -1225,7 +1293,7 @@ pub fn value_label(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         build_wire_inputs, normalize_item, normalize_notification, normalize_rate_limits,
@@ -1249,6 +1317,35 @@ mod tests {
         assert_eq!(item.command.as_deref(), Some("git status"));
         assert_eq!(item.output.as_deref(), Some(" M src/lib.rs"));
         assert_eq!(item.exit_code, Some(0));
+    }
+
+    #[test]
+    fn bounds_verbose_history_payloads_before_the_tauri_boundary() {
+        let command = normalize_item(&json!({
+            "type": "commandExecution",
+            "id": "large-command",
+            "aggregatedOutput": "x".repeat(700_000)
+        }))
+        .expect("large command should normalize");
+        let output = command
+            .output
+            .expect("command output should remain available");
+        assert!(output.len() < 520_000);
+        assert!(output.contains("Earlier content truncated"));
+
+        let tool = normalize_item(&json!({
+            "type": "mcpToolCall",
+            "id": "large-tool",
+            "server": "fixture",
+            "tool": "fixture",
+            "result": { "content": "y".repeat(400_000) }
+        }))
+        .expect("large tool result should normalize");
+        let result = tool
+            .tool_result
+            .expect("tool result should remain structured");
+        assert_eq!(result.get("truncated").and_then(Value::as_bool), Some(true));
+        assert!(result.get("preview").and_then(Value::as_str).is_some());
     }
 
     #[test]

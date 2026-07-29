@@ -10,7 +10,11 @@ use super::diagnostics::DiagnosticsState;
 
 pub const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 pub const INBOUND_QUEUE_CAPACITY: usize = 256;
-const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
+// `thread/read` and `thread/resume` return the complete structured history on
+// one JSONL line. Real long-running development threads can exceed 100 MiB
+// before ATController compacts verbose tool results at the Tauri boundary.
+// Keep this bounded, but large enough for those official protocol responses.
+const MAX_PROTOCOL_LINE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_STDERR_LINE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug)]

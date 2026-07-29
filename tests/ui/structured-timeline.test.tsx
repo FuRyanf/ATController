@@ -103,6 +103,68 @@ function structuredThread(): CodexThread {
 }
 
 describe('structured Codex timeline', () => {
+  it('distinguishes history recovery from a genuinely empty thread', () => {
+    const thread = structuredThread();
+    thread.turns = [];
+    render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        recovering
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={vi.fn()}
+        onOpenFile={vi.fn()}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('Loading thread history');
+    expect(screen.queryByText('Start with a task')).not.toBeInTheDocument();
+  });
+
+  it('renders recent history first and progressively reveals long conversations', async () => {
+    const user = userEvent.setup();
+    const thread = structuredThread();
+    thread.turns = Array.from({ length: 50 }, (_, index) => ({
+      id: `turn-${index + 1}`,
+      status: 'completed',
+      itemsView: 'full',
+      items: [
+        {
+          id: `message-${index + 1}`,
+          kind: 'agentMessage',
+          text: `History message ${index + 1}`,
+          summary: [],
+          reasoning: [],
+          content: [],
+          changes: []
+        }
+      ]
+    }));
+    render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={vi.fn()}
+        onOpenFile={vi.fn()}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+      />
+    );
+    expect(screen.queryByText('History message 1')).not.toBeInTheDocument();
+    expect(screen.getByText('History message 50')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Show 24 earlier turns/ }));
+    expect(screen.getByText('History message 3')).toBeInTheDocument();
+    expect(screen.queryByText('History message 1')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Show 2 earlier turns/ }));
+    expect(screen.getByText('History message 1')).toBeInTheDocument();
+  });
+
   it('renders messages, commands, output, file edits, and completion as distinct items', async () => {
     const user = userEvent.setup();
     const openFile = vi.fn();

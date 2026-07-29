@@ -467,12 +467,14 @@ impl RpcConnection {
         self.diagnostics.queue_increment();
         let _ = self.outbound.send(OutboundFrame::Shutdown).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
-        if !self.exit_reported.load(Ordering::Acquire) {
-            #[cfg(unix)]
-            {
-                process::signal_process_group(self.pid, libc::SIGTERM);
+        #[cfg(unix)]
+        {
+            // The discovered Codex executable may be a version-manager shim that
+            // exits before its node/vendor descendants. Always address the full
+            // process group, even when the direct child has already reported exit.
+            if process::signal_process_group(self.pid, libc::SIGTERM) {
                 tokio::time::sleep(Duration::from_millis(700)).await;
-                if !self.exit_reported.load(Ordering::Acquire) {
+                if process::signal_process_group(self.pid, 0) {
                     process::signal_process_group(self.pid, libc::SIGKILL);
                 }
             }
@@ -521,9 +523,18 @@ async fn dispatch_inbound(
         match frame {
             InboundFrame::Message(message) => connection.dispatch_message(message).await,
             InboundFrame::Malformed(error) => connection.diagnostics.push_protocol_error(&error),
-            InboundFrame::Oversized => connection
-                .diagnostics
-                .push_protocol_error("Codex returned an oversized JSONL message"),
+            InboundFrame::Oversized => {
+                let message =
+                    "Codex returned a JSONL message larger than ATController's 256 MiB safety limit";
+                connection.diagnostics.push_protocol_error(message);
+                connection
+                    .reject_pending(RpcError {
+                        code: Some(-32098),
+                        message: message.to_string(),
+                        data: None,
+                    })
+                    .await;
+            }
             InboundFrame::TransportError(error) => {
                 connection.diagnostics.push_protocol_error(&error);
                 connection.reject_pending(connection_closed_error()).await;

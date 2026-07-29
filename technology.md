@@ -35,8 +35,9 @@ React never owns the Codex child process. Rust never sends terminal keystrokes t
 
 - `src/App.tsx` coordinates projects, selected threads, persistence, Git refreshes, shortcuts, dialogs, and recovery.
 - `src/stores/codexStore.ts` batches ordered protocol events and reduces them into stable thread, turn, item, approval, usage, and diagnostics views.
-- `src/components/CodexSidebar.tsx` renders project switching and Pinned, Active, Recent, and Archived thread sections.
-- `src/components/ConversationTimeline.tsx` renders typed Codex items with progressive disclosure.
+- `src/components/CodexSidebar.tsx` renders persistent, reorderable project shelves and nested running, recent, and archived thread groups.
+- `src/components/ProjectContextMenu.tsx`, `ProjectImportDialog.tsx`, `CloneRepositoryDialog.tsx`, `ManageProjectsDialog.tsx`, and `ProjectIconDialog.tsx` implement project lifecycle surfaces.
+- `src/components/ConversationTimeline.tsx` renders typed Codex items with progressive disclosure and preserved-scroll history paging.
 - `src/components/MessageComposer.tsx` serializes structured text, image, file, and skill input.
 - `src/components/InspectorPanel.tsx` reconciles Codex activity with Git and runtime state.
 - `src/components/ThreadContextMenu.tsx` and `CommandPalette.tsx` expose thread and keyboard-first actions.
@@ -114,7 +115,7 @@ On application shutdown:
 5. the process group receives `SIGTERM`;
 6. `SIGKILL` is used only if the process still has not exited.
 
-This also terminates descendants and prevents orphaned app-server processes.
+The native application exit event and Unix `SIGTERM` both enter this path. Process-group signaling runs even when a version-manager shim reports exit before its descendants, preventing orphaned app-server processes.
 
 ## Transport and framing
 
@@ -130,11 +131,11 @@ stdout and stderr never share a parser. The transport uses:
 
 - a 256-message outbound channel;
 - a 256-message inbound channel;
-- an 8 MiB maximum JSONL frame;
+- a 256 MiB maximum JSONL frame, required because official full-history responses are a single line;
 - a 16 KiB maximum stderr line;
 - bounded enqueue timeouts and natural async backpressure.
 
-Malformed or oversized messages are isolated to one frame and recorded as redacted protocol diagnostics. Parsing resumes at the next newline.
+Malformed or oversized messages are isolated to one frame and recorded as redacted protocol diagnostics. Parsing resumes at the next newline, and an oversized response rejects pending requests immediately with a compatibility error instead of waiting for their timeouts.
 
 ## Initialization
 
@@ -282,7 +283,7 @@ Item events may arrive before the request response or before the turn payload. T
 
 Completed turns are memoized and older blocks use CSS content visibility. Streaming output updates only the active item. Scroll follow is conditional: output follows when the reader is at the bottom and shows **Jump to latest** when the reader scrolls upward.
 
-Rendered live command output is capped at the latest one million characters per item with an explicit truncation marker. This keeps pathological command streams from exhausting the WebView while Codex-owned history and the working tree remain authoritative.
+Rendered live command output is capped at the latest one million characters per item with an explicit truncation marker. During history normalization, command output, diffs, inline data, and verbose tool details receive tighter per-item bounds before serialization across Tauri. A long conversation initially mounts only its newest 24 turns and reveals earlier pages without moving the reader’s viewport. These constraints keep pathological histories from exhausting the WebView while Codex-owned history and the working tree remain authoritative.
 
 ## Permissions and approvals
 
@@ -343,7 +344,11 @@ codex-thread-ui.json
 - permission mode
 - last-viewed and update timestamps
 
-The app-server v3 migration writes a backup before importing compatible metadata. Records without a canonical Codex identifier or with an incompatible runtime identity are reported and left untouched. Migration writes use temporary files, fsync, and atomic rename.
+Each `workspaces.json` project contains an ID, display name, canonical path, workspace type, creation and last-opened timestamps, pinned/custom-order/expanded state, icon preference, availability, and bounded Git preferences. Thread UI metadata points to exactly one project ID.
+
+The app-server v3 migration writes a backup before importing compatible metadata. Records without a canonical Codex identifier or with an incompatible runtime identity are reported and left untouched. The project-shelves v1 migration separately backs up flat workspace/UI state, canonicalizes paths, enriches project records, and preserves malformed or unavailable entries in its report. Migration writes use temporary files, fsync, and atomic rename.
+
+Official unscoped `thread/list` discovery groups active and archived Codex threads by canonical `cwd`. Importing a discovered project persists only the workspace and UI association; transcripts are neither copied nor rewritten.
 
 ## Git boundary
 
@@ -388,7 +393,7 @@ sequenceDiagram
     Rust-->>UI: Ready diagnostics and runtime catalog
 
     User->>UI: Open or create thread
-    UI->>Rust: thread/read, thread/resume, or thread/start
+    UI->>Rust: thread/resume, thread/read (archived), or thread/start
     Rust->>Server: Structured thread request with cwd and permissions
     Server->>Runtime: Open canonical Codex thread
     Runtime-->>Server: Thread state
@@ -419,7 +424,7 @@ sequenceDiagram
     UI-->>User: Completion and unread/notification state
 
     User->>UI: Quit
-    UI->>Rust: Window destroyed
+    UI->>Rust: Native application exit
     Rust->>Server: Close stdin and stop process group
     Rust-->>UI: Stopped
 ```

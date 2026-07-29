@@ -12,13 +12,13 @@ use std::sync::Arc;
 use tauri::{Manager, State};
 
 use crate::codex::{
-    CodexDiagnostics, CodexLoginSession, CodexResumeCommand, CodexRuntime, CodexRuntimeCatalog,
-    CodexSkill, CodexThread, CodexThreadPage, CodexThreadSession, CodexTurn, ComposerInput,
-    ResumeCommandRequest, ServerRequestResponse, ThreadPreferences,
+    CodexDiagnostics, CodexDiscoveredProject, CodexLoginSession, CodexResumeCommand, CodexRuntime,
+    CodexRuntimeCatalog, CodexSkill, CodexThread, CodexThreadPage, CodexThreadSession, CodexTurn,
+    ComposerInput, ResumeCommandRequest, ServerRequestResponse, ThreadPreferences,
 };
 use crate::models::{
     CodexThreadUiMetadata, GitBranchEntry, GitInfo, GitPullForNewThreadResult, GitWorkspaceStatus,
-    Settings, Workspace,
+    Settings, Workspace, WorkspaceUpdate,
 };
 
 struct AppState {
@@ -134,6 +134,18 @@ async fn codex_list_threads(
         .codex
         .clone()
         .list_threads(workspace_path, archived, search_term, cursor, limit)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn codex_discover_projects(
+    state: State<'_, AppState>,
+) -> Result<Vec<CodexDiscoveredProject>, String> {
+    state
+        .codex
+        .clone()
+        .discover_projects()
         .await
         .map_err(|error| error.to_string())
 }
@@ -361,8 +373,45 @@ fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>, Str
 }
 
 #[tauri::command]
+fn update_workspace(workspace_id: String, update: WorkspaceUpdate) -> Result<Workspace, String> {
+    storage::update_workspace(&workspace_id, update).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn relocate_workspace(workspace_id: String, path: String) -> Result<Workspace, String> {
+    storage::relocate_workspace(&workspace_id, &path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn clone_repository(
+    repository: String,
+    destination_parent: String,
+) -> Result<Workspace, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        storage::clone_repository(&repository, &destination_parent)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("Git clone task failed: {error}"))?
+}
+
+#[tauri::command]
 fn remove_workspace(workspace_id: String) -> Result<bool, String> {
     storage::remove_workspace(&workspace_id).map_err(|error| error.to_string())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[tauri::command]
+fn build_project_shell_command(workspace_id: String) -> Result<String, String> {
+    let workspace = storage::load_workspaces()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| "Project not found".to_string())?;
+    Ok(format!("cd -- {}", shell_quote(&workspace.path)))
 }
 
 #[tauri::command]
@@ -650,7 +699,22 @@ fn main() {
         .setup(|app| {
             let runtime = app.state::<AppState>().codex.clone();
             runtime.attach(app.handle().clone());
-            CodexRuntime::start_in_background(runtime);
+            CodexRuntime::start_in_background(runtime.clone());
+            #[cfg(unix)]
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let Ok(mut terminate) =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    else {
+                        return;
+                    };
+                    if terminate.recv().await.is_some() {
+                        runtime.shutdown().await;
+                        app_handle.exit(143);
+                    }
+                });
+            }
             if let Err(error) = macos_notifications::initialize() {
                 eprintln!("[notifications] initialization failed: {error}");
             }
@@ -678,12 +742,6 @@ fn main() {
         .manage(AppState {
             codex: Arc::new(CodexRuntime::default()),
         })
-        .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                let state = window.state::<AppState>();
-                tauri::async_runtime::block_on(state.codex.shutdown());
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             codex_get_diagnostics,
             report_frontend_error,
@@ -693,6 +751,7 @@ fn main() {
             codex_get_runtime_catalog,
             codex_start_chatgpt_login,
             codex_list_threads,
+            codex_discover_projects,
             codex_read_thread,
             codex_start_thread,
             codex_resume_thread,
@@ -715,7 +774,11 @@ fn main() {
             list_workspaces,
             add_workspace,
             set_workspace_order,
+            update_workspace,
+            relocate_workspace,
+            clone_repository,
             remove_workspace,
+            build_project_shell_command,
             set_workspace_git_pull_on_master_for_new_threads,
             get_git_info,
             git_list_branches,
@@ -737,6 +800,25 @@ fn main() {
             set_app_badge_count,
             write_text_to_clipboard
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ATController");
+        .build(tauri::generate_context!())
+        .expect("error while building ATController")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                let state = app.state::<AppState>();
+                tauri::async_runtime::block_on(state.codex.shutdown());
+            }
+        });
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::shell_quote;
+
+    #[test]
+    fn project_shell_commands_escape_spaces_and_single_quotes() {
+        assert_eq!(
+            shell_quote("/tmp/Project's workspace"),
+            "'/tmp/Project'\\''s workspace'"
+        );
+    }
 }

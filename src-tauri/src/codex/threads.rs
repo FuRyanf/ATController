@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -5,8 +7,8 @@ use serde_json::{json, Value};
 
 use super::process;
 use super::protocol::{
-    self, CodexThread, CodexThreadPage, CodexThreadSession, CodexTurn, ComposerInput,
-    PermissionMode, ThreadPreferences,
+    self, CodexDiscoveredProject, CodexThread, CodexThreadPage, CodexThreadSession, CodexTurn,
+    ComposerInput, PermissionMode, ThreadPreferences,
 };
 use super::rpc::RequestOptions;
 use super::CodexRuntime;
@@ -44,6 +46,109 @@ impl CodexRuntime {
             )
             .await?;
         protocol::normalize_thread_page(&result, archived)
+    }
+
+    pub async fn discover_projects(
+        self: &std::sync::Arc<Self>,
+    ) -> Result<Vec<CodexDiscoveredProject>> {
+        #[derive(Default)]
+        struct Discovery {
+            display_path: String,
+            active: usize,
+            archived: usize,
+            latest: Option<i64>,
+            thread_ids: Vec<String>,
+        }
+
+        let mut discovered: BTreeMap<String, Discovery> = BTreeMap::new();
+        for archived in [false, true] {
+            let mut cursor: Option<String> = None;
+            for _ in 0..100 {
+                let mut params = json!({
+                    "archived": archived,
+                    "limit": 100,
+                    "sortKey": "recency_at",
+                    "sortDirection": "desc",
+                    "sourceKinds": ["cli", "vscode", "appServer"]
+                });
+                if let Some(value) = cursor.as_ref() {
+                    params["cursor"] = Value::String(value.clone());
+                }
+                let result = self
+                    .request(
+                        "thread/list",
+                        params,
+                        RequestOptions::idempotent(Duration::from_secs(60)),
+                    )
+                    .await?;
+                let page = protocol::normalize_thread_page(&result, archived)?;
+                for thread in page.data {
+                    let cwd = thread.cwd.trim();
+                    if cwd.is_empty() {
+                        continue;
+                    }
+                    let resolved =
+                        std::fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd));
+                    let key = resolved.to_string_lossy().to_string();
+                    let entry = discovered.entry(key.clone()).or_default();
+                    if entry.display_path.is_empty() {
+                        entry.display_path = key;
+                    }
+                    if archived {
+                        entry.archived += 1;
+                    } else {
+                        entry.active += 1;
+                    }
+                    entry.latest = [entry.latest, thread.recency_at, Some(thread.updated_at)]
+                        .into_iter()
+                        .flatten()
+                        .max();
+                    if !entry.thread_ids.iter().any(|id| id == &thread.id) {
+                        entry.thread_ids.push(thread.id);
+                    }
+                }
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+        }
+
+        let registered = storage::load_workspaces()?;
+        let mut projects = discovered
+            .into_values()
+            .map(|entry| {
+                let path = PathBuf::from(&entry.display_path);
+                let already_added = registered.iter().any(|workspace| {
+                    std::fs::canonicalize(&workspace.path)
+                        .map(|known| known == path)
+                        .unwrap_or_else(|_| Path::new(&workspace.path) == path)
+                });
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "Project".to_string());
+                CodexDiscoveredProject {
+                    name,
+                    workspace_path: entry.display_path,
+                    thread_count: entry.active + entry.archived,
+                    active_thread_count: entry.active,
+                    archived_thread_count: entry.archived,
+                    most_recent_activity: entry.latest,
+                    already_added,
+                    available: path.is_dir(),
+                    thread_ids: entry.thread_ids,
+                }
+            })
+            .collect::<Vec<_>>();
+        projects.sort_by(|left, right| {
+            right
+                .most_recent_activity
+                .cmp(&left.most_recent_activity)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(projects)
     }
 
     pub async fn read_thread(

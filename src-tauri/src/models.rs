@@ -9,6 +9,10 @@ fn default_permission_mode() -> String {
     "fullAccess".to_string()
 }
 
+fn default_workspace_type() -> String {
+    "local".to_string()
+}
+
 fn normalize_optional_setting(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -96,10 +100,41 @@ pub struct Workspace {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default = "default_workspace_type")]
+    pub workspace_type: String,
+    #[serde(default)]
+    pub last_opened_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub is_pinned: bool,
+    #[serde(default)]
+    pub sort_order: i64,
+    #[serde(default = "default_true")]
+    pub is_expanded: bool,
+    #[serde(default)]
+    pub icon_preference: Option<String>,
+    #[serde(default = "default_true")]
+    pub is_available: bool,
     #[serde(default)]
     pub git_pull_on_master_for_new_threads: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceUpdate {
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub is_pinned: Option<bool>,
+    #[serde(default)]
+    pub is_expanded: Option<bool>,
+    #[serde(default)]
+    pub icon_preference: Option<String>,
+    #[serde(default)]
+    pub clear_icon_preference: bool,
+    #[serde(default)]
+    pub mark_opened: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,6 +148,8 @@ pub struct CodexThreadUiMetadata {
     pub pinned: bool,
     #[serde(default)]
     pub unread: bool,
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default)]
     pub draft: String,
     #[serde(default)]
@@ -140,6 +177,7 @@ impl CodexThreadUiMetadata {
             fallback_title: String::new(),
             pinned: false,
             unread: false,
+            archived: false,
             draft: String::new(),
             prompt_history: Vec::new(),
             permission_mode: default_permission_mode(),

@@ -8,13 +8,29 @@ Codex is the only runtime. The normal conversation path uses the structured `cod
 
 ATController is organized around a resizable three-region workspace:
 
-- A project and thread sidebar with Active, Recent, Pinned, and Archived sections.
+- Persistent project shelves with each project’s active, recent, and archived Codex threads nested beneath it.
 - A structured conversation timeline for user messages, streamed agent responses, reasoning summaries, plans, commands, file edits, tool calls, approvals, errors, and completion.
 - An optional inspector for Git changes, command history, thread details, and runtime health.
 
 The compact composer supports multiline prompts, prompt history, file and image attachments, drag and drop, pasted images, runtime skills, turn steering, interruption, model and reasoning selection, permission modes, and the Codex-reported five-hour and weekly usage windows.
 
 The project terminal is a separate utility surface opened in Terminal.app. It is never used as the primary Codex conversation renderer.
+
+### Project shelves
+
+Projects are the primary navigation unit. Each shelf represents one canonical local directory and retains its display name, icon, pin state, custom order, and expanded state. An expanded shelf exposes a project-scoped **New thread** action followed by running and recent threads; archived threads remain behind a reversible **Show archived / Hide archived** disclosure.
+
+The Projects menu supports:
+
+- opening a local folder with the native macOS picker;
+- importing workspaces discovered from official Codex thread history without copying transcripts;
+- cloning a repository with argument-safe Git execution;
+- expanding, collapsing, sorting, reordering, pinning, renaming, and managing projects;
+- locating a moved folder or removing only the ATController project entry.
+
+Paths are canonicalized before duplicate detection, including symlink resolution. Missing folders remain visible with recovery actions. Project removal never deletes the directory, repository, files, or Codex threads.
+
+The unified sidebar search matches project names and paths plus thread titles, previews, and canonical IDs while retaining project context. Several shelves can show running, approval, failure, and unread state at the same time.
 
 ## Requirements
 
@@ -72,7 +88,7 @@ See [technology.md](technology.md) for transport, state, normalization, and supe
 ## Getting started
 
 1. Launch ATController.
-2. Choose **Open Project** and select a local directory.
+2. Choose **Open Folder** and select a local directory, or import projects from existing Codex history.
 3. Select an existing Codex thread or create a new thread.
 4. Enter a task and press Return.
 5. Follow structured activity in the timeline.
@@ -95,6 +111,8 @@ The canonical session identifier is the Codex thread identifier. ATController su
 - structured history hydration after application restart
 
 Turns use `turn/start`, `turn/steer`, and `turn/interrupt`. ATController preserves protocol ordering, tolerates unknown events, deduplicates repeated notifications, batches high-frequency updates, and keeps the current action visible without forcing the scroll position.
+
+Long histories are still read from Codex, but ATController renders the newest 24 turns first and reveals earlier turns in preserved-scroll pages. Verbose historical command and tool payloads are bounded with explicit truncation metadata before crossing the Tauri boundary; the canonical unabridged history remains owned by Codex.
 
 ## Resume commands and Terminal handoff
 
@@ -156,13 +174,14 @@ App-server file events update the timeline immediately; Git refreshes reconcile 
 
 | Action | Shortcut |
 | --- | --- |
-| Open project | Command O |
-| New thread | Command N |
+| Open folder | Command O |
+| Import existing Codex projects | Command Shift O |
+| New thread in selected project | Command N |
 | Command palette | Command K or Command P |
 | Focus composer | Command L |
 | Stop active turn | Command . |
 | Rename thread | Command Shift R |
-| Search threads | Command Shift F |
+| Search projects and threads | Command Shift F |
 | Copy resume command | Command Shift C |
 | Toggle sidebar | Command Shift S |
 | Toggle inspector | Command Shift I |
@@ -206,7 +225,11 @@ settings.json
 workspaces.json
 codex-thread-ui.json
 migrations/app-server-v3.json
+migrations/codex-settings-v1.json
+migrations/project-shelves-v1.json
 migration-backups/app-server-v3/
+migration-backups/codex-settings-v1/
+migration-backups/project-shelves-v1/
 generated-codex-protocol/
 ```
 
@@ -221,6 +244,10 @@ The app-server migration:
 5. records incompatible legacy runtime metadata in a report;
 6. leaves original thread directories intact;
 7. never passes incompatible identifiers to Codex.
+
+The Codex-settings migration backs up and rewrites older settings through the current Codex-only schema so retired runtime and terminal-conversation fields cannot remain active.
+
+The project-shelf migration separately backs up the previous workspace and thread UI files, canonicalizes valid local paths, preserves missing and malformed records in its report, associates thread UI metadata with explicit project IDs, and enriches projects with stable ordering and expansion metadata. It never rewrites Codex-owned transcripts.
 
 Production builds always use the fixed Application Support path. Debug and test builds may use `ATCONTROLLER_APP_SUPPORT_ROOT` for isolated fixtures.
 
