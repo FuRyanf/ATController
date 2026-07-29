@@ -677,10 +677,100 @@ mod delete_tests {
             .expect("temporary thread should have an id")
             .to_string();
 
+        let turn = runtime
+            .request(
+                "turn/start",
+                json!({
+                    "threadId": thread_id,
+                    "input": [{
+                        "type": "text",
+                        "text": "Reply with exactly: OK",
+                        "text_elements": []
+                    }]
+                }),
+                RequestOptions {
+                    timeout: Duration::from_secs(45),
+                    idempotent: false,
+                },
+            )
+            .await
+            .expect("temporary turn should start");
+        let turn_id = turn["turn"]["id"]
+            .as_str()
+            .expect("temporary turn should have an id")
+            .to_string();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                let thread = runtime
+                    .request(
+                        "thread/read",
+                        json!({"threadId": thread_id, "includeTurns": true}),
+                        RequestOptions::idempotent(Duration::from_secs(30)),
+                    )
+                    .await
+                    .expect("temporary thread should remain readable");
+                let status = thread["thread"]["turns"]
+                    .as_array()
+                    .and_then(|turns| turns.iter().find(|turn| turn["id"] == turn_id))
+                    .and_then(|turn| turn["status"].as_str());
+                if status.is_some_and(|status| status != "inProgress") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("temporary turn should finish before archiving");
+
         runtime
-            .delete_thread(thread_id)
+            .archive_thread(thread_id.clone())
+            .await
+            .expect("temporary thread should archive");
+        let archived = runtime
+            .request(
+                "thread/list",
+                json!({
+                    "cwd": root.to_string_lossy(),
+                    "archived": true,
+                    "limit": 100,
+                    "sortKey": "recency_at",
+                    "sortDirection": "desc"
+                }),
+                RequestOptions::idempotent(Duration::from_secs(30)),
+            )
+            .await
+            .expect("archived threads should list");
+        assert!(
+            archived["data"]
+                .as_array()
+                .is_some_and(|threads| threads.iter().any(|thread| thread["id"] == thread_id)),
+            "temporary thread should be visible in archived history before deletion"
+        );
+
+        runtime
+            .delete_thread(thread_id.clone())
             .await
             .expect("the known post-delete cleanup defect should not block removal");
+        let archived = runtime
+            .request(
+                "thread/list",
+                json!({
+                    "cwd": root.to_string_lossy(),
+                    "archived": true,
+                    "limit": 100,
+                    "sortKey": "recency_at",
+                    "sortDirection": "desc"
+                }),
+                RequestOptions::idempotent(Duration::from_secs(30)),
+            )
+            .await
+            .expect("archived threads should refresh after deletion");
+        assert!(
+            archived["data"]
+                .as_array()
+                .is_some_and(|threads| threads.iter().all(|thread| thread["id"] != thread_id)),
+            "deleted thread must no longer be visible in archived history"
+        );
         runtime.shutdown().await;
         let _ = std::fs::remove_dir_all(&root);
     }
