@@ -4,6 +4,7 @@ mod codex;
 mod git_tools;
 mod macos_notifications;
 mod models;
+mod project_terminal;
 mod storage;
 
 use std::path::PathBuf;
@@ -20,9 +21,11 @@ use crate::models::{
     CodexThreadUiMetadata, GitBranchEntry, GitInfo, GitPullForNewThreadResult, GitWorkspaceStatus,
     Settings, Workspace, WorkspaceUpdate,
 };
+use crate::project_terminal::{ProjectTerminalManager, ProjectTerminalSessionInfo};
 
 struct AppState {
     codex: Arc<CodexRuntime>,
+    project_terminal: ProjectTerminalManager,
 }
 
 #[tauri::command]
@@ -592,24 +595,6 @@ fn open_in_finder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_in_terminal(path: String) -> Result<(), String> {
-    let path = resolve_allowed_local_path(&path, true)?;
-    std::process::Command::new("/usr/bin/open")
-        .arg("-a")
-        .arg("Terminal")
-        .arg(path)
-        .status()
-        .map_err(|error| error.to_string())
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err("Failed to open terminal".to_string())
-            }
-        })
-}
-
-#[tauri::command]
 fn open_codex_configuration() -> Result<(), String> {
     let codex_home = std::env::var("CODEX_HOME")
         .ok()
@@ -687,6 +672,64 @@ fn write_text_to_clipboard(text: String) -> Result<(), String> {
     clipboard.set_text(text).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn project_terminal_start(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> Result<ProjectTerminalSessionInfo, String> {
+    state
+        .project_terminal
+        .start(app, &workspace_id, cwd.as_deref(), cols, rows)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_terminal_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<ProjectTerminalSessionInfo>, String> {
+    state
+        .project_terminal
+        .list()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_terminal_write(
+    state: State<'_, AppState>,
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
+    state
+        .project_terminal
+        .write(&session_id, &data)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_terminal_resize(
+    state: State<'_, AppState>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    state
+        .project_terminal
+        .resize(&session_id, cols, rows)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn project_terminal_stop(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state
+        .project_terminal
+        .stop(&session_id)
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     if let Err(error) = storage::ensure_base_dirs() {
         eprintln!("ATController could not initialize its application data directory: {error:#}");
@@ -698,6 +741,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let runtime = app.state::<AppState>().codex.clone();
+            let project_terminal = app.state::<AppState>().project_terminal.clone();
             runtime.attach(app.handle().clone());
             CodexRuntime::start_in_background(runtime.clone());
             #[cfg(unix)]
@@ -711,6 +755,7 @@ fn main() {
                     };
                     if terminate.recv().await.is_some() {
                         runtime.shutdown().await;
+                        project_terminal.shutdown_all().await;
                         app_handle.exit(143);
                     }
                 });
@@ -741,6 +786,7 @@ fn main() {
         })
         .manage(AppState {
             codex: Arc::new(CodexRuntime::default()),
+            project_terminal: ProjectTerminalManager::default(),
         })
         .invoke_handler(tauri::generate_handler![
             codex_get_diagnostics,
@@ -793,12 +839,16 @@ fn main() {
             get_settings,
             save_settings,
             open_in_finder,
-            open_in_terminal,
             open_codex_configuration,
             open_external_url,
             send_desktop_notification,
             set_app_badge_count,
-            write_text_to_clipboard
+            write_text_to_clipboard,
+            project_terminal_start,
+            project_terminal_list,
+            project_terminal_write,
+            project_terminal_resize,
+            project_terminal_stop
         ])
         .build(tauri::generate_context!())
         .expect("error while building ATController")
@@ -806,6 +856,7 @@ fn main() {
             if matches!(event, tauri::RunEvent::Exit) {
                 let state = app.state::<AppState>();
                 tauri::async_runtime::block_on(state.codex.shutdown());
+                tauri::async_runtime::block_on(state.project_terminal.shutdown_all());
             }
         });
 }

@@ -1,5 +1,17 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Children,
+  isValidElement,
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode
+} from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
+import { api } from '../lib/api';
 import type {
   CodexApprovalRequest,
   CodexFileChange,
@@ -62,6 +74,98 @@ function TextContent({ text }: { text: string }) {
       {text.split(/\n{2,}/).map((paragraph, index) => (
         <p key={`${index}-${paragraph.slice(0, 16)}`}>{paragraph}</p>
       ))}
+    </div>
+  );
+}
+
+function markdownText(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(markdownText).join('');
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return markdownText(node.props.children);
+  }
+  return '';
+}
+
+function MarkdownContent({
+  text,
+  onCopy
+}: {
+  text: string;
+  onCopy: ConversationTimelineProps['onCopy'];
+}) {
+  const components = useMemo<Components>(
+    () => ({
+      a({ children, href, node: _node, ...props }) {
+        const external = Boolean(href && /^https?:\/\//i.test(href));
+        return (
+          <a
+            {...props}
+            href={external ? href : undefined}
+            rel={external ? 'noreferrer' : undefined}
+            title={
+              external
+                ? props.title
+                : href
+                  ? `${href} (link type not opened by ATController)`
+                  : props.title
+            }
+            onClick={(event) => {
+              event.preventDefault();
+              if (external && href) {
+                void api.openExternalUrl(href).catch(() => undefined);
+              }
+            }}
+          >
+            {children}
+          </a>
+        );
+      },
+      img({ alt }) {
+        return (
+          <span className="markdown-image-reference">
+            <AppIcon name="attachment" size={13} />
+            {alt || 'Image'}
+          </span>
+        );
+      },
+      pre({ children }) {
+        const child = Children.toArray(children)[0];
+        const className = isValidElement<{ className?: string }>(child)
+          ? child.props.className
+          : undefined;
+        const language = className?.match(/language-([^\s]+)/)?.[1];
+        const code = markdownText(children).replace(/\n$/, '');
+        return (
+          <div className="markdown-code-block">
+            <header>
+              <span>{language || 'Code'}</span>
+              <button
+                type="button"
+                aria-label="Copy code"
+                onClick={() => onCopy(code, 'Code block')}
+              >
+                <AppIcon name="copy" size={12} />
+                Copy
+              </button>
+            </header>
+            <pre>{children}</pre>
+          </div>
+        );
+      }
+    }),
+    [onCopy]
+  );
+
+  return (
+    <div className="markdown-content">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={components}
+        skipHtml
+      >
+        {text}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -202,7 +306,7 @@ function CommandItem({
             ) : null}
             <button type="button" onClick={() => onCopy(item.command ?? '', 'Command')}>Copy command</button>
             <button type="button" onClick={() => onCopy(output, 'Command output')}>Copy output</button>
-            {item.cwd ? <button type="button" onClick={() => onOpenTerminal(item.cwd!)}>Open directory in Terminal</button> : null}
+            {item.cwd ? <button type="button" onClick={() => onOpenTerminal(item.cwd!)}>Open in Project Terminal</button> : null}
           </footer>
         </>
       ) : (
@@ -213,7 +317,7 @@ function CommandItem({
             </button>
           ) : null}
           <button type="button" onClick={() => onCopy(item.command ?? '', 'Command')}>Copy command</button>
-          {item.cwd ? <button type="button" onClick={() => onOpenTerminal(item.cwd!)}>Open directory in Terminal</button> : null}
+          {item.cwd ? <button type="button" onClick={() => onOpenTerminal(item.cwd!)}>Open in Project Terminal</button> : null}
         </footer>
       )}
     </article>
@@ -565,7 +669,7 @@ function TimelineItem({
     case 'agentMessage':
       return (
         <article className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`} data-item-id={item.id}>
-          <TextContent text={item.text || '…'} />
+          <MarkdownContent text={item.text || '…'} onCopy={onCopy} />
         </article>
       );
     case 'reasoning':

@@ -94,7 +94,6 @@ function sidebarProps(overrides: Record<string, unknown> = {}) {
     onSelectWorkspace: vi.fn(),
     onToggleWorkspace: vi.fn(),
     onAddAction: vi.fn(),
-    onProjectsMenuAction: vi.fn(),
     onNewThread: vi.fn(),
     onSelectThread: vi.fn(),
     onRenameThread: vi.fn(),
@@ -113,6 +112,23 @@ function sidebarProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Codex project shelf sidebar', () => {
+  it('puts the compact creation actions above projects without duplicate header menus', () => {
+    const { container } = render(<CodexSidebar {...sidebarProps()} />);
+    const quickActions = container.querySelector('.sidebar-global-actions-top');
+    const projectsHeader = container.querySelector('.projects-section-header');
+
+    expect(quickActions).not.toBeNull();
+    expect(projectsHeader).not.toBeNull();
+    expect(
+      quickActions!.compareDocumentPosition(projectsHeader!) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Add project' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Project organization' })
+    ).not.toBeInTheDocument();
+  });
+
   it('uses project shelves instead of a global project dropdown and keeps archives behind disclosure', async () => {
     render(<CodexSidebar {...sidebarProps()} />);
 

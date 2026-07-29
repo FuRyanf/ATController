@@ -14,19 +14,21 @@ ATController is organized around a resizable three-region workspace:
 
 The compact composer supports multiline prompts, prompt history, file and image attachments, drag and drop, pasted images, runtime skills, turn steering, interruption, model and reasoning selection, permission modes, and the Codex-reported five-hour and weekly usage windows.
 
-The project terminal is a separate utility surface opened in Terminal.app. It is never used as the primary Codex conversation renderer.
+The resizable **Project Terminal** is a separate utility shelf at the bottom of the ATController window. It runs a native login shell in the selected project and is never used as the primary Codex conversation renderer. The explicit **Open Resume Command in Terminal** action remains a Terminal.app handoff so a Codex session can be resumed outside ATController.
 
 ### Project shelves
 
 Projects are the primary navigation unit. Each shelf represents one canonical local directory and retains its display name, icon, pin state, custom order, and expanded state. An expanded shelf exposes a project-scoped **New thread** action followed by running and recent threads; archived threads remain behind a reversible **Show archived / Hide archived** disclosure.
 
-The Projects menu supports:
+The sidebar’s top actions, project context menus, command palette, and lightweight project manager support:
 
 - opening a local folder with the native macOS picker;
 - importing workspaces discovered from official Codex thread history without copying transcripts;
 - cloning a repository with argument-safe Git execution;
 - expanding, collapsing, sorting, reordering, pinning, renaming, and managing projects;
 - locating a moved folder or removing only the ATController project entry.
+
+The compact **New thread** and **Open folder** actions sit directly beneath the ATController header. Less frequent import, clone, sorting, expansion, and management actions remain keyboard-accessible through the command palette instead of occupying a wide header popover.
 
 Paths are canonicalized before duplicate detection, including symlink resolution. Missing folders remain visible with recovery actions. Project removal never deletes the directory, repository, files, or Codex threads.
 
@@ -110,7 +112,7 @@ The canonical session identifier is the Codex thread identifier. ATController su
 - recovery after a runtime restart or an invalid stored selection
 - structured history hydration after application restart
 
-Turns use `turn/start`, `turn/steer`, and `turn/interrupt`. ATController preserves protocol ordering, tolerates unknown events, deduplicates repeated notifications, batches high-frequency updates, and keeps the current action visible without forcing the scroll position.
+Turns use `turn/start`, `turn/steer`, and `turn/interrupt`. ATController preserves protocol ordering, tolerates unknown events, deduplicates repeated notifications, batches high-frequency updates, and keeps the current action visible without forcing the scroll position. Agent messages render safe GitHub-flavored Markdown, including headings, emphasis, lists, task lists, tables, block quotes, links, inline code, and copyable fenced code blocks. Raw HTML is not interpreted and remote Markdown images are not loaded.
 
 Long histories are still read from Codex, but ATController renders the newest 24 turns first and reveals earlier turns in preserved-scroll pages. Verbose historical command and tool payloads are bounded with explicit truncation metadata before crossing the Tauri boundary; the canonical unabridged history remains owned by Codex.
 
@@ -124,7 +126,13 @@ Thread menus expose:
 
 ATController probes `codex resume --help` from the installed binary before constructing a command. The command contains the resolved Codex binary, canonical thread identifier, `--cd` workspace, and shell-safe quoting. Model, reasoning effort, and service tier overrides are included only when the user explicitly selected them. The Full Access form includes the installed CLI’s verified Full Access switch.
 
-The default Terminal handoff opens Terminal.app in the thread workspace and inserts the exact command into zsh for review with `print -z`. Settings can opt into immediate execution. Insert-for-review reports a clear compatibility error when the login shell is not zsh.
+The default resume-command handoff opens Terminal.app in the thread workspace and inserts the exact command into zsh for review with `print -z`. Settings can opt into immediate execution. Insert-for-review reports a clear compatibility error when the login shell is not zsh.
+
+## Project Terminal
+
+Command J opens or hides the built-in Project Terminal shelf. Project and command context actions can open the same shelf at a validated directory inside the selected project. The shelf supports ANSI applications, interactive input, resize, clear, restart, stop, and a persisted panel height.
+
+Rust owns each native PTY process. ATController starts the user’s configured absolute login shell directly, bounds its input and output queues, and allows at most one shell session per project. The working directory is canonicalized and must stay inside a registered project. Hiding the shelf keeps its session alive; stopping it or quitting ATController terminates the process group. Project Terminal output is neither parsed as Codex activity nor persisted as conversation history.
 
 ## Permissions
 
@@ -185,7 +193,7 @@ App-server file events update the timeline immediately; Git refreshes reconcile 
 | Copy resume command | Command Shift C |
 | Toggle sidebar | Command Shift S |
 | Toggle inspector | Command Shift I |
-| Open Project Terminal | Command J |
+| Toggle Project Terminal | Command J |
 | Send | Return |
 | New line | Shift Return |
 | Optional alternate send | Command Return |
@@ -255,7 +263,7 @@ Production builds always use the fixed Application Support path. Debug and test 
 
 - The frontend can invoke only a narrow typed Tauri command surface.
 - Workspace and project-file paths are canonicalized and checked against registered projects.
-- Arbitrary frontend-supplied shell command execution is not exposed.
+- There is no generic one-shot shell-execution command. Interactive input is accepted only by an explicitly opened Project Terminal PTY scoped to a registered project.
 - Codex is spawned directly with an argument array.
 - Protocol stdout, diagnostic stderr, and stdin remain separate.
 - Protocol logs are bounded and redacted.
@@ -308,7 +316,7 @@ yarn verify
 make verify
 ```
 
-Unit tests cover protocol framing and normalization, redaction, permission mapping, attachment serialization, state reduction, persistence migration, Git safety, structured timeline behavior, approvals, composer behavior, sidebar interactions, inspector actions, appearance, diagnostics, and keyboard command surfaces.
+Unit tests cover protocol framing and normalization, redaction, permission mapping, attachment serialization, state reduction, persistence migration, Git safety, Project Terminal path and size validation, safe Markdown rendering, structured timeline behavior, approvals, composer behavior, sidebar interactions, inspector actions, appearance, diagnostics, and keyboard command surfaces.
 
 The real contract and end-to-end tests use a temporary Git repository, skip clearly when Codex is unavailable or unauthenticated, and never mutate a user project.
 

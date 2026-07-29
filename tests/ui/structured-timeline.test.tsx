@@ -205,6 +205,61 @@ describe('structured Codex timeline', () => {
     expect(revertFile).toHaveBeenCalledWith('/tmp/project/hello.txt');
   });
 
+  it('renders safe GitHub-flavored Markdown with copyable fenced code', async () => {
+    const user = userEvent.setup();
+    const onCopy = vi.fn();
+    const thread = structuredThread();
+    const agent = thread.turns[0].items.find((item) => item.kind === 'agentMessage')!;
+    agent.text = [
+      'Queried **256,166 ERROR rows** total.',
+      '',
+      '- First result',
+      '- Second result',
+      '',
+      '```kusto',
+      'let errors = materialize(ctc_pipeline_logs);',
+      'errors | count',
+      '```',
+      '',
+      '| Status | Count |',
+      '| --- | ---: |',
+      '| Failed | 256166 |',
+      '',
+      '<script>unsafe()</script>',
+      '',
+      '![Remote image](https://example.com/tracker.png)'
+    ].join('\n');
+
+    const { container } = render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={onCopy}
+        onOpenFile={vi.fn()}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('256,166 ERROR rows')).toHaveProperty('tagName', 'STRONG');
+    expect(screen.getByText('First result').closest('li')).not.toBeNull();
+    expect(screen.getByText('Failed').closest('table')).not.toBeNull();
+    expect(screen.getByText('kusto')).toBeInTheDocument();
+    expect(screen.queryByText(/```kusto/)).not.toBeInTheDocument();
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.querySelector('img')).toBeNull();
+    expect(screen.getByText('Remote image')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Copy code' }));
+    expect(onCopy).toHaveBeenCalledWith(
+      'let errors = materialize(ctc_pipeline_logs);\nerrors | count',
+      'Code block'
+    );
+  });
+
   it('keeps large diffs compact until the user requests the full patch', async () => {
     const user = userEvent.setup();
     const thread = structuredThread();

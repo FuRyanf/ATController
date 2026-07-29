@@ -39,6 +39,29 @@ export interface CodexDiscoveredProject {
 
 export type ProjectSortMode = 'custom' | 'name' | 'recent' | 'running';
 
+export interface ProjectTerminalSession {
+  id: string;
+  workspaceId: string;
+  cwd: string;
+  shell: string;
+  processId?: number | null;
+}
+
+export interface ProjectTerminalOutput {
+  sessionId: string;
+  workspaceId: string;
+  dataBase64: string;
+  byteLength: number;
+}
+
+export interface ProjectTerminalExit {
+  sessionId: string;
+  workspaceId: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  error?: string | null;
+}
+
 export interface GitInfo {
   branch: string;
   shortHash: string;

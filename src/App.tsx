@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -71,6 +73,9 @@ import type {
 } from './types';
 
 const api = apiModule.api;
+const ProjectTerminalShelf = lazy(async () => ({
+  default: (await import('./components/ProjectTerminalShelf')).ProjectTerminalShelf
+}));
 const SELECTED_WORKSPACE_KEY = 'atcontroller:selected-workspace-v2';
 const SELECTED_THREAD_KEY = 'atcontroller:selected-codex-thread-v2';
 const SIDEBAR_WIDTH_KEY = 'atcontroller:sidebar-width-v2';
@@ -103,6 +108,11 @@ interface ProjectContextMenuState {
 interface ProjectRenameState {
   workspaceId: string;
   value: string;
+}
+
+interface ProjectTerminalTarget {
+  workspaceId: string;
+  cwd: string;
 }
 
 function nowIso(): string {
@@ -296,12 +306,18 @@ export default function App() {
   const [inspectorOpen, setInspectorOpen] = useState(
     () => window.localStorage.getItem(INSPECTOR_OPEN_KEY) !== 'false'
   );
+  const [projectTerminalOpen, setProjectTerminalOpen] = useState(false);
+  const [projectTerminalTarget, setProjectTerminalTarget] =
+    useState<ProjectTerminalTarget | null>(null);
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null);
   const [gitInfoByWorkspace, setGitInfoByWorkspace] = useState<Record<string, GitInfo | null>>({});
   const [gitStatus, setGitStatus] = useState<GitWorkspaceStatus | null>(null);
   const [gitBranches, setGitBranches] = useState<GitBranchEntry[]>([]);
 
   const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId);
+  const projectTerminalWorkspace = projectTerminalTarget
+    ? workspaces.find((workspace) => workspace.id === projectTerminalTarget.workspaceId) ?? null
+    : null;
   const selectedThread = selectedThreadId ? codex.threads[selectedThreadId] : undefined;
   const selectedSession =
     selectedThreadId && !selectedThread?.archived
@@ -1418,6 +1434,44 @@ export default function App() {
     [copyText]
   );
 
+  const openProjectTerminal = useCallback(
+    (cwd?: string, workspaceOverride?: Workspace) => {
+      const workspace =
+        workspaceOverride ??
+        (cwd
+          ? [...workspacesRef.current]
+              .sort((left, right) => right.path.length - left.path.length)
+              .find(
+                (candidate) =>
+                  cwd === candidate.path || cwd.startsWith(`${candidate.path}/`)
+              )
+          : undefined) ??
+        selectedWorkspaceRef.current;
+      if (!workspace) {
+        showToast('Select a project before opening Project Terminal', 'error');
+        return;
+      }
+      if (!workspace.isAvailable) {
+        showToast(`Locate the folder for ${workspace.name} before opening Project Terminal`, 'error');
+        return;
+      }
+      setProjectTerminalTarget({
+        workspaceId: workspace.id,
+        cwd: cwd ?? workspace.path
+      });
+      setProjectTerminalOpen(true);
+    },
+    [showToast]
+  );
+
+  const toggleProjectTerminal = useCallback(() => {
+    if (projectTerminalOpen) {
+      setProjectTerminalOpen(false);
+      return;
+    }
+    openProjectTerminal();
+  }, [openProjectTerminal, projectTerminalOpen]);
+
   const removeProject = useCallback(
     async (workspaceId: string) => {
       const workspace = workspacesRef.current.find(
@@ -1731,7 +1785,8 @@ export default function App() {
             selectProject(workspace.id);
             break;
           case 'openTerminal':
-            await api.openInTerminal(workspace.path);
+            selectProject(workspace.id);
+            openProjectTerminal(workspace.path, workspace);
             break;
           case 'revealFinder':
             await api.openInFinder(workspace.path);
@@ -1805,6 +1860,7 @@ export default function App() {
       copyText,
       createThread,
       locateProject,
+      openProjectTerminal,
       refreshGit,
       refreshProjectGit,
       refreshThreads,
@@ -1852,16 +1908,6 @@ export default function App() {
       [selectedThreadId]: [...(current[selectedThreadId] ?? []), ...added]
     }));
   }, [selectedThreadId, selectedWorkspace]);
-
-  const openProjectTerminal = useCallback(async () => {
-    const workspace = selectedWorkspaceRef.current;
-    if (!workspace) return;
-    try {
-      await api.openInTerminal(workspace.path);
-    } catch (error) {
-      showToast(`Could not open Project Terminal: ${String(error)}`, 'error');
-    }
-  }, [showToast]);
 
   const renameThread = useCallback(
     (threadId: string) => {
@@ -1948,7 +1994,7 @@ export default function App() {
             );
             break;
           case 'openProjectInTerminal':
-            await api.openInTerminal(workspace.path);
+            openProjectTerminal(workspace.path, workspace);
             break;
           case 'revealProject':
             await api.openInFinder(workspace.path);
@@ -2055,6 +2101,7 @@ export default function App() {
       ensureMetadata,
       findWorkspaceForThread,
       openThread,
+      openProjectTerminal,
       persistMetadata,
       refreshThreads,
       renameThread,
@@ -2133,6 +2180,42 @@ export default function App() {
         }
       },
       {
+        id: 'expand-all-projects',
+        label: 'Expand All Projects',
+        icon: 'chevronDown',
+        run: () => handleProjectsMenuAction('expandAll')
+      },
+      {
+        id: 'collapse-all-projects',
+        label: 'Collapse All Projects',
+        icon: 'chevronRight',
+        run: () => handleProjectsMenuAction('collapseAll')
+      },
+      {
+        id: 'sort-projects-custom',
+        label: 'Sort Projects: Custom Order',
+        icon: 'folder',
+        run: () => handleProjectsMenuAction('sortCustom')
+      },
+      {
+        id: 'sort-projects-name',
+        label: 'Sort Projects: Name',
+        icon: 'folder',
+        run: () => handleProjectsMenuAction('sortName')
+      },
+      {
+        id: 'sort-projects-recent',
+        label: 'Sort Projects: Recent Activity',
+        icon: 'history',
+        run: () => handleProjectsMenuAction('sortRecent')
+      },
+      {
+        id: 'sort-projects-running',
+        label: 'Sort Projects: Running Threads',
+        icon: 'refresh',
+        run: () => handleProjectsMenuAction('sortRunning')
+      },
+      {
         id: 'new-thread',
         label: 'New Codex Thread',
         description: selectedWorkspace?.name,
@@ -2206,11 +2289,11 @@ export default function App() {
       },
       {
         id: 'open-terminal',
-        label: 'Open Project Terminal',
+        label: projectTerminalOpen ? 'Hide Project Terminal' : 'Open Project Terminal',
         shortcut: '⌘J',
         icon: 'terminal',
         disabled: !selectedWorkspace,
-        run: () => void openProjectTerminal()
+        run: toggleProjectTerminal
       },
       {
         id: 'restart-runtime',
@@ -2303,6 +2386,7 @@ export default function App() {
     createThread,
     allSidebarThreads,
     catalog,
+    handleProjectsMenuAction,
     metadata,
     openCloneDialog,
     openThread,
@@ -2311,10 +2395,11 @@ export default function App() {
     renameThread,
     restartRuntime,
     runThreadAction,
+    projectTerminalOpen,
     selectedThread,
     selectedPreferences,
     selectedWorkspace,
-    openProjectTerminal,
+    toggleProjectTerminal,
     updatePreferences,
     workspaces
   ]);
@@ -2340,7 +2425,7 @@ export default function App() {
         window.dispatchEvent(new Event('atcontroller:focus-composer'));
       } else if (key === 'j') {
         event.preventDefault();
-        void openProjectTerminal();
+        toggleProjectTerminal();
       } else if (key === 'i' && event.shiftKey) {
         event.preventDefault();
         setInspectorOpen((value) => !value);
@@ -2371,7 +2456,7 @@ export default function App() {
     runThreadAction,
     selectedRunningTurn,
     selectedThread,
-    openProjectTerminal,
+    toggleProjectTerminal,
     stopTurn,
   ]);
 
@@ -2427,7 +2512,6 @@ export default function App() {
         onSelectWorkspace={selectProject}
         onToggleWorkspace={toggleProject}
         onAddAction={handleProjectAddAction}
-        onProjectsMenuAction={handleProjectsMenuAction}
         onNewThread={(workspaceId) => {
           const workspace = workspaceId
             ? workspacesRef.current.find((candidate) => candidate.id === workspaceId)
@@ -2515,7 +2599,7 @@ export default function App() {
               }}
               onOpenMenu={(x, y) => setContextMenu({ threadId: selectedThread.id, x, y })}
               onToggleInspector={() => setInspectorOpen((value) => !value)}
-              onOpenTerminal={() => void openProjectTerminal()}
+              onOpenTerminal={toggleProjectTerminal}
             />
             {threadError ? (
               <div className="thread-error-banner">
@@ -2543,7 +2627,7 @@ export default function App() {
                   onOpenFile={(path) => void api.openProjectFile(selectedWorkspace.path, path)}
                   onRevealPath={(path) => void api.revealProjectFile(selectedWorkspace.path, path)}
                   onRevertFile={(path) => void revertGitFile(path)}
-                  onOpenTerminal={(path) => void api.openInTerminal(path)}
+                  onOpenTerminal={(path) => openProjectTerminal(path, selectedWorkspace)}
                 />
                 <MessageComposer
                   threadId={selectedThread.id}
@@ -2610,13 +2694,24 @@ export default function App() {
                   onOpenResumeInTerminal={() =>
                     void runThreadAction(selectedThread, 'openResumeInTerminal')
                   }
-                  onOpenTerminal={(path) => void api.openInTerminal(path)}
+                  onOpenTerminal={(path) => openProjectTerminal(path, selectedWorkspace)}
                   onRestartRuntime={() => void restartRuntime()}
                 />
               ) : null}
             </div>
           </>
         )}
+        {projectTerminalTarget ? (
+          <Suspense fallback={null}>
+            <ProjectTerminalShelf
+              open={projectTerminalOpen}
+              workspace={projectTerminalWorkspace}
+              requestedCwd={projectTerminalTarget.cwd}
+              onClose={() => setProjectTerminalOpen(false)}
+              onError={(message) => showToast(message, 'error')}
+            />
+          </Suspense>
+        ) : null}
       </div>
 
       {contextMenu ? (() => {

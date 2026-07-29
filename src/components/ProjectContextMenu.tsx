@@ -65,7 +65,12 @@ export function ProjectContextMenu({
   const availableItems: MenuItem[] = [
     { action: 'newThread', label: 'New Thread', icon: 'add' },
     { action: 'openProject', label: 'Open Project', icon: 'chevronRight' },
-    { action: 'openTerminal', label: 'Open in Terminal', icon: 'terminal', separator: true },
+    {
+      action: 'openTerminal',
+      label: 'Open Project Terminal',
+      icon: 'terminal',
+      separator: true
+    },
     { action: 'revealFinder', label: 'Reveal in Finder', icon: 'folder' },
     { action: 'copyPath', label: 'Copy Project Path', icon: 'copy' },
     { action: 'copyShellCommand', label: 'Copy Shell Command', icon: 'command' },

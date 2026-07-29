@@ -18,6 +18,9 @@ import type {
   GitInfo,
   GitPullForNewThreadResult,
   GitWorkspaceStatus,
+  ProjectTerminalExit,
+  ProjectTerminalOutput,
+  ProjectTerminalSession,
   ResumeCommandRequest,
   ServerRequestResponse,
   Settings,
@@ -28,7 +31,9 @@ import type {
 
 export const events = {
   codexEvent: 'codex:event',
-  codexRuntimeState: 'codex:runtime-state'
+  codexRuntimeState: 'codex:runtime-state',
+  projectTerminalOutput: 'atcontroller://project-terminal-output',
+  projectTerminalExit: 'atcontroller://project-terminal-exit'
 } as const;
 
 export const api = {
@@ -174,7 +179,6 @@ export const api = {
   getSettings: () => invoke<Settings>('get_settings'),
   saveSettings: (settings: Settings) => invoke<Settings>('save_settings', { settings }),
   openInFinder: (path: string) => invoke<void>('open_in_finder', { path }),
-  openInTerminal: (path: string) => invoke<void>('open_in_terminal', { path }),
   openCodexConfiguration: () => invoke<void>('open_codex_configuration'),
   openProjectFile: (workspacePath: string, filePath: string) =>
     invoke<void>('open_project_file', { workspacePath, filePath }),
@@ -186,6 +190,26 @@ export const api = {
   setAppBadgeCount: (count: number | null) => invoke<boolean>('set_app_badge_count', { count }),
   writeTextToClipboard: (text: string) =>
     invoke<void>('write_text_to_clipboard', { text }),
+  listProjectTerminals: () =>
+    invoke<ProjectTerminalSession[]>('project_terminal_list'),
+  startProjectTerminal: (
+    workspaceId: string,
+    cwd: string | null,
+    cols: number,
+    rows: number
+  ) =>
+    invoke<ProjectTerminalSession>('project_terminal_start', {
+      workspaceId,
+      cwd,
+      cols,
+      rows
+    }),
+  writeProjectTerminal: (sessionId: string, data: string) =>
+    invoke<void>('project_terminal_write', { sessionId, data }),
+  resizeProjectTerminal: (sessionId: string, cols: number, rows: number) =>
+    invoke<void>('project_terminal_resize', { sessionId, cols, rows }),
+  stopProjectTerminal: (sessionId: string) =>
+    invoke<void>('project_terminal_stop', { sessionId }),
 };
 
 export const onCodexEvent = async (
@@ -199,5 +223,19 @@ export const onCodexRuntimeState = async (
   handler: (diagnostics: CodexDiagnostics) => void
 ): Promise<UnlistenFn> =>
   listen<CodexDiagnostics>(events.codexRuntimeState, (event) => {
+    handler(event.payload);
+  });
+
+export const onProjectTerminalOutput = async (
+  handler: (output: ProjectTerminalOutput) => void
+): Promise<UnlistenFn> =>
+  listen<ProjectTerminalOutput>(events.projectTerminalOutput, (event) => {
+    handler(event.payload);
+  });
+
+export const onProjectTerminalExit = async (
+  handler: (exit: ProjectTerminalExit) => void
+): Promise<UnlistenFn> =>
+  listen<ProjectTerminalExit>(events.projectTerminalExit, (event) => {
     handler(event.payload);
   });

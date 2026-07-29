@@ -29,6 +29,18 @@ Official Codex runtime and Codex-owned thread history
 
 React never owns the Codex child process. Rust never sends terminal keystrokes to operate a conversation. Standard session workflows use app-server methods and structured notifications.
 
+The optional Project Terminal follows a separate path:
+
+```text
+React xterm shelf
+        ↕ typed terminal commands and bounded binary events
+Rust native PTY manager
+        ↕
+User login shell in a registered project
+```
+
+This PTY is an explicit project utility. Its bytes never enter the Codex protocol parser or conversation reducer.
+
 ## Source map
 
 ### Frontend
@@ -37,7 +49,8 @@ React never owns the Codex child process. Rust never sends terminal keystrokes t
 - `src/stores/codexStore.ts` batches ordered protocol events and reduces them into stable thread, turn, item, approval, usage, and diagnostics views.
 - `src/components/CodexSidebar.tsx` renders persistent, reorderable project shelves and nested running, recent, and archived thread groups.
 - `src/components/ProjectContextMenu.tsx`, `ProjectImportDialog.tsx`, `CloneRepositoryDialog.tsx`, `ManageProjectsDialog.tsx`, and `ProjectIconDialog.tsx` implement project lifecycle surfaces.
-- `src/components/ConversationTimeline.tsx` renders typed Codex items with progressive disclosure and preserved-scroll history paging.
+- `src/components/ConversationTimeline.tsx` renders typed Codex items with progressive disclosure, safe GitHub-flavored Markdown, and preserved-scroll history paging.
+- `src/components/ProjectTerminalShelf.tsx` lazily loads xterm and renders the resizable built-in project utility terminal.
 - `src/components/MessageComposer.tsx` serializes structured text, image, file, and skill input.
 - `src/components/InspectorPanel.tsx` reconciles Codex activity with Git and runtime state.
 - `src/components/ThreadContextMenu.tsx` and `CommandPalette.tsx` expose thread and keyboard-first actions.
@@ -56,6 +69,7 @@ React never owns the Codex child process. Rust never sends terminal keystrokes t
 - `src-tauri/src/codex/mod.rs` supervises one connection and emits normalized events.
 - `src-tauri/src/storage.rs` persists project and UI metadata and performs the app-server migration.
 - `src-tauri/src/git_tools.rs` provides bounded Git inspection and safe mutations.
+- `src-tauri/src/project_terminal.rs` validates project-scoped directories and owns native PTY process, input, resize, output, and shutdown lifecycles.
 - `src-tauri/src/main.rs` exposes the narrow Tauri command surface and native lifecycle hooks.
 
 ## Codex discovery and protocol generation
@@ -116,6 +130,8 @@ On application shutdown:
 6. `SIGKILL` is used only if the process still has not exited.
 
 The native application exit event and Unix `SIGTERM` both enter this path. Process-group signaling runs even when a version-manager shim reports exit before its descendants, preventing orphaned app-server processes.
+
+Project Terminal sessions receive `SIGHUP` and a child kill request on stop or shutdown, followed by a bounded 350 ms grace period and process-group `SIGKILL` during application shutdown. This lifecycle is independent of app-server supervision.
 
 ## Transport and framing
 
@@ -325,6 +341,18 @@ Structured input conversion validates:
 
 Binary files are not expanded into giant text prompts.
 
+## Structured Markdown
+
+Agent-message Markdown is parsed in React with `react-markdown` and `remark-gfm`. ATController does not enable raw HTML. HTTP(S) links cross the typed URL-opening command, fenced code is rendered in bounded scroll regions with an explicit copy action, and Markdown images are represented as inert attachment labels rather than making remote requests. User prompts remain rendered as authored text.
+
+## Project Terminal boundary
+
+The Project Terminal Tauri surface exposes only start, list, write, resize, and stop operations. Starting requires a persisted workspace ID; both the project root and optional working directory are canonicalized, and the latter must be within the former. Shell executables must be absolute existing files. PTY dimensions, input messages, output chunks, and event queues are bounded.
+
+Rust launches the login shell with an argument array and sets terminal capability environment values. Output travels as base64-encoded byte chunks so arbitrary terminal bytes do not pass through lossy JSON string conversion. The xterm dependency is lazy-loaded only when the shelf is first opened.
+
+One shell session is retained per project while its shelf is hidden. Restart and stop are explicit. Every session is terminated during native application exit, and terminal output is never reduced into Codex items, diagnostics, or persisted transcripts.
+
 ## Persistence
 
 Codex remains the source of truth for thread and turn history. ATController persists:
@@ -366,7 +394,7 @@ The application does provide integration hardening:
 - typed and narrow Tauri commands;
 - canonical path allowlists;
 - direct process spawning without shell command composition;
-- no arbitrary frontend shell execution;
+- no generic one-shot frontend shell execution; typed PTY input is limited to an explicitly opened, project-scoped Project Terminal session;
 - bounded transport queues and diagnostic buffers;
 - credential-pattern redaction;
 - no ATController credential store;
@@ -431,8 +459,8 @@ sequenceDiagram
 
 ## Test layers
 
-- Rust unit tests cover framing, oversized recovery, redaction, permission mapping, protocol normalization, workspace validation, Git safety, migration, resume argument construction, and process behavior.
-- Frontend tests cover event reduction, ordering, deduplication, sidebar sections, approvals, structured timeline cards, attachments, prompt history, controls, diagnostics, inspector actions, appearance, context menus, and keyboard behavior.
+- Rust unit tests cover framing, oversized recovery, redaction, permission mapping, protocol normalization, workspace validation, Git safety, Project Terminal constraints, migration, resume argument construction, and process behavior.
+- Frontend tests cover event reduction, ordering, deduplication, sidebar sections, approvals, safe Markdown and structured timeline cards, attachments, prompt history, controls, diagnostics, inspector actions, appearance, context menus, and keyboard behavior.
 - Contract tests start the real installed app-server in a temporary Git repository and exercise initialization, account/model reads, thread lifecycle, a real streamed turn, archive/restore, and cleanup.
 - End-to-end runtime tests create and modify a real temporary file, verify structured activity and Git state, restart the process, resume the same thread, interrupt a turn, exercise Standard approval denial and Full Access, handle invalid IDs, and verify no orphan process remains.
 

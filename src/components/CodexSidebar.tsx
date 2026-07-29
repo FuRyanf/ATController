@@ -47,7 +47,6 @@ interface CodexSidebarProps {
   onSelectWorkspace: (workspaceId: string) => void;
   onToggleWorkspace: (workspaceId: string, expanded: boolean) => void;
   onAddAction: (action: ProjectAddAction) => void;
-  onProjectsMenuAction: (action: ProjectsMenuAction) => void;
   onNewThread: (workspaceId?: string) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onRenameThread: (threadId: string) => void;
@@ -680,111 +679,6 @@ const ProjectShelf = memo(function ProjectShelf({
   );
 }, areProjectShelfPropsEqual);
 
-function SectionPopover({
-  kind,
-  sortMode,
-  onAddAction,
-  onProjectsMenuAction,
-  onClose
-}: {
-  kind: 'add' | 'projects';
-  sortMode: ProjectSortMode;
-  onAddAction: (action: ProjectAddAction) => void;
-  onProjectsMenuAction: (action: ProjectsMenuAction) => void;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    ref.current?.querySelector<HTMLButtonElement>('button')?.focus();
-    const close = (event: PointerEvent) => {
-      if (!ref.current?.contains(event.target as Node)) onClose();
-    };
-    window.addEventListener('pointerdown', close);
-    return () => window.removeEventListener('pointerdown', close);
-  }, [onClose]);
-  const activate = (callback: () => void) => {
-    callback();
-    onClose();
-  };
-  return (
-    <div
-      ref={ref}
-      className="sidebar-section-popover"
-      role="menu"
-      aria-label={kind === 'add' ? 'Add project' : 'Project organization'}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') onClose();
-        const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button')];
-        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-        if (event.key === 'ArrowDown') {
-          event.preventDefault();
-          buttons[(Math.max(index, -1) + 1) % buttons.length]?.focus();
-        } else if (event.key === 'ArrowUp') {
-          event.preventDefault();
-          buttons[(index <= 0 ? buttons.length : index) - 1]?.focus();
-        }
-      }}
-    >
-      {kind === 'add' ? (
-        <>
-          <button type="button" role="menuitem" onClick={() => activate(() => onAddAction('openFolder'))}>
-            <AppIcon name="folder" />
-            <span>Open Folder…</span>
-            <kbd>⌘O</kbd>
-          </button>
-          <button type="button" role="menuitem" onClick={() => activate(() => onAddAction('importProjects'))}>
-            <AppIcon name="history" />
-            <span>Import Existing Projects…</span>
-            <kbd>⇧⌘O</kbd>
-          </button>
-          <button type="button" role="menuitem" onClick={() => activate(() => onAddAction('cloneRepository'))}>
-            <AppIcon name="code" />
-            <span>Clone Repository…</span>
-          </button>
-        </>
-      ) : (
-        <>
-          <button type="button" role="menuitem" onClick={() => activate(() => onProjectsMenuAction('expandAll'))}>
-            <AppIcon name="chevronDown" />
-            <span>Expand All</span>
-          </button>
-          <button type="button" role="menuitem" onClick={() => activate(() => onProjectsMenuAction('collapseAll'))}>
-            <AppIcon name="chevronRight" />
-            <span>Collapse All</span>
-          </button>
-          <div className="menu-label">Sort projects</div>
-          {([
-            ['sortCustom', 'Custom Order', 'custom'],
-            ['sortName', 'Name', 'name'],
-            ['sortRecent', 'Recent Activity', 'recent'],
-            ['sortRunning', 'Running Threads', 'running']
-          ] as const).map(([action, label, mode]) => (
-            <button
-              key={action}
-              type="button"
-              role="menuitemradio"
-              aria-checked={sortMode === mode}
-              onClick={() => activate(() => onProjectsMenuAction(action))}
-            >
-              <span className="menu-check">{sortMode === mode ? '✓' : ''}</span>
-              <span>{label}</span>
-            </button>
-          ))}
-          <button
-            type="button"
-            role="menuitem"
-            className="separator"
-            onClick={() => activate(() => onProjectsMenuAction('manageProjects'))}
-          >
-            <AppIcon name="gear" />
-            <span>Manage Projects…</span>
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
-
 export function CodexSidebar({
   workspaces,
   selectedWorkspaceId,
@@ -801,7 +695,6 @@ export function CodexSidebar({
   onSelectWorkspace,
   onToggleWorkspace,
   onAddAction,
-  onProjectsMenuAction,
   onNewThread,
   onSelectThread,
   onRenameThread,
@@ -816,7 +709,6 @@ export function CodexSidebar({
   onOpenDiagnostics,
   onToggleCollapsed
 }: CodexSidebarProps) {
-  const [headerMenu, setHeaderMenu] = useState<'add' | 'projects' | null>(null);
   const [draggedWorkspaceId, setDraggedWorkspaceId] = useState<string | null>(null);
   const [dragPlacement, setDragPlacement] = useState<{
     workspaceId: string;
@@ -941,43 +833,25 @@ export function CodexSidebar({
         </button>
       </header>
 
-      <div
-        className="projects-section-header"
-        onContextMenu={(event) => {
-          event.preventDefault();
-          setHeaderMenu('projects');
-        }}
-      >
+      <div className="sidebar-global-actions sidebar-global-actions-top">
+        <button
+          type="button"
+          disabled={!selectedWorkspaceId}
+          onClick={() => onNewThread(selectedWorkspaceId ?? undefined)}
+        >
+          <AppIcon name="add" />
+          <span>New thread</span>
+          <kbd>⌘N</kbd>
+        </button>
+        <button type="button" onClick={() => onAddAction('openFolder')}>
+          <AppIcon name="folder" />
+          <span>Open folder</span>
+          <kbd>⌘O</kbd>
+        </button>
+      </div>
+
+      <div className="projects-section-header">
         <span>Projects</span>
-        <div>
-          <button
-            type="button"
-            className="icon-button subtle"
-            aria-label="Project organization"
-            title="Project organization"
-            onClick={() => setHeaderMenu((current) => current === 'projects' ? null : 'projects')}
-          >
-            <AppIcon name="ellipsis" size={15} />
-          </button>
-          <button
-            type="button"
-            className="icon-button subtle"
-            aria-label="Add project"
-            title="Add project"
-            onClick={() => setHeaderMenu((current) => current === 'add' ? null : 'add')}
-          >
-            <AppIcon name="add" size={15} />
-          </button>
-        </div>
-        {headerMenu ? (
-          <SectionPopover
-            kind={headerMenu}
-            sortMode={sortMode}
-            onAddAction={onAddAction}
-            onProjectsMenuAction={onProjectsMenuAction}
-            onClose={() => setHeaderMenu(null)}
-          />
-        ) : null}
       </div>
 
       <label className="sidebar-search">
@@ -1066,23 +940,6 @@ export function CodexSidebar({
             />
           ))
         )}
-      </div>
-
-      <div className="sidebar-global-actions">
-        <button
-          type="button"
-          disabled={!selectedWorkspaceId}
-          onClick={() => onNewThread(selectedWorkspaceId ?? undefined)}
-        >
-          <AppIcon name="add" />
-          <span>New thread</span>
-          <kbd>⌘N</kbd>
-        </button>
-        <button type="button" onClick={() => onAddAction('openFolder')}>
-          <AppIcon name="folder" />
-          <span>Open folder</span>
-          <kbd>⌘O</kbd>
-        </button>
       </div>
 
       <footer className="sidebar-footer">

@@ -77,7 +77,12 @@ export function ThreadContextMenu({
     { action: 'copyResume', label: 'Copy Resume Command', icon: 'copy' },
     { action: 'copyFullAccessResume', label: 'Copy Full Access Resume Command', icon: 'copy' },
     { action: 'openResumeInTerminal', label: 'Open Resume Command in Terminal', icon: 'terminal' },
-    { action: 'openProjectInTerminal', label: 'Open Project in Terminal', icon: 'terminal', separator: true },
+    {
+      action: 'openProjectInTerminal',
+      label: 'Open Project Terminal',
+      icon: 'terminal',
+      separator: true
+    },
     { action: 'revealProject', label: 'Reveal Project in Finder', icon: 'folder' },
     { action: 'restartRuntime', label: 'Restart Codex Runtime', icon: 'refresh', separator: true },
     { action: 'startFresh', label: 'Start Fresh From This Project', icon: 'add' },

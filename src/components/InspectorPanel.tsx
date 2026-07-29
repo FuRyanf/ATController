@@ -261,7 +261,7 @@ export function InspectorPanel({
                   <footer>
                     <span>{command.cwd}</span>
                     <button type="button" onClick={() => onCopy(command.command ?? '', 'Command')}>Copy</button>
-                    {command.cwd ? <button type="button" onClick={() => onOpenTerminal(command.cwd!)}>Terminal</button> : null}
+                    {command.cwd ? <button type="button" onClick={() => onOpenTerminal(command.cwd!)}>Project Terminal</button> : null}
                   </footer>
                 </article>
               ))}
@@ -298,7 +298,7 @@ export function InspectorPanel({
               <button type="button" onClick={() => onCopyResume(false)}><AppIcon name="copy" />Copy resume command</button>
               <button type="button" onClick={() => onCopyResume(true)}><AppIcon name="copy" />Copy Full Access resume command</button>
               <button type="button" onClick={onOpenResumeInTerminal}><AppIcon name="terminal" />Open resume command in Terminal</button>
-              <button type="button" onClick={() => onOpenTerminal(thread.cwd)}><AppIcon name="terminal" />Open project in Terminal</button>
+              <button type="button" onClick={() => onOpenTerminal(thread.cwd)}><AppIcon name="terminal" />Open Project Terminal</button>
             </section>
           </div>
         ) : null}
