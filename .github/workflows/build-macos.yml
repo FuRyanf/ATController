@@ -3,262 +3,619 @@ name: Build macOS
 on:
   push:
     branches:
-      - master
       - main
     tags:
       - "v*"
   pull_request:
     branches:
-      - master
       - main
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: build-macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - provider: claude
-            product_name: ATController
-            bundle_identifier: com.atcontroller.app
-            asset_prefix: ATController
-          - provider: copilot
-            product_name: ATController Copilot
-            bundle_identifier: com.atcontroller.copilot
-            asset_prefix: ATController-Copilot
-
+  rust-advisories:
+    name: Rust advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Audit Rust dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          arguments: >-
+            --all-features
+            --locked
+            --target aarch64-apple-darwin
+          command: check
+          command-arguments: -A unmaintained advisories
+
+  build-macos:
+    name: Test and build Apple silicon development artifacts
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require release tags to point into main
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          verified_tag_ref="refs/atcontroller/verified-release-tag"
+          git fetch --force --no-tags origin \
+            "refs/tags/${GITHUB_REF_NAME}:${verified_tag_ref}"
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          remote_tag_commit="$(git rev-parse "${verified_tag_ref}^{commit}")"
+          test "$remote_tag_commit" = "$event_commit" || {
+            echo "The remote release tag no longer resolves to this workflow commit." >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$event_commit" refs/remotes/origin/main || {
+            echo "Release tags must point to a commit contained in main." >&2
+            exit 1
+          }
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
+          cache: yarn
+          cache-dependency-path: yarn.lock
 
-      - name: Install Yarn (classic)
-        run: npm install -g yarn@1.22.10
+      - name: Install Yarn Classic
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global yarn@1.22.22
+          test "$(yarn --version)" = "1.22.22"
 
       - name: Setup Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          components: clippy,rustfmt
+          targets: aarch64-apple-darwin
 
-      - name: Install dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
         run: yarn install --frozen-lockfile
 
-      - name: Validate repo version alignment
-        run: node scripts/sync-version.mjs check
+      - name: Install the checked-in Codex schema generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex_version="$(
+            node -e '
+              const metadata = require("./generated/codex-app-server/version.json");
+              const match = String(metadata.codexVersion).match(/[0-9]+\.[0-9]+\.[0-9]+/);
+              if (!match) process.exit(1);
+              process.stdout.write(match[0]);
+            '
+          )"
+          npm install --global "@openai/codex@${codex_version}"
+          codex --version
 
-      - name: Import Developer ID certificate (optional)
+      - name: Audit frontend dependencies
+        run: yarn audit --level moderate
+
+      - name: Audit product identity and runtime scope
+        run: yarn audit:branding
+
+      - name: Validate generated Codex protocol
+        run: yarn codex:check-protocol
+
+      - name: Validate repository version alignment
+        run: yarn version:check
+
+      - name: Validate release tag version
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="${GITHUB_REF_NAME#v}"
+          node scripts/sync-version.mjs check "$release_version"
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Build frontend
+        run: yarn build
+
+      - name: Lint Rust
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Test frontend
+        run: yarn test:ui
+
+      - name: Test Rust
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build unsigned Apple silicon development application
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          yarn run tauri -- build \
+            --target aarch64-apple-darwin \
+            --bundles app,dmg \
+            -- \
+            --locked
+
+      - name: Verify development application and package artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bundle_root="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          application="${bundle_root}/macos/ATController.app"
+          info_plist="${application}/Contents/Info.plist"
+          dmg_directory="${bundle_root}/dmg"
+          expected_version="$(node -p "require('./package.json').version")"
+
+          test -d "$application"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist")" = "com.furyanf.atcontroller"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$info_plist")" = "ATController"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$info_plist")" = "ATController"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info_plist")" = "$expected_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info_plist")" = "$expected_version"
+
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist")"
+          executable="${application}/Contents/MacOS/${executable_name}"
+          executable_arches="$(lipo -archs "$executable")"
+          test "$executable_arches" = "arm64"
+
+          shopt -s nullglob
+          dmg_files=("${dmg_directory}"/*.dmg)
+          test "${#dmg_files[@]}" -eq 1
+          source_dmg="${dmg_files[0]}"
+
+          mkdir -p development-assets
+          cp "$source_dmg" development-assets/ATController-development.dmg
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$application" \
+            development-assets/ATController-development.app.zip
+
+          hdiutil verify development-assets/ATController-development.dmg
+          unzip -t development-assets/ATController-development.app.zip
+
+          verification_root="$(mktemp -d "$RUNNER_TEMP/atcontroller-development.XXXXXX")"
+          zip_root="${verification_root}/zip"
+          mount_root="${verification_root}/dmg"
+          mkdir -p "$zip_root" "$mount_root"
+
+          ditto -x -k development-assets/ATController-development.app.zip "$zip_root"
+          test -d "$zip_root/ATController.app"
+          test "$(find "$zip_root" -type d -name '*.app' -print | wc -l | tr -d ' ')" = "1"
+
+          mounted=0
+          cleanup() {
+            if [ "$mounted" -eq 1 ]; then
+              hdiutil detach "$mount_root" || true
+            fi
+          }
+          trap cleanup EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_root" \
+            development-assets/ATController-development.dmg
+          mounted=1
+          test -d "$mount_root/ATController.app"
+          test "$(find "$mount_root" -maxdepth 1 -type d -name '*.app' -print | wc -l | tr -d ' ')" = "1"
+          hdiutil detach "$mount_root"
+          mounted=0
+
+          test "$(find development-assets -maxdepth 1 -type f -print | wc -l | tr -d ' ')" = "2"
+
+      - name: Upload development artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ATController-development-assets
+          path: |
+            development-assets/ATController-development.dmg
+            development-assets/ATController-development.app.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release-build-macos:
+    name: Build signed and notarized Apple silicon release
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs:
+      - rust-advisories
+      - build-macos
+    runs-on: macos-15
+    timeout-minutes: 75
+    environment:
+      name: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revalidate release tag ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          verified_tag_ref="refs/atcontroller/verified-release-tag"
+          git fetch --force --no-tags origin \
+            "refs/tags/${GITHUB_REF_NAME}:${verified_tag_ref}"
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          remote_tag_commit="$(git rev-parse "${verified_tag_ref}^{commit}")"
+          test "$remote_tag_commit" = "$event_commit" || {
+            echo "The remote release tag no longer resolves to this workflow commit." >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$event_commit" refs/remotes/origin/main || {
+            echo "Release tags must point to a commit contained in main." >&2
+            exit 1
+          }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: yarn
+          cache-dependency-path: yarn.lock
+
+      - name: Install Yarn Classic
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global yarn@1.22.22
+          test "$(yarn --version)" = "1.22.22"
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="${GITHUB_REF_NAME#v}"
+          node scripts/sync-version.mjs check "$release_version"
+
+      - name: Require production signing and notarization credentials
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          for variable_name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID
+          do
+            if [ -z "${!variable_name:-}" ]; then
+              echo "Required production secret ${variable_name} is not configured." >&2
+              exit 1
+            fi
+          done
+          case "$APPLE_SIGNING_IDENTITY" in
+            "Developer ID Application:"*) ;;
+            *)
+              echo "APPLE_SIGNING_IDENTITY must be a Developer ID Application identity." >&2
+              exit 1
+              ;;
+          esac
 
-          if [ -z "${APPLE_CERTIFICATE:-}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ] || [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "Signing certificate secrets not configured; continuing with unsigned build."
-            exit 0
-          fi
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/atcontroller-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/atcontroller-build.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
 
-          CERT_PATH="$RUNNER_TEMP/developer_id.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          KEYCHAIN_PASS="${KEYCHAIN_PASSWORD:-temporary-build-keychain-password}"
+          umask 077
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          chmod 600 "$certificate_path"
 
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
-
-          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
-          security default-keychain -d user -s "$KEYCHAIN_PATH"
-
-          security import "$CERT_PATH" \
-            -k "$KEYCHAIN_PATH" \
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -d user -s "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
             -P "$APPLE_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign \
             -T /usr/bin/security \
             -T /usr/bin/productbuild
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" \
+            | grep -F -- "$APPLE_SIGNING_IDENTITY"
 
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-
-      - name: Ensure Tauri CLI is available
+      - name: Build signed and notarized Apple silicon application
         shell: bash
-        run: |
-          if yarn tauri --version; then
-            echo "Using project-local Tauri CLI"
-          else
-            npm install -g @tauri-apps/cli@2.1.0
-            tauri --version
-          fi
-
-      - name: Clean stale bundle artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf src-tauri/target/release/bundle
-          rm -f src-tauri/target/release/atcontroller
-          rm -rf dist
-
-      - name: Validate tag version matches repo version
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Validating release tag version: ${VERSION}"
-          node scripts/sync-version.mjs check "$VERSION"
-
-      - name: Build app
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          ATCONTROLLER_AGENT_PROVIDER: ${{ matrix.provider }}
-          VITE_ATCONTROLLER_AGENT_PROVIDER: ${{ matrix.provider }}
+        run: |
+          set -euo pipefail
+          yarn run tauri -- build \
+            --target aarch64-apple-darwin \
+            --bundles app,dmg \
+            -- \
+            --locked
+
+      - name: Verify and collect production release artifacts
         shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
 
-          # Keep unsigned builds healthy when signing/notarization secrets are absent.
-          for var_name in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!var_name:-}" ]; then
-              unset "$var_name"
-            fi
-          done
+          bundle_root="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          application="${bundle_root}/macos/ATController.app"
+          info_plist="${application}/Contents/Info.plist"
+          dmg_directory="${bundle_root}/dmg"
+          expected_version="${GITHUB_REF_NAME#v}"
 
-          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "Developer ID signing enabled for this build."
-          else
-            echo "No signing identity configured; building unsigned artifact."
-          fi
+          test -d "$application"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist")" = "com.furyanf.atcontroller"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$info_plist")" = "ATController"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$info_plist")" = "ATController"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info_plist")" = "$expected_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info_plist")" = "$expected_version"
 
-          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
-            echo "Notarization credentials detected."
-          else
-            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID || true
-            echo "Notarization credentials incomplete; skipping notarization."
-          fi
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist")"
+          executable="${application}/Contents/MacOS/${executable_name}"
+          executable_arches="$(lipo -archs "$executable")"
+          test "$executable_arches" = "arm64"
 
-          config_path="$RUNNER_TEMP/tauri-${{ matrix.provider }}.json"
-          bundle_config=""
-          if [ "${{ matrix.provider }}" = "copilot" ]; then
-            bundle_config=', "bundle": { "icon": [ "icons/copilot/32x32.png", "icons/copilot/128x128.png", "icons/copilot/128x128@2x.png", "icons/copilot/icon.icns" ] }'
-          fi
-          cat > "$config_path" <<JSON
-          {
-            "productName": "${{ matrix.product_name }}",
-            "identifier": "${{ matrix.bundle_identifier }}",
-            "app": {
-              "windows": [
-                {
-                  "label": "main",
-                  "title": "${{ matrix.product_name }}",
-                  "width": 1320,
-                  "height": 860,
-                  "minWidth": 1024,
-                  "minHeight": 720,
-                  "resizable": true
-                }
-              ]
-            }
-            ${bundle_config}
-          }
-          JSON
-
-          yarn tauri build --config "$config_path"
-        # If Developer ID + notarization secrets are configured, Tauri signs/notarizes the app.
-        # Otherwise this remains an unsigned build.
-
-      - name: Collect build artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dmg_dir="src-tauri/target/release/bundle/dmg"
-          app_dir="src-tauri/target/release/bundle/macos"
+          codesign --verify --deep --strict --verbose=2 "$application"
+          signature_details="$(codesign -dv --verbose=4 "$application" 2>&1)"
+          signed_team_id="$(printf '%s\n' "$signature_details" | awk -F= '/^TeamIdentifier=/{print $2}')"
+          test "$signed_team_id" = "$APPLE_TEAM_ID"
+          spctl --assess --type execute --verbose=4 "$application"
+          xcrun stapler validate "$application"
 
           shopt -s nullglob
-          dmg_files=("${dmg_dir}"/*.dmg)
-          app_bundles=("${app_dir}"/*.app)
+          dmg_files=("${dmg_directory}"/*.dmg)
+          test "${#dmg_files[@]}" -eq 1
+          source_dmg="${dmg_files[0]}"
+          codesign --verify --strict --verbose=2 "$source_dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$source_dmg"
+          xcrun stapler validate "$source_dmg"
+          hdiutil verify "$source_dmg"
 
-          if [ ${#dmg_files[@]} -eq 0 ]; then
-            echo "No .dmg file found in ${dmg_dir}" >&2
-            exit 1
-          fi
+          mkdir -p release-assets
+          cp "$source_dmg" release-assets/ATController.dmg
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$application" \
+            release-assets/ATController.app.zip
 
-          if [ ${#app_bundles[@]} -eq 0 ]; then
-            echo "No .app bundle found in ${app_dir}" >&2
-            exit 1
-          fi
+          unzip -t release-assets/ATController.app.zip
+          verification_root="$(mktemp -d "$RUNNER_TEMP/atcontroller-release.XXXXXX")"
+          zip_root="${verification_root}/zip"
+          mount_root="${verification_root}/dmg"
+          mkdir -p "$zip_root" "$mount_root"
 
-          latest_dmg="$(ls -t "${dmg_files[@]}" | head -n 1)"
-          latest_app_bundle="$(ls -dt "${app_bundles[@]}" | head -n 1)"
+          ditto -x -k release-assets/ATController.app.zip "$zip_root"
+          test -d "$zip_root/ATController.app"
+          test "$(find "$zip_root" -type d -name '*.app' -print | wc -l | tr -d ' ')" = "1"
+          codesign --verify --deep --strict --verbose=2 "$zip_root/ATController.app"
+          spctl --assess --type execute --verbose=4 "$zip_root/ATController.app"
+          xcrun stapler validate "$zip_root/ATController.app"
 
-          mkdir -p dist
-          cp "$latest_dmg" "dist/${{ matrix.asset_prefix }}.dmg"
-          ditto -c -k --sequesterRsrc --keepParent "$latest_app_bundle" "dist/${{ matrix.asset_prefix }}.app.zip"
+          mounted=0
+          cleanup_mount() {
+            if [ "$mounted" -eq 1 ]; then
+              hdiutil detach "$mount_root" || true
+            fi
+          }
+          trap cleanup_mount EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_root" \
+            release-assets/ATController.dmg
+          mounted=1
+          test -d "$mount_root/ATController.app"
+          test "$(find "$mount_root" -maxdepth 1 -type d -name '*.app' -print | wc -l | tr -d ' ')" = "1"
+          codesign --verify --deep --strict --verbose=2 "$mount_root/ATController.app"
+          hdiutil detach "$mount_root"
+          mounted=0
 
-      - name: Upload release assets
-        uses: actions/upload-artifact@v4
+          test "$(find release-assets -maxdepth 1 -type f -print | wc -l | tr -d ' ')" = "2"
+
+      - name: Upload production release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ matrix.asset_prefix }}-release-assets
+          name: ATController-release-assets
           path: |
-            dist/${{ matrix.asset_prefix }}.dmg
-            dist/${{ matrix.asset_prefix }}.app.zip
+            release-assets/ATController.dmg
+            release-assets/ATController.app.zip
           if-no-files-found: error
+          retention-days: 14
 
-      - name: Cleanup temporary keychain
-        if: always()
+      - name: Cleanup signing material
+        if: ${{ always() }}
         shell: bash
         run: |
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          if [ -f "$KEYCHAIN_PATH" ]; then
-            security delete-keychain "$KEYCHAIN_PATH" || true
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/atcontroller-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/atcontroller-build.keychain-db"
+          if [ -f "$keychain_path" ]; then
+            security delete-keychain "$keychain_path" || true
+          fi
+          if [ -f "$certificate_path" ]; then
+            rm -f "$certificate_path"
           fi
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-macos
+    name: Publish GitHub release
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs:
+      - release-build-macos
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
-      - name: Download release assets
-        uses: actions/download-artifact@v4
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          pattern: "*-release-assets"
-          path: dist
-          merge-multiple: true
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Show release assets
+      - name: Reject moved, reused, or non-increasing release tags
         shell: bash
-        run: ls -lah dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
 
-      - name: Create GitHub Release (tags only)
-        uses: softprops/action-gh-release@v2
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          verified_tag_ref="refs/atcontroller/verified-release-tag"
+          git fetch --force --no-tags origin \
+            "refs/tags/${GITHUB_REF_NAME}:${verified_tag_ref}"
+          event_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          remote_tag_commit="$(git rev-parse "${verified_tag_ref}^{commit}")"
+          test "$remote_tag_commit" = "$event_commit" || {
+            echo "The remote release tag no longer resolves to this workflow commit." >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$event_commit" refs/remotes/origin/main || {
+            echo "Release tags must point to a commit contained in main." >&2
+            exit 1
+          }
+
+          api_headers=(
+            --header "Accept: application/vnd.github+json"
+            --header "Authorization: Bearer ${GH_TOKEN}"
+            --header "X-GitHub-Api-Version: 2026-03-10"
+          )
+          existing_release_json="$RUNNER_TEMP/atcontroller-existing-release.json"
+          existing_release_status="$(
+            curl --silent --show-error --location \
+              "${api_headers[@]}" \
+              --output "$existing_release_json" \
+              --write-out '%{http_code}' \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}"
+          )"
+          case "$existing_release_status" in
+            404) ;;
+            200)
+              echo "A GitHub Release already exists for ${GITHUB_REF_NAME}." >&2
+              exit 1
+              ;;
+            *)
+              echo "Unable to verify release freshness (HTTP ${existing_release_status})." >&2
+              exit 1
+              ;;
+          esac
+
+          latest_release_json="$RUNNER_TEMP/atcontroller-latest-release.json"
+          latest_release_status="$(
+            curl --silent --show-error --location \
+              "${api_headers[@]}" \
+              --output "$latest_release_json" \
+              --write-out '%{http_code}' \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/latest"
+          )"
+          case "$latest_release_status" in
+            404) ;;
+            200)
+              latest_tag="$(
+                python3 -c \
+                  'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["tag_name"])' \
+                  "$latest_release_json"
+              )"
+              python3 - "$GITHUB_REF_NAME" "$latest_tag" <<'PY'
+          import re
+          import sys
+
+          pattern = re.compile(r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+
+          def parse(value: str) -> tuple[int, int, int]:
+              match = pattern.fullmatch(value)
+              if match is None:
+                  raise SystemExit(f"Release tag {value!r} is not stable numeric SemVer.")
+              return tuple(int(part) for part in match.groups())
+
+          candidate = parse(sys.argv[1])
+          latest = parse(sys.argv[2])
+          if candidate <= latest:
+              raise SystemExit(
+                  f"Release {sys.argv[1]} must be newer than latest release {sys.argv[2]}."
+              )
+          PY
+              ;;
+            *)
+              echo "Unable to read the latest release (HTTP ${latest_release_status})." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Download production release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ATController-release-assets
+          path: release-assets
+
+      - name: Verify exact release artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f release-assets/ATController.dmg
+          test -f release-assets/ATController.app.zip
+          test "$(find release-assets -maxdepth 1 -type f -print | wc -l | tr -d ' ')" = "2"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
-            dist/ATController.dmg
-            dist/ATController.app.zip
-            dist/ATController-Copilot.dmg
-            dist/ATController-Copilot.app.zip
+            release-assets/ATController.dmg
+            release-assets/ATController.app.zip
           fail_on_unmatched_files: true
+          overwrite_files: false
           generate_release_notes: true

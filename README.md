@@ -1,383 +1,359 @@
 # ATController
 
-ATController is a native macOS desktop app that wraps the local Claude Code CLI in a purpose-built control plane.
+ATController is a native macOS control plane for local Codex sessions. It gives the official, locally installed Codex runtime a focused graphical interface for projects, threads, turns, commands, file changes, approvals, models, usage, and recovery.
 
-The app does not call Anthropic APIs directly. It launches your local `claude` binary in a real PTY, renders terminal output in-app, and keeps thread/session state on your machine.
+Codex is the only runtime. The normal conversation path uses the structured `codex app-server` protocol over stdio; it does not scrape terminal output or simulate keystrokes.
 
-Most UI actions map directly to local CLI or git behavior. The main exception is explicit convenience context that you opt into: selected skills and queued attachments are prepended locally before your next submitted prompt.
+## Product experience
 
-## Highlights
+ATController is organized around a resizable three-region workspace:
 
-- Workspace + thread management across local and `ssh` workspaces.
-- One-click thread start/resume with per-thread `Full access`, agent, and skills settings.
-- Session import for existing Claude conversations, including bulk import from local Claude storage.
-- Built-in file/image attachments, unread dots, task-completion notifications, and Dock badge counts.
-- Git-aware branch switching plus optional `git checkout master && git pull` before new threads.
-- Redesigned in-app settings for Claude path detection, diagnostics, and defaults.
+- Persistent project shelves with each project’s active, recent, and archived Codex threads nested beneath it.
+- A structured conversation timeline for user messages, streamed agent responses, reasoning summaries, plans, commands, file edits, tool calls, approvals, errors, and completion.
+- An optional inspector for Git changes, command history, thread details, and runtime health.
 
-## Security Model
+The compact composer supports multiline prompts, prompt history, file and image attachments, drag and drop, pasted images, runtime skills, turn steering, interruption, model and reasoning selection, permission modes, and the Codex-reported five-hour and weekly usage windows.
 
-ATController is a local wrapper around the existing Claude CLI, not a remote execution service.
+The resizable **Project Terminal** is a separate utility shelf at the bottom of the ATController window. It runs a native login shell in the selected project and is never used as the primary Codex conversation renderer. The explicit **Open Resume Command in Terminal** action remains a Terminal.app handoff so a Codex session can be resumed outside ATController.
 
-- Runs `claude` locally under your current macOS user account and permissions.
-- Does not proxy requests through an ATController backend service.
-- Keeps `Full access` explicit and per-thread (default is off).
-- Stores app data locally under `~/Library/Application Support/ATController/`.
+### Project shelves
 
-Security boundary note: this app is **not** an OS sandbox for Claude. If Claude (or shell commands it runs) can access something in your normal terminal session, the same access level applies here.
+Projects are the primary navigation unit. Each shelf represents one canonical local directory and retains its display name, icon, pin state, custom order, and expanded state. An expanded shelf exposes a project-scoped **New thread** action followed by running and recent threads; archived threads remain behind a reversible **Show archived / Hide archived** disclosure.
 
-For implementation details and tradeoffs, see [Security Notes (Detailed)](#security-notes-detailed).
+The sidebar’s top actions, project context menus, command palette, and lightweight project manager support:
 
-## Why This Exists
+- opening a local folder with the native macOS picker;
+- importing workspaces discovered from official Codex thread history without copying transcripts;
+- cloning a repository with argument-safe Git execution;
+- expanding, collapsing, sorting, reordering, pinning, renaming, and managing projects;
+- locating a moved folder or removing only the ATController project entry.
 
-Using Claude only in Terminal works well for one repo/thread, but gets painful when you juggle many:
+The compact **New thread** and **Open folder** actions sit directly beneath the ATController header. Less frequent import, clone, sorting, expansion, and management actions remain keyboard-accessible through the command palette instead of occupying a wide header popover.
 
-- Too many tabs/windows across projects, with no single thread/workspace view.
-- Session continuity is manual (resume ids and logs are easy to lose track of).
-- Project operations (switching branches, opening folders, jumping threads) are fragmented.
-- Per-thread runtime controls (like `Full access`) are harder to manage consistently.
+Paths are canonicalized before duplicate detection, including symlink resolution. Missing folders remain visible with recovery actions. Project removal never deletes the directory, repository, files, or Codex threads.
 
-ATController solves this by keeping Claude CLI local while adding a desktop control plane:
+The unified sidebar search matches project names and paths plus thread titles, previews, and canonical IDs while retaining project context. Several shelves can show running, approval, failure, and unread state at the same time.
 
-- Workspace + thread management in one left rail.
-- Local and remote workspaces in one UI, with SSH sessions scoped to each thread.
-- One-click normal or `Full access` thread start/resume for thread-scoped Claude sessions.
-- Import existing Claude sessions individually or in bulk.
-- Embedded PTY terminal behavior (ANSI, keyboard, streaming) with local log persistence.
-- Attachment workflow for prompts: click `+` or drag files/images into the bottom bar, then send with your next Enter submit.
-- Built-in project helpers (open folder/terminal, git branch/status context, optional pull-on-master startup).
-- Optional per-thread controls like `Full access`, agent selection, and skills.
-- Background completion signals via unread dots, desktop notifications, and Dock badge counts.
+## Requirements
 
-## Core Concepts
+- Apple silicon Mac running macOS 12 or newer
+- Node.js 20.19+ or 22.12+ and Yarn Classic 1.22 for development
+- Rust 1.88+ and Xcode Command Line Tools for native builds
+- The official Codex CLI installed and authenticated
+- A Codex CLI version that supports `app-server --stdio`, `generate-ts`, and `generate-json-schema`
 
-### Workspace
-
-A workspace is the execution root for Claude and related shell operations.
-
-Supported workspace types:
-
-- `local`
-- `ssh`
-
-Remote workspaces store connection details in ATController, but Claude still runs in the shell environment you connect to.
-
-### Thread
-
-A thread is a named Claude conversation inside a workspace.
-
-Each thread stores thread-scoped metadata such as:
-
-- Claude session id
-- `Full access` state
-- enabled skills
-- last activity timestamps
-
-Deleting a thread removes ATController metadata and logs. It does not delete the underlying Claude conversation if you still know the session id.
-
-### Run
-
-A run is a concrete terminal/process instance under a thread. Runs write logs under the thread's `runs/` directory and are separate from persisted thread metadata.
-
-## Quick Start (No Dev Setup)
-
-This path is for end users. You only need:
-
-- macOS
-- Claude CLI installed for the Claude build (`claude` on PATH, or set the path in-app)
-- GitHub Copilot CLI installed for the Copilot build (`copilot` on PATH, or set the path in-app)
-
-You do **not** need Node.js, Yarn, or Rust for this install flow.
-
-Download, install, trust, and launch the latest Claude build in one command:
+Install and authenticate Codex:
 
 ```bash
-bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/ATController.dmg"; curl -fL -o "$DMG" "https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/ATController.app" "/Applications/ATController.app"; xattr -dr com.apple.quarantine "/Applications/ATController.app" || true; open "/Applications/ATController.app"'
+npm install --global @openai/codex
+codex login
+codex login status
 ```
 
-Download, install, trust, and launch the latest Copilot build in one command:
+ATController discovers Codex through its configured binary override, the application environment, standard installation paths, and the login-shell environment. Authentication remains entirely managed by Codex.
 
-```bash
-bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/ATController-Copilot.dmg"; curl -fL -o "$DMG" "https://github.com/FuRyanf/ATController/releases/latest/download/ATController-Copilot.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/ATController Copilot.app" "/Applications/ATController Copilot.app"; xattr -dr com.apple.quarantine "/Applications/ATController Copilot.app" || true; open "/Applications/ATController Copilot.app"'
+## Install ATController
+
+Production releases publish exactly:
+
+- [ATController.dmg](https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg)
+- [ATController.app.zip](https://github.com/FuRyanf/ATController/releases/latest/download/ATController.app.zip)
+
+Open `ATController.dmg` and drag `ATController.app` to Applications. Tagged production releases are Developer ID signed, notarized, and stapled. Branch and pull-request builds are unsigned development artifacts.
+
+## Architecture
+
+```text
+ATController React UI
+        ↕ typed Tauri commands and events
+Rust Codex app-server client
+        ↕ JSON RPC messages over JSONL stdio
+codex app-server --stdio
+        ↕
+Official Codex runtime
 ```
 
-Prebuilt release note:
+The Rust layer owns process discovery, startup, initialization, request correlation, streaming, approvals, diagnostics, restart supervision, and shutdown. React receives a narrow ATController domain model rather than importing raw generated protocol types.
 
-- Releases publish Claude and Copilot macOS DMGs and app ZIPs via GitHub Actions.
-- If you hit machine-specific compatibility issues, build from source locally (`yarn tauri build`) for your environment.
+Every connection performs this lifecycle exactly once:
 
-## Product Features
+1. Spawn the resolved binary with the argument array `["app-server", "--stdio"]`.
+2. Send `initialize` with ATController client metadata and stable capabilities.
+3. Wait for a successful response.
+4. Send the required `initialized` notification.
+5. Allow normal requests and structured event delivery.
 
-### Import Existing Sessions
+The checked-in protocol bindings and JSON Schema in `generated/codex-app-server/` were generated by the installed Codex CLI and are the compatibility source of truth. Experimental APIs are disabled.
 
-ATController supports two import flows:
+See [technology.md](technology.md) for transport, state, normalization, and supervision details.
 
-- Manual import by Claude session id from a workspace context menu.
-- Bulk import from local Claude history under `~/.claude/projects`.
+## Getting started
 
-Bulk import can automatically add missing local projects first, skip already-imported sessions, and import multiple sessions in one pass.
+1. Launch ATController.
+2. Choose **Open Folder** and select a local directory, or import projects from existing Codex history.
+3. Select an existing Codex thread or create a new thread.
+4. Enter a task and press Return.
+5. Follow structured activity in the timeline.
+6. Review commands and changes inline or in the inspector.
+7. Respond to an approval when Standard or Workspace Access requires one.
+8. Continue, steer, interrupt, rename, fork, archive, or resume the thread.
 
-### Alerts, Dock Badge, and Updates
+Threads are listed and read through Codex. ATController persists only project definitions and useful UI metadata such as pinned/unread state, drafts, prompt history, selected settings, panel state, and last-viewed timestamps.
 
-ATController can surface background thread completion through:
+## Threads and turns
 
-- unread dots in the left rail
-- macOS task completion alerts
-- Dock badge counts for unread threads
+The canonical session identifier is the Codex thread identifier. ATController supports:
 
-When a newer release is available, ATController can also install updates in place from inside the app.
+- list, search, create, open, read, and resume
+- rename and fork
+- archive and restore
+- explicit deletion with confirmation
+- replacement threads for **Start Fresh**
+- recovery after a runtime restart or an invalid stored selection
+- structured history hydration after application restart
 
-### Settings
+Turns use `turn/start`, `turn/steer`, and `turn/interrupt`. ATController preserves protocol ordering, tolerates unknown events, deduplicates repeated notifications, batches high-frequency updates, and keeps the current action visible without forcing the scroll position. Agent messages render safe GitHub-flavored Markdown, including headings, emphasis, lists, task lists, tables, block quotes, links, inline code, and copyable fenced code blocks. Raw HTML is not interpreted and remote Markdown images are not loaded.
 
-The Settings UI covers the main app-level controls:
+Long histories are still read from Codex, but ATController renders the newest 24 turns first and reveals earlier turns in preserved-scroll pages. Verbose historical command and tool payloads are bounded with explicit truncation metadata before crossing the Tauri boundary; the canonical unabridged history remains owned by Codex.
 
-- appearance mode: System, Light, or Dark
-- task completion alerts and a test alert action
-- Claude CLI path override and detected-path fallback
-- default new-thread `Full access` behavior
-- terminal environment diagnostics copy action
+## Resume commands and Terminal handoff
 
-## Development Requirements (Source Build Only)
+Thread menus expose:
 
-- Node.js + Yarn
-- Rust toolchain (for Tauri build)
-- Claude CLI installed (`claude` on PATH or configured in app settings)
+- **Copy Resume Command**
+- **Copy Full Access Resume Command**
+- **Open Resume Command in Terminal**
 
-## Install
+ATController probes `codex resume --help` from the installed binary before constructing a command. The command contains the resolved Codex binary, canonical thread identifier, `--cd` workspace, and shell-safe quoting. Model, reasoning effort, and service tier overrides are included only when the user explicitly selected them. The Full Access form includes the installed CLI’s verified Full Access switch.
+
+The default resume-command handoff opens Terminal.app in the thread workspace and inserts the exact command into zsh for review with `print -z`. Settings can opt into immediate execution. Insert-for-review reports a clear compatibility error when the login shell is not zsh.
+
+## Project Terminal
+
+Command J opens or hides the built-in Project Terminal shelf. Project and command context actions can open the same shelf at a validated directory inside the selected project. The shelf supports ANSI applications, interactive input, resize, clear, restart, stop, and a persisted panel height.
+
+Rust owns each native PTY process. ATController starts the user’s configured absolute login shell directly, bounds its input and output queues, and allows at most one shell session per project. The working directory is canonicalized and must stay inside a registered project. Hiding the shelf keeps its session alive; stopping it or quitting ATController terminates the process group. Project Terminal output is neither parsed as Codex activity nor persisted as conversation history.
+
+## Permissions
+
+ATController exposes three thread-scoped modes and maps them to generated, structured app-server fields:
+
+- **Standard** uses read-only sandboxing and on-request approvals.
+- **Workspace Access** uses workspace-write sandboxing and on-request approvals.
+- **Full Access** uses the danger-full-access sandbox and the `never` approval policy.
+
+Full Access is the default for new threads in this product. A persistent indicator warns that Codex may read, modify, delete, and execute resources available to the current macOS user. ATController does not add redundant local confirmation dialogs to a Full Access turn.
+
+ATController is not an operating-system sandbox. Choose Standard or Workspace Access for projects or instructions that are not fully trusted.
+
+## Models, reasoning, and usage
+
+Model, reasoning-effort, service-tier, permission-profile, account, plan, and rate-limit data come from the connected Codex runtime. ATController does not invent model names or reasoning values.
+
+Requested and effective settings remain distinct. Runtime defaults and fallbacks are shown instead of silently presenting a rejected value as applied. Ultra appears only when the selected runtime model reports it.
+
+## Attachments and skills
+
+The composer serializes the exact structured input forms accepted by the generated protocol:
+
+- text input
+- local images
+- bounded inline PNG, JPEG, GIF, and WebP data
+- local file paths
+- runtime-reported skills
+
+Inline images are limited to 10 MB. Files outside the active project are visibly marked, and the file picker requires confirmation before sharing them. Large ordinary files are passed by path instead of being converted into prompt text.
+
+## Git and changes
+
+Git remains the source of truth for the working tree. The inspector provides:
+
+- current branch and clean/dirty state
+- added, modified, deleted, renamed, copied, and conflicted files
+- insertion and deletion counts
+- per-file structured diffs
+- open, reveal, copy path, copy patch, and confirmed revert
+- copy the full working-tree patch
+- safe branch switching and branch creation
+
+App-server file events update the timeline immediately; Git refreshes reconcile the final filesystem state.
+
+## Keyboard shortcuts
+
+| Action | Shortcut |
+| --- | --- |
+| Open folder | Command O |
+| Import existing Codex projects | Command Shift O |
+| New thread in selected project | Command N |
+| Command palette | Command K or Command P |
+| Focus composer | Command L |
+| Stop active turn | Command . |
+| Rename thread | Command Shift R |
+| Search projects and threads | Command Shift F |
+| Copy resume command | Command Shift C |
+| Toggle sidebar | Command Shift S |
+| Toggle inspector | Command Shift I |
+| Toggle Project Terminal | Command J |
+| Send | Return |
+| New line | Shift Return |
+| Optional alternate send | Command Return |
+
+The command palette also exposes project, thread, resume, model, reasoning, permission, runtime, inspector, terminal, diagnostics, fork, and archive actions.
+
+## Diagnostics
+
+The diagnostics screen shows:
+
+- ATController and Codex versions
+- resolved binary and Codex home
+- app-server/schema support and transport
+- connection/initialization state, PID, uptime, and restart attempts
+- authentication and plan state
+- current model, reasoning, permission, approval, and sandbox settings
+- active workspace, thread, and turn
+- pending request and event-queue counts
+- recent redacted stderr, protocol errors, and exit status
+
+Actions can copy redacted diagnostics, run a connection self-test, restart the runtime, generate a protocol snapshot in the application data directory, open Codex configuration, or open ATController data.
+
+Diagnostics redact credential-bearing values and do not include prompt content.
+
+## Local data and migration
+
+All ATController-owned data remains under:
+
+```text
+~/Library/Application Support/ATController/
+```
+
+The active layout is:
+
+```text
+settings.json
+workspaces.json
+codex-thread-ui.json
+migrations/app-server-v3.json
+migrations/codex-settings-v1.json
+migrations/project-shelves-v1.json
+migration-backups/app-server-v3/
+migration-backups/codex-settings-v1/
+migration-backups/project-shelves-v1/
+generated-codex-protocol/
+```
+
+Codex owns conversation history in its own home directory. ATController does not duplicate full transcripts.
+
+The app-server migration:
+
+1. preserves registered local projects;
+2. backs up settings, workspace definitions, and old thread metadata before rewriting;
+3. maps only records with a canonical Codex session identifier;
+4. preserves useful UI metadata;
+5. records incompatible legacy runtime metadata in a report;
+6. leaves original thread directories intact;
+7. never passes incompatible identifiers to Codex.
+
+The Codex-settings migration backs up and rewrites older settings through the current Codex-only schema so retired runtime and terminal-conversation fields cannot remain active.
+
+The project-shelf migration separately backs up the previous workspace and thread UI files, canonicalizes valid local paths, preserves missing and malformed records in its report, associates thread UI metadata with explicit project IDs, and enriches projects with stable ordering and expansion metadata. It never rewrites Codex-owned transcripts.
+
+Production builds always use the fixed Application Support path. Debug and test builds may use `ATCONTROLLER_APP_SUPPORT_ROOT` for isolated fixtures.
+
+## Security
+
+- The frontend can invoke only a narrow typed Tauri command surface.
+- Workspace and project-file paths are canonicalized and checked against registered projects.
+- There is no generic one-shot shell-execution command. Interactive input is accepted only by an explicitly opened Project Terminal PTY scoped to a registered project.
+- Codex is spawned directly with an argument array.
+- Protocol stdout, diagnostic stderr, and stdin remain separate.
+- Protocol logs are bounded and redacted.
+- Codex authentication tokens are never copied into ATController persistence.
+- External URLs are limited to validated HTTP(S) values.
+- The WebView uses a restrictive Content Security Policy.
+- Shutdown terminates the app-server process group and escalates only after a timeout.
+
+## Development
+
+Install dependencies:
 
 ```bash
 yarn install --ignore-engines
 ```
 
-## Run In Development
+Generate bindings from the configured or discovered Codex binary:
+
+```bash
+yarn codex:generate-protocol
+```
+
+Verify that checked-in bindings match the installed Codex version:
+
+```bash
+yarn codex:check-protocol
+```
+
+Run the native application:
 
 ```bash
 yarn tauri dev
 ```
 
-Optional frontend-only dev server:
+Run the frontend alone:
 
 ```bash
 yarn dev
 ```
 
-## Build
+## Testing
 
 ```bash
+yarn test
 yarn build
-yarn tauri build
-```
-
-Built app output:
-
-- `/Users/you/project-root/src-tauri/target/release/bundle/macos/ATController.app`
-
-## Downloads
-
-- Latest public build:
-  - [Latest release](https://github.com/FuRyanf/ATController/releases/latest)
-  - [Direct Claude DMG download](https://github.com/FuRyanf/ATController/releases/latest/download/ATController.dmg)
-  - [Direct Copilot DMG download](https://github.com/FuRyanf/ATController/releases/latest/download/ATController-Copilot.dmg)
-- CI build runs (every push to `master`/`main`, every PR targeting `master`/`main`, and every `v*` tag push):
-  - [Build workflow runs](https://github.com/FuRyanf/ATController/actions/workflows/build-macos.yml)
-  - Each run publishes `ATController.dmg`, `ATController.app.zip`, `ATController-Copilot.dmg`, and `ATController-Copilot.app.zip` as artifacts (artifact retention is time-limited by GitHub Actions).
-- For `v*` tags, the same DMGs and ZIPs are attached to the GitHub Release automatically.
-- If signing secrets are not configured, builds are unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
-
-## Release Versioning
-
-ATController uses SemVer with the repository files as the source of truth:
-
-- App manifests store plain versions like `0.0.1`.
-- Git tags add the `v` prefix, like `v0.0.1`.
-- `0.0.0` should be treated as a local placeholder, not a real release.
-
-Suggested release flow:
-
-```bash
-node scripts/sync-version.mjs set 0.0.1
-yarn tauri build
-git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock
-git commit -m "Release 0.0.1"
-git push origin main
-git tag -a v0.0.1 -m "v0.0.1"
-git push origin v0.0.1
-```
-
-GitHub Actions validates that the tag matches the checked-in repo version before publishing the release, so future releases stay aligned.
-
-## Developer ID Signing (GitHub Actions)
-
-The workflow supports optional macOS Developer ID signing and notarization when these repository secrets are configured:
-
-- `APPLE_CERTIFICATE`: base64-encoded Developer ID Application `.p12`
-- `APPLE_CERTIFICATE_PASSWORD`: password for that `.p12`
-- `APPLE_SIGNING_IDENTITY`: certificate common name (for example `Developer ID Application: Your Name (TEAMID)`)
-- `APPLE_ID`: Apple ID email used for notarization
-- `APPLE_PASSWORD`: app-specific password for that Apple ID
-- `APPLE_TEAM_ID`: Apple Developer Team ID
-- `KEYCHAIN_PASSWORD` (optional): temporary CI keychain password
-
-When these are present, CI imports the certificate into a temporary keychain and Tauri signs/notarizes during `tauri build`.  
-When they are absent, CI still builds unsigned artifacts.
-
-## Data Storage
-
-ATController stores data under:
-
-- `~/Library/Application Support/ATController/`
-- `~/Library/Application Support/ATController Copilot/`
-
-Important files/directories:
-
-- `workspaces.json`
-- `settings.json`
-- `threads/<workspaceId>/<threadId>/thread.json`
-- `threads/<workspaceId>/<threadId>/runs/<runId>/output.log`
-- `threads/<workspaceId>/<threadId>/runs/<runId>/metadata.json`
-
-Backing up this directory preserves ATController metadata, thread state, and local run logs.
-
-## Security Notes (Detailed)
-
-Current controls:
-
-- Workspace and run paths are normalized and validated before use, with path-segment checks on workspace/thread ids to reduce traversal-style file access bugs.
-- Terminal launch commands are constructed with escaping and UUID session ids, reducing shell argument injection risk around the Claude binary path/session id.
-- `Full access` is only enabled when explicitly set on a thread; default thread creation keeps it off.
-- Diagnostics output applies redaction heuristics for common secret-like environment variable names before writing diagnostics artifacts.
-- Git helpers run with non-interactive prompts disabled and include command timeouts.
-- Skills and queued attachments are only prepended when you explicitly select or stage them.
-
-Known limitations:
-
-- ATController is not a sandbox and does not reduce the privileges of your local user account.
-- Thread transcripts, run manifests, and terminal logs are local plaintext files; sensitive content may be persisted.
-- If `Full access` is enabled, Claude launches with `--dangerously-skip-permissions`.
-- App-level hardening can be improved further (for example, tightening CSP and narrowing exposed command surface over time).
-
-## Core Runtime Model
-
-- Workspace and thread list state is driven by persisted thread metadata.
-- Selecting/opening a thread starts or resumes a PTY session for that thread.
-- Threads are first-class entities; runs are children under each thread.
-- Thread actions (`Rename`, `Archive`, `Delete`) mutate thread metadata/persistence only.
-- Per-thread `Full access` state is persisted and applied at session start.
-
-## Technology
-
-ATController is a three-layer local architecture:
-
-- Frontend (`React` + `TypeScript`): manages workspace/thread UX and terminal hydration state.
-- Backend (`Tauri` + `Rust`): exposes command handlers for thread persistence, PTY control, git, and settings.
-- PTY layer (`portable_pty` + local shell): runs Claude in an actual pseudo-terminal and streams bytes to the UI.
-
-For deeper implementation details (runtime flow, buffering/hydration, and operational notes), see [`technology.md`](technology.md).
-
-Claude is started through `terminal_start_session`, which launches your login shell as `$SHELL -lic` (fallback `/bin/zsh`) and runs either:
-
-- `claude --session-id <uuid>` for a new thread session
-- `claude --resume <uuid>` for a resumed thread session
-- optional `--dangerously-skip-permissions` when thread `Full access` is enabled
-
-Terminal rendering is PTY-native: Rust reads PTY output, appends to `output.log`, emits `terminal:data` events, and the UI writes buffered chunks into `xterm.js`. On open/switch, the app hydrates from a snapshot (`terminal_read_output` / `terminal_get_last_log`) instead of replaying historical events, and temporarily defers live `terminal:data` appends for that session until snapshot hydration completes.
-
-Session resume is thread-scoped. `thread.json` stores `claudeSessionId`, `lastResumeAt`, and `lastNewSessionAt`; startup decides new vs resumed mode from this metadata (with log-based session-id recovery fallback). If resume likely failed, the UI offers `Start fresh` (clears the saved Claude session id, then restarts).
-
-Threads are persisted independently of live PTY processes (`thread.json` + `runs/<runId>/output.log` + `runs/<runId>/metadata.json`), so thread actions update metadata without coupling to transient runtime state.
-
-Git integration is local CLI based (`git_tools.rs`): branch/status polling, branch checkout from the UI, optional per-workspace git pull pre-step for new threads, and workspace-safe session shutdown around checkout operations.
-
-Why it stays fast:
-
-- Minimal overhead: local CLI + PTY, no API proxy layer.
-- No transcript replay requirement to paint terminal state.
-- Streaming is buffered on both sides (Rust event buffering + frontend xterm buffered writes).
-- State is structured by thread/workspace maps (`threadStore` for persisted metadata, `runStore` for live sessions) with refs for hot paths to avoid broad rerenders.
-- Rendering avoids jitter through memoized sidebar components, resize/input debouncing, and imperative terminal writes instead of React-driven text repainting.
-
-Local app data lives at `~/Library/Application Support/ATController/` (workspaces, settings, thread metadata, run logs/manifests).
-
-## Resume Behavior (High Level)
-
-- Each thread can persist a Claude session id in `thread.json`.
-- On thread open/start:
-  - With prior Claude session id: launches `claude --resume <sessionId>`
-  - Without one: generates a UUID and launches `claude --session-id <generatedId>`
-- Startup uses login shell parity (`$SHELL -lic`, fallback `/bin/zsh`) so env/path behavior matches Terminal.
-- If `Full access` is enabled for a thread, startup appends `--dangerously-skip-permissions`.
-
-## Icons
-
-Canonical source image:
-
-- `/Users/you/project-root/app icon.jpg`
-
-Generated base icon:
-
-- `/Users/you/project-root/assets/icon.png`
-
-Regenerate all icons:
-
-```bash
-yarn generate:icons
-```
-
-This updates platform icons under:
-
-- `/Users/you/project-root/src-tauri/icons`
-- `/Users/you/project-root/src-tauri/icons/macos`
-
-## Verification
-
-UI tests:
-
-```bash
-yarn test:ui
-```
-
-Full app build:
-
-```bash
-yarn tauri build
-```
-
-Optional local verification loop:
-
-```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+yarn test:contract
+yarn test:e2e
+yarn verify
 make verify
 ```
 
-`make verify` runs frontend build, UI tests, Rust tests, and a Claude PTY smoke test, then writes logs under `artifacts/e2e/`.
-It also writes a summary report to `artifacts/last_diagnosis.txt`.
+Unit tests cover protocol framing and normalization, redaction, permission mapping, attachment serialization, state reduction, persistence migration, Git safety, Project Terminal path and size validation, safe Markdown rendering, structured timeline behavior, approvals, composer behavior, sidebar interactions, inspector actions, appearance, diagnostics, and keyboard command surfaces.
 
-## Troubleshooting
+The real contract and end-to-end tests use a temporary Git repository, skip clearly when Codex is unavailable or unauthenticated, and never mutate a user project.
 
-### Claude CLI path not detected
+## Build and release
 
-- Open app `Settings`.
-- Set `Claude CLI Path` explicitly (for example `/usr/local/bin/claude` or your local install path).
-- Re-open a thread to start a new PTY session.
+Build the local native application:
 
-### MCP works in Terminal but not in ATController
+```bash
+yarn tauri build --bundles app,dmg
+```
 
-- Confirm ATController launches via login shell path (`$SHELL -lic`) by using the in-app diagnostics copy action.
-- Compare PATH/env output between ATController diagnostics and native Terminal.
-- Ensure shell startup files that initialize MCP dependencies are valid (`~/.zprofile`, `~/.zshrc`, etc.).
+Create the exact local release filenames:
 
-### Permissions and Full Access mode
+```bash
+yarn package:local
+```
 
-- Default behavior is standard Claude permission prompts.
-- Enable `Full access` per-thread to launch with `--dangerously-skip-permissions`.
-- Toggling `Full access` restarts the current thread session so the new mode takes effect immediately.
+Artifacts are written to:
 
-### Remote workspaces (ssh)
+```text
+src-tauri/target/release-assets/ATController.dmg
+src-tauri/target/release-assets/ATController.app.zip
+```
 
-- Add a remote project with a direct `ssh <host>` command.
-- ATController opens SSH, then launches/resumes `claude` inside the remote shell for each thread.
-- Remote sessions use the remote machine's `claude` binary and environment; verify that command works directly in your terminal if startup fails.
+Version fields stay synchronized across `package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`. See [docs/releasing.md](docs/releasing.md) for signing, notarization, and GitHub Release details.
 
-### Workspace add or picker issues
+## Compatibility and troubleshooting
 
-- Use `Add new project` and select a directory in the native folder picker.
-- If picker fails/unavailable, use manual path entry in the fallback modal.
+If startup fails:
+
+1. Run `which codex`, `codex --version`, and `codex app-server --help`.
+2. Confirm Codex authentication with `codex login status`.
+3. Open **Runtime → Diagnostics** and run the connection self-test.
+4. Configure an explicit Codex binary path if login-shell discovery selects the wrong installation.
+5. Regenerate protocol bindings after upgrading the local Codex CLI.
+6. Restart the runtime and reopen the thread.
+
+Unknown notifications are retained as generic structured activity instead of crashing the session. Unsupported required capabilities produce explicit upgrade or compatibility errors; ATController does not fall back to terminal scraping.
+
+See [docs/known-issues.md](docs/known-issues.md) for current runtime-specific limitations.

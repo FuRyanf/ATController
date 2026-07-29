@@ -1,21 +1,59 @@
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::models::{
-    AgentProvider, FinalizedNativeFork, ForkThreadResult, PreparedNativeFork, Settings, ThreadMetadata,
-    ThreadRunStatus, TranscriptEntry, Workspace, WorkspaceKind,
-};
+use crate::models::{CodexThreadUiMetadata, Settings, Workspace, WorkspaceUpdate};
 
 const APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ATController";
-const COPILOT_APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ATController Copilot";
+const WORKSPACES_FILE: &str = "workspaces.json";
+const SETTINGS_FILE: &str = "settings.json";
+const CODEX_THREAD_UI_FILE: &str = "codex-thread-ui.json";
+const CODEX_THREAD_UI_VERSION: u32 = 1;
+const APP_SERVER_MIGRATION_VERSION: u32 = 3;
+const APP_SERVER_MIGRATION_MARKER: &str = "migrations/app-server-v3.json";
+const APP_SERVER_MIGRATION_BACKUP_DIR: &str = "migration-backups/app-server-v3";
+const CODEX_SETTINGS_MIGRATION_VERSION: u32 = 1;
+const CODEX_SETTINGS_MIGRATION_MARKER: &str = "migrations/codex-settings-v1.json";
+const CODEX_SETTINGS_MIGRATION_BACKUP_DIR: &str = "migration-backups/codex-settings-v1";
+const PROJECT_SHELF_MIGRATION_VERSION: u32 = 1;
+const PROJECT_SHELF_MIGRATION_MARKER: &str = "migrations/project-shelves-v1.json";
+const PROJECT_SHELF_MIGRATION_BACKUP_DIR: &str = "migration-backups/project-shelves-v1";
 
-fn thread_metadata_lock() -> &'static Mutex<()> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexThreadUiStore {
+    version: u32,
+    threads: BTreeMap<String, CodexThreadUiMetadata>,
+}
+
+impl Default for CodexThreadUiStore {
+    fn default() -> Self {
+        Self {
+            version: CODEX_THREAD_UI_VERSION,
+            threads: BTreeMap::new(),
+        }
+    }
+}
+
+fn base_dirs_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn workspace_registry_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn codex_thread_ui_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -24,6 +62,20 @@ fn thread_metadata_lock() -> &'static Mutex<()> {
 pub(crate) fn test_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub fn app_support_root() -> Result<PathBuf> {
+    #[cfg(any(test, debug_assertions))]
+    {
+        if let Ok(override_root) = std::env::var("ATCONTROLLER_APP_SUPPORT_ROOT") {
+            if !override_root.trim().is_empty() {
+                return Ok(PathBuf::from(override_root));
+            }
+        }
+    }
+
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
+    Ok(home.join(APP_SUPPORT_SUBDIR))
 }
 
 fn validate_storage_segment<'a>(value: &'a str, label: &str) -> Result<&'a str> {
@@ -36,313 +88,835 @@ fn validate_storage_segment<'a>(value: &'a str, label: &str) -> Result<&'a str> 
         || trimmed.contains('/')
         || trimmed.contains('\\')
         || trimmed.contains('\0')
+        || trimmed.chars().any(char::is_control)
     {
         return Err(anyhow!("Invalid {label}"));
     }
     Ok(trimmed)
 }
 
-fn normalize_thread_title_input(value: &str, label: &str) -> Result<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!("{label} cannot be empty"));
-    }
-    Ok(trimmed.to_string())
-}
-
 fn write_file_atomic(path: &Path, raw: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
-        .ok_or_else(|| {
-            anyhow!(
-                "Cannot write file without a name: {}",
-                path.to_string_lossy()
-            )
-        })?;
-    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
-    fs::write(&temp_path, raw)?;
-    if let Err(error) = fs::rename(&temp_path, path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(error.into());
+        .ok_or_else(|| anyhow!("Cannot write file without a name: {}", path.display()))?;
+    let temporary = path.with_file_name(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(raw)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        if let Some(parent) = path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
     Ok(())
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry_path, &destination_path)?;
-        } else {
-            fs::copy(&entry_path, &destination_path)?;
-        }
+fn backup_file_once(source: &Path, destination: &Path) -> Result<()> {
+    if !source.is_file() || destination.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "Unable to back up {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    if let Some(parent) = destination.parent() {
+        File::open(parent)?.sync_all()?;
     }
     Ok(())
 }
 
-pub fn app_support_root() -> Result<PathBuf> {
-    if let Ok(override_root) = std::env::var("ATCONTROLLER_APP_SUPPORT_ROOT") {
-        if !override_root.trim().is_empty() {
-            return Ok(PathBuf::from(override_root));
-        }
+fn migration_marker_is_complete(path: &Path) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
     }
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
-    Ok(home.join(app_support_subdir()))
+    let raw = fs::read(path).with_context(|| format!("Unable to read {}", path.display()))?;
+    let marker: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    Ok(marker.get("version").and_then(serde_json::Value::as_u64)
+        == Some(u64::from(APP_SERVER_MIGRATION_VERSION))
+        && marker
+            .get("completedAt")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .is_some()
+        && marker
+            .get("backupDirectory")
+            .and_then(serde_json::Value::as_str)
+            == Some(APP_SERVER_MIGRATION_BACKUP_DIR))
 }
 
-pub fn configured_agent_provider() -> AgentProvider {
-    std::env::var("ATCONTROLLER_AGENT_PROVIDER")
+fn read_codex_thread_ui_store_at(root: &Path) -> Result<CodexThreadUiStore> {
+    let path = root.join(CODEX_THREAD_UI_FILE);
+    if !path.is_file() {
+        return Ok(CodexThreadUiStore::default());
+    }
+    let raw = fs::read(&path).with_context(|| format!("Unable to read {}", path.display()))?;
+    let store: CodexThreadUiStore = serde_json::from_slice(&raw)
+        .with_context(|| format!("Invalid Codex thread UI metadata in {}", path.display()))?;
+    if store.version != CODEX_THREAD_UI_VERSION {
+        return Err(anyhow!(
+            "Unsupported Codex thread UI metadata version {}",
+            store.version
+        ));
+    }
+    Ok(store)
+}
+
+fn write_codex_thread_ui_store_at(root: &Path, store: &CodexThreadUiStore) -> Result<()> {
+    write_file_atomic(
+        &root.join(CODEX_THREAD_UI_FILE),
+        serde_json::to_string_pretty(store)?.as_bytes(),
+    )
+}
+
+fn string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn bool_field(value: &serde_json::Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn timestamp_field(value: &serde_json::Value, key: &str, fallback: DateTime<Utc>) -> DateTime<Utc> {
+    string_field(value, key)
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .unwrap_or(fallback)
+}
+
+fn record_is_incompatible_runtime(value: &serde_json::Value) -> bool {
+    ["provider", "runtime", "assistant"]
+        .iter()
+        .filter_map(|key| string_field(value, key))
+        .any(|runtime| !runtime.eq_ignore_ascii_case("codex"))
+}
+
+fn relative_report_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn load_ui_store_for_migration(root: &Path, backup_root: &Path) -> Result<CodexThreadUiStore> {
+    match read_codex_thread_ui_store_at(root) {
+        Ok(store) => Ok(store),
+        Err(error) => {
+            let source = root.join(CODEX_THREAD_UI_FILE);
+            backup_file_once(&source, &backup_root.join("invalid-codex-thread-ui.json"))?;
+            Ok({
+                eprintln!(
+                    "[migration] existing Codex thread UI metadata was invalid and preserved: {error:#}"
+                );
+                CodexThreadUiStore::default()
+            })
+        }
+    }
+}
+
+fn migrate_legacy_thread_metadata(
+    root: &Path,
+    backup_root: &Path,
+    store: &mut CodexThreadUiStore,
+) -> Result<(u64, Vec<serde_json::Value>)> {
+    let threads_root = root.join("threads");
+    if !threads_root.is_dir() {
+        return Ok((0, Vec::new()));
+    }
+
+    let mut mapped = 0u64;
+    let mut incompatible = Vec::new();
+    for workspace_entry in fs::read_dir(&threads_root)
+        .with_context(|| format!("Unable to read {}", threads_root.display()))?
+    {
+        let workspace_entry = workspace_entry?;
+        if !workspace_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let workspace_id = workspace_entry.file_name().to_string_lossy().to_string();
+        for thread_entry in fs::read_dir(workspace_entry.path())? {
+            let thread_entry = thread_entry?;
+            if !thread_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let local_thread_id = thread_entry.file_name().to_string_lossy().to_string();
+            let source = thread_entry.path().join("thread.json");
+            if !source.is_file() {
+                continue;
+            }
+            let backup = backup_root
+                .join("thread-metadata")
+                .join(&workspace_id)
+                .join(format!("{local_thread_id}.json"));
+            backup_file_once(&source, &backup)?;
+
+            let value = match fs::read(&source)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            {
+                Some(value) => value,
+                None => {
+                    incompatible.push(serde_json::json!({
+                        "workspaceId": workspace_id,
+                        "localThreadId": local_thread_id,
+                        "reason": "unreadable or invalid legacy metadata",
+                        "backup": relative_report_path(root, &backup)
+                    }));
+                    continue;
+                }
+            };
+
+            if record_is_incompatible_runtime(&value) {
+                incompatible.push(serde_json::json!({
+                    "workspaceId": workspace_id,
+                    "localThreadId": local_thread_id,
+                    "reason": "thread belongs to an incompatible legacy runtime",
+                    "backup": relative_report_path(root, &backup)
+                }));
+                continue;
+            }
+
+            let Some(canonical_thread_id) = string_field(&value, "codexSessionId") else {
+                incompatible.push(serde_json::json!({
+                    "workspaceId": workspace_id,
+                    "localThreadId": local_thread_id,
+                    "reason": "no canonical Codex thread identifier",
+                    "backup": relative_report_path(root, &backup)
+                }));
+                continue;
+            };
+            if validate_storage_segment(canonical_thread_id, "Codex thread id").is_err() {
+                incompatible.push(serde_json::json!({
+                    "workspaceId": workspace_id,
+                    "localThreadId": local_thread_id,
+                    "reason": "invalid canonical Codex thread identifier",
+                    "backup": relative_report_path(root, &backup)
+                }));
+                continue;
+            }
+
+            let now = Utc::now();
+            let mut ui = store
+                .threads
+                .remove(canonical_thread_id)
+                .unwrap_or_else(|| {
+                    CodexThreadUiMetadata::new(
+                        canonical_thread_id.to_string(),
+                        workspace_id.clone(),
+                    )
+                });
+            ui.thread_id = canonical_thread_id.to_string();
+            ui.workspace_id = workspace_id.clone();
+            ui.fallback_title = string_field(&value, "title")
+                .unwrap_or_default()
+                .to_string();
+            ui.pinned = bool_field(&value, "pinned");
+            ui.unread = bool_field(&value, "unread");
+            ui.archived = bool_field(&value, "archived");
+            ui.permission_mode = if bool_field(&value, "fullAccess") {
+                "fullAccess".to_string()
+            } else {
+                "workspaceAccess".to_string()
+            };
+            ui.created_at = timestamp_field(&value, "createdAt", now);
+            ui.updated_at = timestamp_field(&value, "updatedAt", ui.created_at);
+            store
+                .threads
+                .insert(canonical_thread_id.to_string(), ui.normalized());
+            mapped += 1;
+        }
+    }
+    Ok((mapped, incompatible))
+}
+
+fn preserve_and_filter_legacy_workspaces(
+    root: &Path,
+    backup_root: &Path,
+) -> Result<Vec<serde_json::Value>> {
+    let path = root.join(WORKSPACES_FILE);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    backup_file_once(&path, &backup_root.join(WORKSPACES_FILE))?;
+    let raw = fs::read(&path)?;
+    let values = match serde_json::from_slice::<Vec<serde_json::Value>>(&raw) {
+        Ok(values) => values,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut incompatible = Vec::new();
+    for value in values {
+        let kind = string_field(&value, "kind").unwrap_or("local");
+        if !kind.eq_ignore_ascii_case("local") {
+            incompatible.push(serde_json::json!({
+                "workspaceId": string_field(&value, "id"),
+                "name": string_field(&value, "name"),
+                "reason": "remote legacy workspace is not supported by the local Codex runtime",
+                "backup": format!("{APP_SERVER_MIGRATION_BACKUP_DIR}/{WORKSPACES_FILE}")
+            }));
+        }
+    }
+    Ok(incompatible)
+}
+
+fn run_app_server_migration(root: &Path) -> Result<()> {
+    let marker_path = root.join(APP_SERVER_MIGRATION_MARKER);
+    if migration_marker_is_complete(&marker_path)? {
+        return Ok(());
+    }
+
+    let backup_root = root.join(APP_SERVER_MIGRATION_BACKUP_DIR);
+    fs::create_dir_all(&backup_root)?;
+    backup_file_once(&root.join(SETTINGS_FILE), &backup_root.join(SETTINGS_FILE))?;
+    let incompatible_workspaces = preserve_and_filter_legacy_workspaces(root, &backup_root)?;
+    let mut store = load_ui_store_for_migration(root, &backup_root)?;
+    let (mapped_thread_count, incompatible_threads) =
+        migrate_legacy_thread_metadata(root, &backup_root, &mut store)?;
+    write_codex_thread_ui_store_at(root, &store)?;
+
+    let report = serde_json::json!({
+        "version": APP_SERVER_MIGRATION_VERSION,
+        "note": "These records were not passed to Codex. Original metadata remains in place and is backed up.",
+        "threads": incompatible_threads,
+        "workspaces": incompatible_workspaces
+    });
+    write_file_atomic(
+        &backup_root.join("incompatible-legacy-metadata.json"),
+        serde_json::to_string_pretty(&report)?.as_bytes(),
+    )?;
+
+    let settings_path = root.join(SETTINGS_FILE);
+    if settings_path.is_file() {
+        if let Ok(mut settings) =
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&settings_path)?)
+        {
+            settings["defaultPermissionMode"] = serde_json::Value::String("fullAccess".to_string());
+            settings["defaultNewThreadFullAccess"] = serde_json::Value::Bool(true);
+            write_file_atomic(
+                &settings_path,
+                serde_json::to_string_pretty(&settings)?.as_bytes(),
+            )?;
+        }
+    }
+
+    let marker = serde_json::json!({
+        "version": APP_SERVER_MIGRATION_VERSION,
+        "completedAt": Utc::now(),
+        "mappedThreadCount": mapped_thread_count,
+        "incompatibleThreadCount": report["threads"].as_array().map(Vec::len).unwrap_or(0),
+        "incompatibleWorkspaceCount": report["workspaces"].as_array().map(Vec::len).unwrap_or(0),
+        "backupDirectory": APP_SERVER_MIGRATION_BACKUP_DIR,
+        "uiMetadataFile": CODEX_THREAD_UI_FILE
+    });
+    write_file_atomic(
+        &marker_path,
+        serde_json::to_string_pretty(&marker)?.as_bytes(),
+    )
+    .with_context(|| format!("Unable to record migration {}", marker_path.display()))
+}
+
+fn run_codex_settings_migration(root: &Path) -> Result<()> {
+    let marker_path = root.join(CODEX_SETTINGS_MIGRATION_MARKER);
+    if marker_path.is_file() {
+        let marker = fs::read(&marker_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+        if marker.as_ref().is_some_and(|value| {
+            value.get("version").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(CODEX_SETTINGS_MIGRATION_VERSION))
+                && value
+                    .get("completedAt")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+                    .is_some()
+        }) {
+            return Ok(());
+        }
+    }
+
+    let settings_path = root.join(SETTINGS_FILE);
+    let backup_root = root.join(CODEX_SETTINGS_MIGRATION_BACKUP_DIR);
+    fs::create_dir_all(&backup_root)?;
+    backup_file_once(&settings_path, &backup_root.join(SETTINGS_FILE))?;
+
+    if settings_path.is_file() {
+        let raw = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Unable to read {}", settings_path.display()))?;
+        let settings = serde_json::from_str::<Settings>(&raw)
+            .with_context(|| format!("Invalid settings JSON in {}", settings_path.display()))?
+            .normalized();
+        write_file_atomic(
+            &settings_path,
+            serde_json::to_string_pretty(&settings)?.as_bytes(),
+        )?;
+    }
+
+    let marker = serde_json::json!({
+        "version": CODEX_SETTINGS_MIGRATION_VERSION,
+        "completedAt": Utc::now(),
+        "backupDirectory": CODEX_SETTINGS_MIGRATION_BACKUP_DIR,
+        "note": "Settings were rewritten to the Codex-only ATController schema; the previous file is retained in the backup directory."
+    });
+    write_file_atomic(
+        &marker_path,
+        serde_json::to_string_pretty(&marker)?.as_bytes(),
+    )
+    .with_context(|| {
+        format!(
+            "Unable to record Codex settings migration {}",
+            marker_path.display()
+        )
+    })
+}
+
+fn project_shelf_migration_is_complete(path: &Path) -> bool {
+    fs::read(path)
         .ok()
-        .as_deref()
-        .map(AgentProvider::from_config_value)
-        .or_else(|| option_env!("ATCONTROLLER_AGENT_PROVIDER").map(AgentProvider::from_config_value))
-        .unwrap_or_default()
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        .is_some_and(|value| {
+            value.get("version").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(PROJECT_SHELF_MIGRATION_VERSION))
+                && value
+                    .get("completedAt")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+                    .is_some()
+        })
 }
 
-fn app_support_subdir() -> &'static str {
-    match configured_agent_provider() {
-        AgentProvider::Claude => APP_SUPPORT_SUBDIR,
-        AgentProvider::Copilot => COPILOT_APP_SUPPORT_SUBDIR,
+fn run_project_shelf_migration(root: &Path) -> Result<()> {
+    let marker_path = root.join(PROJECT_SHELF_MIGRATION_MARKER);
+    if project_shelf_migration_is_complete(&marker_path) {
+        return Ok(());
     }
+
+    let workspaces_path = root.join(WORKSPACES_FILE);
+    let backup_root = root.join(PROJECT_SHELF_MIGRATION_BACKUP_DIR);
+    fs::create_dir_all(&backup_root)?;
+    backup_file_once(&workspaces_path, &backup_root.join(WORKSPACES_FILE))?;
+    backup_file_once(
+        &root.join(CODEX_THREAD_UI_FILE),
+        &backup_root.join(CODEX_THREAD_UI_FILE),
+    )?;
+
+    let mut migrated = Vec::new();
+    let mut malformed = Vec::new();
+    let raw = fs::read(&workspaces_path)
+        .with_context(|| format!("Unable to read {}", workspaces_path.display()))?;
+    match serde_json::from_slice::<Vec<serde_json::Value>>(&raw) {
+        Ok(values) => {
+            for (index, mut value) in values.into_iter().enumerate() {
+                if !string_field(&value, "kind")
+                    .unwrap_or("local")
+                    .eq_ignore_ascii_case("local")
+                {
+                    malformed.push(serde_json::json!({
+                        "index": index,
+                        "reason": "remote legacy workspace is unsupported by local ATController",
+                        "record": value
+                    }));
+                    continue;
+                }
+                let Some(object) = value.as_object_mut() else {
+                    malformed.push(serde_json::json!({
+                        "index": index,
+                        "reason": "workspace record is not an object",
+                        "record": value
+                    }));
+                    continue;
+                };
+
+                let original_path = object
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string);
+                let Some(original_path) = original_path else {
+                    malformed.push(serde_json::json!({
+                        "index": index,
+                        "reason": "workspace record has no usable path",
+                        "record": value
+                    }));
+                    continue;
+                };
+                let resolved = fs::canonicalize(&original_path).ok();
+                let unresolved = PathBuf::from(&original_path);
+                let stored_path = resolved
+                    .as_ref()
+                    .unwrap_or(&unresolved)
+                    .to_string_lossy()
+                    .to_string();
+                let fallback_name = Path::new(&stored_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "Project".to_string());
+                let now = Utc::now();
+
+                object.insert("path".to_string(), serde_json::Value::String(stored_path));
+                object
+                    .entry("id")
+                    .or_insert_with(|| serde_json::Value::String(Uuid::new_v4().to_string()));
+                object
+                    .entry("name")
+                    .or_insert_with(|| serde_json::Value::String(fallback_name));
+                object
+                    .entry("workspaceType")
+                    .or_insert_with(|| serde_json::Value::String("local".to_string()));
+                object
+                    .entry("createdAt")
+                    .or_insert_with(|| serde_json::Value::String(now.to_rfc3339()));
+                object
+                    .entry("updatedAt")
+                    .or_insert_with(|| serde_json::Value::String(now.to_rfc3339()));
+                object
+                    .entry("lastOpenedAt")
+                    .or_insert(serde_json::Value::Null);
+                object
+                    .entry("isPinned")
+                    .or_insert(serde_json::Value::Bool(false));
+                object
+                    .entry("sortOrder")
+                    .or_insert_with(|| serde_json::Value::Number((index as i64).into()));
+                object
+                    .entry("isExpanded")
+                    .or_insert(serde_json::Value::Bool(true));
+                object
+                    .entry("iconPreference")
+                    .or_insert(serde_json::Value::Null);
+                object.insert(
+                    "isAvailable".to_string(),
+                    serde_json::Value::Bool(resolved.as_ref().is_some_and(|path| path.is_dir())),
+                );
+                object
+                    .entry("gitPullOnMasterForNewThreads")
+                    .or_insert(serde_json::Value::Bool(false));
+
+                match serde_json::from_value::<Workspace>(value.clone()) {
+                    Ok(workspace) => migrated.push(workspace),
+                    Err(error) => malformed.push(serde_json::json!({
+                        "index": index,
+                        "reason": error.to_string(),
+                        "record": value
+                    })),
+                }
+            }
+            save_workspaces_at(&workspaces_path, &migrated)?;
+        }
+        Err(error) => {
+            malformed.push(serde_json::json!({
+                "reason": format!("workspace registry is not a JSON array: {error}"),
+                "backup": format!("{PROJECT_SHELF_MIGRATION_BACKUP_DIR}/{WORKSPACES_FILE}")
+            }));
+            save_workspaces_at(&workspaces_path, &[])?;
+        }
+    }
+
+    let report = serde_json::json!({
+        "version": PROJECT_SHELF_MIGRATION_VERSION,
+        "note": "Every original record is retained in the backup. Records that could not be migrated are listed here instead of being silently discarded.",
+        "malformedRecords": malformed
+    });
+    write_file_atomic(
+        &backup_root.join("migration-report.json"),
+        serde_json::to_string_pretty(&report)?.as_bytes(),
+    )?;
+
+    let marker = serde_json::json!({
+        "version": PROJECT_SHELF_MIGRATION_VERSION,
+        "completedAt": Utc::now(),
+        "backupDirectory": PROJECT_SHELF_MIGRATION_BACKUP_DIR,
+        "projectCount": migrated.len(),
+        "malformedRecordCount": report["malformedRecords"].as_array().map(Vec::len).unwrap_or(0)
+    });
+    write_file_atomic(
+        &marker_path,
+        serde_json::to_string_pretty(&marker)?.as_bytes(),
+    )
+    .with_context(|| {
+        format!(
+            "Unable to record project shelf migration {}",
+            marker_path.display()
+        )
+    })
 }
 
 pub fn ensure_base_dirs() -> Result<PathBuf> {
+    let _guard = base_dirs_lock()
+        .lock()
+        .map_err(|_| anyhow!("Application storage lock poisoned"))?;
     let root = app_support_root()?;
-    fs::create_dir_all(root.join("agents"))?;
-    fs::create_dir_all(root.join("threads"))?;
-    if !root.join("workspaces.json").exists() {
-        write_file_atomic(&root.join("workspaces.json"), b"[]")?;
+    fs::create_dir_all(&root)?;
+    run_app_server_migration(&root)?;
+    run_codex_settings_migration(&root)?;
+    if !root.join(WORKSPACES_FILE).exists() {
+        write_file_atomic(&root.join(WORKSPACES_FILE), b"[]")?;
     }
-    if !root.join("settings.json").exists() {
-        let settings = serde_json::to_string_pretty(&Settings::default())?;
-        write_file_atomic(&root.join("settings.json"), settings.as_bytes())?;
+    if !root.join(SETTINGS_FILE).exists() {
+        write_file_atomic(
+            &root.join(SETTINGS_FILE),
+            serde_json::to_string_pretty(&Settings::default())?.as_bytes(),
+        )?;
     }
+    run_project_shelf_migration(&root)?;
     Ok(root)
 }
 
 fn workspaces_file() -> Result<PathBuf> {
-    Ok(ensure_base_dirs()?.join("workspaces.json"))
+    Ok(ensure_base_dirs()?.join(WORKSPACES_FILE))
 }
 
 fn settings_file() -> Result<PathBuf> {
-    Ok(ensure_base_dirs()?.join("settings.json"))
+    Ok(ensure_base_dirs()?.join(SETTINGS_FILE))
 }
 
 pub fn load_settings() -> Result<Settings> {
     let file = settings_file()?;
-    let raw = fs::read_to_string(file)?;
-    let settings: Settings = serde_json::from_str(&raw).unwrap_or_default();
+    let raw =
+        fs::read_to_string(&file).with_context(|| format!("Unable to read {}", file.display()))?;
+    let settings: Settings = serde_json::from_str(&raw)
+        .with_context(|| format!("Invalid settings JSON in {}", file.display()))?;
     Ok(settings.normalized())
 }
 
 pub fn save_settings(settings: &Settings) -> Result<()> {
     let file = settings_file()?;
-    let raw = serde_json::to_string_pretty(&settings.clone().normalized())?;
-    write_file_atomic(&file, raw.as_bytes())?;
-    Ok(())
+    write_file_atomic(
+        &file,
+        serde_json::to_string_pretty(&settings.clone().normalized())?.as_bytes(),
+    )
+}
+
+fn parse_local_workspaces(raw: &str) -> Result<Vec<Workspace>> {
+    let values: Vec<serde_json::Value> = serde_json::from_str(raw)?;
+    let mut result = Vec::new();
+    for value in values {
+        let kind = string_field(&value, "kind").unwrap_or("local");
+        if !kind.eq_ignore_ascii_case("local") {
+            continue;
+        }
+        result.push(serde_json::from_value(value)?);
+    }
+    Ok(result)
 }
 
 pub fn load_workspaces() -> Result<Vec<Workspace>> {
     let file = workspaces_file()?;
-    let raw = fs::read_to_string(file)?;
-    let list: Vec<Workspace> = serde_json::from_str(&raw).unwrap_or_default();
-    Ok(list)
+    let raw =
+        fs::read_to_string(&file).with_context(|| format!("Unable to read {}", file.display()))?;
+    let mut workspaces = parse_local_workspaces(&raw)
+        .with_context(|| format!("Invalid workspace JSON in {}", file.display()))?;
+    for workspace in &mut workspaces {
+        workspace.workspace_type = "local".to_string();
+        workspace.is_available = Path::new(&workspace.path).is_dir();
+    }
+    sort_workspaces(&mut workspaces);
+    Ok(workspaces)
 }
 
-pub fn save_workspaces(workspaces: &[Workspace]) -> Result<()> {
-    let file = workspaces_file()?;
-    let raw = serde_json::to_string_pretty(workspaces)?;
-    write_file_atomic(&file, raw.as_bytes())?;
-    Ok(())
+fn sort_workspaces(workspaces: &mut [Workspace]) {
+    workspaces.sort_by(|left, right| {
+        right
+            .is_pinned
+            .cmp(&left.is_pinned)
+            .then_with(|| left.sort_order.cmp(&right.sort_order))
+            .then_with(|| left.created_at.cmp(&right.created_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn save_workspaces_at(path: &Path, workspaces: &[Workspace]) -> Result<()> {
+    write_file_atomic(path, serde_json::to_string_pretty(workspaces)?.as_bytes())
+}
+
+fn save_workspaces(workspaces: &[Workspace]) -> Result<()> {
+    save_workspaces_at(&workspaces_file()?, workspaces)
+}
+
+fn canonical_workspace_path(path: &str) -> Result<PathBuf> {
+    let canonical_path = fs::canonicalize(path)
+        .with_context(|| format!("Unable to resolve workspace path: {path}"))?;
+    if !canonical_path.is_dir() {
+        return Err(anyhow!("Workspace path is not a directory"));
+    }
+    Ok(canonical_path)
+}
+
+fn workspace_path_matches(workspace: &Workspace, canonical_path: &Path) -> bool {
+    fs::canonicalize(&workspace.path)
+        .map(|known| known == canonical_path)
+        .unwrap_or_else(|_| Path::new(&workspace.path) == canonical_path)
 }
 
 pub fn add_workspace(path: &str) -> Result<Workspace> {
-    let canonical_path = fs::canonicalize(path)
-        .with_context(|| format!("Unable to resolve workspace path: {path}"))?;
+    let canonical_path = canonical_workspace_path(path)?;
     let canonical = canonical_path.to_string_lossy().to_string();
-
+    let _guard = workspace_registry_lock()
+        .lock()
+        .map_err(|_| anyhow!("Workspace registry lock poisoned"))?;
     let mut workspaces = load_workspaces()?;
     if let Some(existing) = workspaces
         .iter()
-        .find(|workspace| workspace.path == canonical)
+        .find(|workspace| workspace_path_matches(workspace, &canonical_path))
     {
         return Ok(existing.clone());
     }
-
     let now = Utc::now();
+    let sort_order = workspaces
+        .iter()
+        .map(|workspace| workspace.sort_order)
+        .max()
+        .unwrap_or(-1)
+        + 1;
     let workspace = Workspace {
         id: Uuid::new_v4().to_string(),
         name: canonical_path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Workspace".to_string()),
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Project".to_string()),
         path: canonical,
-        kind: WorkspaceKind::Local,
-        rdev_ssh_command: None,
-        ssh_command: None,
-        remote_path: None,
+        workspace_type: "local".to_string(),
+        last_opened_at: Some(now),
+        is_pinned: false,
+        sort_order,
+        is_expanded: true,
+        icon_preference: None,
+        is_available: true,
         git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
     };
-
     workspaces.push(workspace.clone());
     save_workspaces(&workspaces)?;
-    fs::create_dir_all(thread_workspace_dir(&workspace.id)?)?;
-
     Ok(workspace)
 }
 
-pub fn add_rdev_workspace(rdev_ssh_command: &str, display_name: Option<&str>) -> Result<Workspace> {
-    let normalized_command = rdev_ssh_command.trim();
-    if normalized_command.is_empty() {
-        return Err(anyhow!("Please enter an rdev ssh command."));
+pub fn clone_repository(repository: &str, destination_parent: &str) -> Result<Workspace> {
+    let repository = repository.trim();
+    if repository.is_empty()
+        || repository.len() > 2_048
+        || repository.starts_with('-')
+        || repository.chars().any(char::is_control)
+    {
+        return Err(anyhow!("Invalid repository location"));
     }
-
-    if !normalized_command.starts_with("rdev ssh") {
+    let is_remote = ["https://", "http://", "ssh://", "git://"]
+        .iter()
+        .any(|prefix| repository.starts_with(prefix))
+        || (repository.starts_with("git@") && repository.contains(':'));
+    let is_local = Path::new(repository).is_absolute() && Path::new(repository).exists();
+    if !is_remote && !is_local {
         return Err(anyhow!(
-            "rdev command must start with `rdev ssh` (example: rdev ssh <workspace>/<env>)"
+            "Repository must be an HTTPS, SSH, git URL, or an existing absolute local path"
+        ));
+    }
+    if (repository.starts_with("https://") || repository.starts_with("http://"))
+        && repository
+            .split("://")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .is_some_and(|authority| authority.contains('@'))
+    {
+        return Err(anyhow!(
+            "Repository URLs containing credentials are not accepted; use Git credential management instead"
         ));
     }
 
-    let mut workspaces = load_workspaces()?;
-    if let Some(existing) = workspaces.iter().find(|workspace| {
-        workspace.kind == WorkspaceKind::Rdev
-            && workspace.rdev_ssh_command.as_deref() == Some(normalized_command)
-    }) {
-        return Ok(existing.clone());
-    }
-
-    let now = Utc::now();
-    let trimmed_display_name = display_name.unwrap_or_default().trim().to_string();
-    let fallback_name = normalized_command
-        .split_whitespace()
-        .skip(2)
-        .find(|segment| !segment.starts_with('-'))
-        .unwrap_or("rdev")
-        .split('/')
-        .next_back()
-        .unwrap_or("rdev")
-        .to_string();
-    let workspace_name = if trimmed_display_name.is_empty() {
-        fallback_name
-    } else {
-        trimmed_display_name
-    };
-
-    let workspace = Workspace {
-        id: Uuid::new_v4().to_string(),
-        name: workspace_name,
-        path: format!("rdev-workspace-{}", Uuid::new_v4()),
-        kind: WorkspaceKind::Rdev,
-        rdev_ssh_command: Some(normalized_command.to_string()),
-        ssh_command: None,
-        remote_path: None,
-        git_pull_on_master_for_new_threads: false,
-        created_at: now,
-        updated_at: now,
-    };
-
-    workspaces.push(workspace.clone());
-    save_workspaces(&workspaces)?;
-    fs::create_dir_all(thread_workspace_dir(&workspace.id)?)?;
-
-    Ok(workspace)
-}
-
-pub fn add_ssh_workspace(
-    ssh_command: &str,
-    display_name: Option<&str>,
-    remote_path: Option<&str>,
-) -> Result<Workspace> {
-    let normalized_command = ssh_command.trim();
-    if normalized_command.is_empty() {
-        return Err(anyhow!("Please enter an ssh command."));
-    }
-
-    let first_token = normalized_command
-        .split_whitespace()
+    let parent = canonical_workspace_path(destination_parent)?;
+    let name_source = repository
+        .split(['?', '#'])
         .next()
-        .unwrap_or_default();
-    if first_token != "ssh" {
+        .unwrap_or(repository)
+        .trim_end_matches(['/', '\\']);
+    let repository_name = name_source
+        .rsplit(['/', '\\', ':'])
+        .next()
+        .unwrap_or_default()
+        .strip_suffix(".git")
+        .unwrap_or_else(|| {
+            name_source
+                .rsplit(['/', '\\', ':'])
+                .next()
+                .unwrap_or_default()
+        })
+        .trim();
+    if repository_name.is_empty()
+        || repository_name == "."
+        || repository_name == ".."
+        || repository_name.chars().any(|character| {
+            character.is_control() || character == '/' || character == '\\' || character == ':'
+        })
+    {
         return Err(anyhow!(
-            "SSH command must start with `ssh` (example: ssh user@host)"
+            "Unable to derive a safe project name from the repository"
+        ));
+    }
+    let destination = parent.join(repository_name);
+    if destination.exists() {
+        return Err(anyhow!(
+            "A file or folder named `{repository_name}` already exists in the destination"
         ));
     }
 
-    let mut workspaces = load_workspaces()?;
-    if let Some(existing) = workspaces.iter().find(|workspace| {
-        workspace.kind == WorkspaceKind::Ssh
-            && workspace.ssh_command.as_deref() == Some(normalized_command)
-    }) {
-        return Ok(existing.clone());
-    }
-
-    let now = Utc::now();
-    let trimmed_display_name = display_name.unwrap_or_default().trim().to_string();
-    let fallback_name = normalized_command
-        .split_whitespace()
-        .skip(1)
-        .find(|segment| !segment.starts_with('-'))
-        .unwrap_or("ssh")
-        .split('@')
-        .next_back()
-        .unwrap_or("ssh")
-        .to_string();
-    let workspace_name = if trimmed_display_name.is_empty() {
-        fallback_name
+    let git = if Path::new("/usr/bin/git").is_file() {
+        Path::new("/usr/bin/git")
     } else {
-        trimmed_display_name
+        Path::new("git")
     };
-    let trimmed_remote_path = remote_path
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string());
-
-    let workspace = Workspace {
-        id: Uuid::new_v4().to_string(),
-        name: workspace_name,
-        path: format!("ssh-workspace-{}", Uuid::new_v4()),
-        kind: WorkspaceKind::Ssh,
-        rdev_ssh_command: None,
-        ssh_command: Some(normalized_command.to_string()),
-        remote_path: trimmed_remote_path,
-        git_pull_on_master_for_new_threads: false,
-        created_at: now,
-        updated_at: now,
-    };
-
-    workspaces.push(workspace.clone());
-    save_workspaces(&workspaces)?;
-    fs::create_dir_all(thread_workspace_dir(&workspace.id)?)?;
-
-    Ok(workspace)
+    let status = Command::new(git)
+        .arg("clone")
+        .arg("--")
+        .arg(repository)
+        .arg(&destination)
+        .status()
+        .context("Unable to launch Git")?;
+    if !status.success() {
+        return Err(anyhow!("Git clone failed with {status}"));
+    }
+    add_workspace(&destination.to_string_lossy())
 }
 
 pub fn remove_workspace(workspace_id: &str) -> Result<bool> {
     let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let _guard = workspace_registry_lock()
+        .lock()
+        .map_err(|_| anyhow!("Workspace registry lock poisoned"))?;
     let mut workspaces = load_workspaces()?;
     let original_len = workspaces.len();
     workspaces.retain(|workspace| workspace.id != workspace_id);
     if workspaces.len() == original_len {
         return Ok(false);
     }
-
     save_workspaces(&workspaces)?;
-
-    let workspace_threads_dir = thread_workspace_dir(workspace_id)?;
-    if workspace_threads_dir.exists() {
-        fs::remove_dir_all(workspace_threads_dir)?;
-    }
-
     Ok(true)
 }
 
@@ -351,6 +925,9 @@ pub fn set_workspace_git_pull_on_master_for_new_threads(
     enabled: bool,
 ) -> Result<Workspace> {
     let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let _guard = workspace_registry_lock()
+        .lock()
+        .map_err(|_| anyhow!("Workspace registry lock poisoned"))?;
     let mut workspaces = load_workspaces()?;
     let workspace = workspaces
         .iter_mut()
@@ -363,1004 +940,233 @@ pub fn set_workspace_git_pull_on_master_for_new_threads(
     Ok(updated)
 }
 
-#[allow(dead_code)]
-pub fn set_workspace_remote_path(
-    workspace_id: &str,
-    remote_path: Option<&str>,
-) -> Result<Workspace> {
+pub fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>> {
+    let _guard = workspace_registry_lock()
+        .lock()
+        .map_err(|_| anyhow!("Workspace registry lock poisoned"))?;
+    let mut workspaces = load_workspaces()?;
+    let mut seen = HashSet::new();
+    let requested = workspace_ids
+        .into_iter()
+        .map(|id| validate_storage_segment(&id, "workspace id").map(str::to_string))
+        .collect::<Result<Vec<_>>>()?;
+    let mut ordered = Vec::with_capacity(workspaces.len());
+    for id in requested {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(index) = workspaces.iter().position(|workspace| workspace.id == id) {
+            ordered.push(workspaces.remove(index));
+        }
+    }
+    ordered.extend(workspaces);
+    for (index, workspace) in ordered.iter_mut().enumerate() {
+        workspace.sort_order = index as i64;
+        workspace.updated_at = Utc::now();
+    }
+    sort_workspaces(&mut ordered);
+    save_workspaces(&ordered)?;
+    Ok(ordered)
+}
+
+pub fn update_workspace(workspace_id: &str, update: WorkspaceUpdate) -> Result<Workspace> {
     let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let _guard = workspace_registry_lock()
+        .lock()
+        .map_err(|_| anyhow!("Workspace registry lock poisoned"))?;
     let mut workspaces = load_workspaces()?;
     let workspace = workspaces
         .iter_mut()
         .find(|workspace| workspace.id == workspace_id)
-        .ok_or_else(|| anyhow!("Workspace not found"))?;
+        .ok_or_else(|| anyhow!("Project not found"))?;
 
-    workspace.remote_path = remote_path
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string());
+    if let Some(display_name) = update.display_name {
+        let display_name = display_name.trim();
+        if display_name.is_empty() || display_name.chars().count() > 120 {
+            return Err(anyhow!(
+                "Project display name must contain 1 to 120 characters"
+            ));
+        }
+        if display_name.chars().any(char::is_control) {
+            return Err(anyhow!("Project display name contains invalid characters"));
+        }
+        workspace.name = display_name.to_string();
+    }
+    if let Some(is_pinned) = update.is_pinned {
+        workspace.is_pinned = is_pinned;
+    }
+    if let Some(is_expanded) = update.is_expanded {
+        workspace.is_expanded = is_expanded;
+    }
+    if update.clear_icon_preference {
+        workspace.icon_preference = None;
+    } else if let Some(icon_preference) = update.icon_preference {
+        let icon_preference = icon_preference.trim();
+        if icon_preference.is_empty()
+            || icon_preference.len() > 40
+            || !icon_preference
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return Err(anyhow!("Invalid project icon preference"));
+        }
+        workspace.icon_preference = Some(icon_preference.to_string());
+    }
+    if update.mark_opened {
+        workspace.last_opened_at = Some(Utc::now());
+    }
+    workspace.updated_at = Utc::now();
+    let updated = workspace.clone();
+    sort_workspaces(&mut workspaces);
+    save_workspaces(&workspaces)?;
+    Ok(updated)
+}
+
+pub fn relocate_workspace(workspace_id: &str, path: &str) -> Result<Workspace> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let canonical_path = canonical_workspace_path(path)?;
+    let canonical = canonical_path.to_string_lossy().to_string();
+    let _guard = workspace_registry_lock()
+        .lock()
+        .map_err(|_| anyhow!("Workspace registry lock poisoned"))?;
+    let mut workspaces = load_workspaces()?;
+    if workspaces.iter().any(|workspace| {
+        workspace.id != workspace_id && workspace_path_matches(workspace, &canonical_path)
+    }) {
+        return Err(anyhow!(
+            "That folder is already represented by another ATController project"
+        ));
+    }
+    let workspace = workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| anyhow!("Project not found"))?;
+    workspace.path = canonical;
+    workspace.is_available = true;
+    workspace.last_opened_at = Some(Utc::now());
     workspace.updated_at = Utc::now();
     let updated = workspace.clone();
     save_workspaces(&workspaces)?;
     Ok(updated)
 }
 
-pub fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>> {
-    let mut workspaces = load_workspaces()?;
-    if workspaces.len() <= 1 {
-        return Ok(workspaces);
-    }
-
-    let mut requested_ids = Vec::new();
-    for workspace_id in workspace_ids {
-        let normalized = validate_storage_segment(&workspace_id, "workspace id")?.to_string();
-        if requested_ids
-            .iter()
-            .any(|existing: &String| existing == &normalized)
-        {
-            continue;
-        }
-        requested_ids.push(normalized);
-    }
-
-    if requested_ids.is_empty() {
-        return Ok(workspaces);
-    }
-
-    let mut ordered = Vec::with_capacity(workspaces.len());
-    for workspace_id in requested_ids {
-        if let Some(index) = workspaces
-            .iter()
-            .position(|workspace| workspace.id == workspace_id)
-        {
-            ordered.push(workspaces.remove(index));
-        }
-    }
-    ordered.extend(workspaces);
-    save_workspaces(&ordered)?;
-    Ok(ordered)
-}
-
-pub fn thread_workspace_dir(workspace_id: &str) -> Result<PathBuf> {
-    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
-    Ok(ensure_base_dirs()?.join("threads").join(workspace_id))
-}
-
-pub fn thread_dir(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
-    let thread_id = validate_storage_segment(thread_id, "thread id")?;
-    Ok(thread_workspace_dir(workspace_id)?.join(thread_id))
-}
-
-pub fn runs_dir(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
-    Ok(thread_dir(workspace_id, thread_id)?.join("runs"))
-}
-
-fn latest_thread_run_pointer_path(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
-    Ok(thread_dir(workspace_id, thread_id)?.join("latest-run.txt"))
-}
-
-pub fn set_latest_thread_run_id(workspace_id: &str, thread_id: &str, run_id: &str) -> Result<()> {
-    let run_id = validate_storage_segment(run_id, "run id")?;
-    let path = latest_thread_run_pointer_path(workspace_id, thread_id)?;
-    write_file_atomic(&path, run_id.as_bytes())
-}
-
-pub fn latest_thread_run_dir(workspace_id: &str, thread_id: &str) -> Result<Option<PathBuf>> {
-    let path = latest_thread_run_pointer_path(workspace_id, thread_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let raw = fs::read_to_string(path)?;
-    let Ok(run_id) = validate_storage_segment(&raw, "run id") else {
-        return Ok(None);
-    };
-
-    let run_dir = runs_dir(workspace_id, thread_id)?.join(run_id);
-    if run_dir.is_dir() {
-        Ok(Some(run_dir))
-    } else {
-        Ok(None)
-    }
-}
-
-pub fn workspace_shell_sessions_dir(workspace_id: &str) -> Result<PathBuf> {
-    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
-    Ok(ensure_base_dirs()?
-        .join("workspace-shells")
-        .join(workspace_id))
-}
-
-pub fn create_thread(
-    workspace_id: &str,
-    agent_id: Option<String>,
-    full_access: bool,
-) -> Result<ThreadMetadata> {
-    let now = Utc::now();
-    let agent_id = agent_id.unwrap_or_else(|| configured_agent_provider().agent_id().to_string());
-    let thread = ThreadMetadata {
-        id: Uuid::new_v4().to_string(),
-        workspace_id: workspace_id.to_string(),
-        agent_id,
-        full_access,
-        enabled_skills: Vec::new(),
-        created_at: now,
-        updated_at: now,
-        title: "New thread".to_string(),
-        is_archived: false,
-        last_run_status: ThreadRunStatus::Idle,
-        last_run_started_at: None,
-        last_run_ended_at: None,
-        claude_session_id: None,
-        copilot_session_id: None,
-        forked_from_claude_session_id: None,
-        pending_fork_source_claude_session_id: None,
-        pending_fork_known_child_session_ids: Vec::new(),
-        pending_fork_requested_at: None,
-        pending_fork_launch_consumed: false,
-        last_resume_at: None,
-        last_new_session_at: None,
-    };
-
-    initialize_thread_storage(&thread)?;
-    Ok(thread)
-}
-
-fn initialize_thread_storage(thread: &ThreadMetadata) -> Result<()> {
-    write_thread_metadata(thread)?;
-    let dir = thread_dir(&thread.workspace_id, &thread.id)?;
-    fs::create_dir_all(dir.join("runs"))?;
-    let transcript_path = dir.join("transcript.jsonl");
-    if !transcript_path.exists() {
-        File::create(transcript_path)?;
-    }
-
-    Ok(())
-}
-
-fn normalize_optional_session_id(value: &str) -> Option<String> {
-    let normalized = value.trim();
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized.to_string())
-    }
-}
-
-fn normalize_uuid_session_id(value: &str) -> Option<String> {
-    let normalized = normalize_optional_session_id(value)?;
-    if Uuid::parse_str(&normalized).is_ok() {
-        Some(normalized)
-    } else {
-        None
-    }
-}
-
-fn thread_metadata_path(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
-    Ok(thread_dir(workspace_id, thread_id)?.join("thread.json"))
-}
-
-fn write_thread_metadata_unlocked(thread: &ThreadMetadata) -> Result<()> {
-    let dir = thread_dir(&thread.workspace_id, &thread.id)?;
-    fs::create_dir_all(&dir)?;
-    let raw = serde_json::to_string_pretty(thread)?;
-    write_file_atomic(
-        &thread_metadata_path(&thread.workspace_id, &thread.id)?,
-        raw.as_bytes(),
-    )?;
-    Ok(())
-}
-
-fn read_thread_metadata_unlocked(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
-    let raw = fs::read_to_string(thread_metadata_path(workspace_id, thread_id)?)?;
-    Ok(serde_json::from_str(&raw)?)
-}
-
-fn claude_session_id_claimed_by_other_thread_unlocked(
-    workspace_id: &str,
-    thread_id: &str,
-    claude_session_id: &str,
-) -> Result<bool> {
-    let normalized = claude_session_id.trim();
-    if normalized.is_empty() {
-        return Ok(false);
-    }
-
-    let threads_root = thread_workspace_dir(workspace_id)?;
-    if !threads_root.exists() {
-        return Ok(false);
-    }
-
-    for entry in fs::read_dir(threads_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-
-        let Some(candidate_thread_id) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if candidate_thread_id == thread_id {
-            continue;
-        }
-
-        let metadata_path = path.join("thread.json");
-        if !metadata_path.is_file() {
-            continue;
-        }
-
-        let raw = fs::read_to_string(metadata_path)?;
-        let metadata: ThreadMetadata = serde_json::from_str(&raw)?;
-        if metadata.is_archived {
-            continue;
-        }
-        if metadata
-            .claude_session_id
-            .as_deref()
-            .is_some_and(|existing| existing == normalized)
-        {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-fn copilot_session_id_claimed_by_other_thread_unlocked(
-    workspace_id: &str,
-    thread_id: &str,
-    copilot_session_id: &str,
-) -> Result<bool> {
-    let normalized = copilot_session_id.trim();
-    if normalized.is_empty() {
-        return Ok(false);
-    }
-
-    let base = thread_workspace_dir(workspace_id)?;
-    if !base.exists() {
-        return Ok(false);
-    }
-
-    for entry in fs::read_dir(base)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
-        let Some(candidate_thread_id) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if candidate_thread_id == thread_id {
-            continue;
-        }
-
-        let metadata_path = path.join("thread.json");
-        if !metadata_path.is_file() {
-            continue;
-        }
-
-        let raw = fs::read_to_string(metadata_path)?;
-        let metadata: ThreadMetadata = serde_json::from_str(&raw)?;
-        if metadata.is_archived {
-            continue;
-        }
-        if metadata
-            .copilot_session_id
-            .as_deref()
-            .is_some_and(|existing| existing == normalized)
-        {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-fn mutate_thread_metadata<F>(
-    workspace_id: &str,
-    thread_id: &str,
-    mutate: F,
-) -> Result<ThreadMetadata>
-where
-    F: FnOnce(&mut ThreadMetadata) -> Result<()>,
-{
-    let _guard = thread_metadata_lock()
-        .lock()
-        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
-    let mut thread = read_thread_metadata_unlocked(workspace_id, thread_id)?;
-    mutate(&mut thread)?;
-    write_thread_metadata_unlocked(&thread)?;
-    Ok(thread)
-}
-
-pub fn write_thread_metadata(thread: &ThreadMetadata) -> Result<()> {
-    let _guard = thread_metadata_lock()
-        .lock()
-        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
-    write_thread_metadata_unlocked(thread)
-}
-
-pub fn read_thread_metadata(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
-    read_thread_metadata_unlocked(workspace_id, thread_id)
-}
-
-pub fn list_threads(workspace_id: &str) -> Result<Vec<ThreadMetadata>> {
-    let base = thread_workspace_dir(workspace_id)?;
-    if !base.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut threads = Vec::new();
-    for entry in fs::read_dir(base)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let metadata_path = path.join("thread.json");
-        if !metadata_path.exists() {
-            continue;
-        }
-        let raw = fs::read_to_string(metadata_path)?;
-        let mut metadata: ThreadMetadata = serde_json::from_str(&raw)?;
-        if metadata.is_archived {
-            continue;
-        }
-        // Reset Running → Idle in returned data only (no disk write).
-        // Persistent cleanup happens once at startup via cleanup_stale_running_threads.
-        if matches!(metadata.last_run_status, ThreadRunStatus::Running) {
-            metadata.last_run_status = ThreadRunStatus::Idle;
-        }
-        threads.push(metadata);
-    }
-
-    threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(threads)
-}
-
-/// Persists Running → Idle for all stale threads. Call once on startup.
-///
-/// Uses `mutate_thread_metadata` for TOCTOU safety and continues past
-/// corrupt/unreadable thread directories so a single bad file does not
-/// block cleanup of the remaining threads.
-pub fn cleanup_stale_running_threads(workspace_id: &str) -> Result<()> {
-    let base = thread_workspace_dir(workspace_id)?;
-    if !base.exists() {
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(base)? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let metadata_path = path.join("thread.json");
-        if !metadata_path.exists() {
-            continue;
-        }
-        // Read the raw file to check status before taking the lock.
-        let raw = match fs::read_to_string(&metadata_path) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let metadata: ThreadMetadata = match serde_json::from_str(&raw) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if matches!(metadata.last_run_status, ThreadRunStatus::Running) {
-            let thread_id = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let _ = mutate_thread_metadata(workspace_id, &thread_id, |t| {
-                if matches!(t.last_run_status, ThreadRunStatus::Running) {
-                    t.last_run_status = ThreadRunStatus::Idle;
-                    t.updated_at = Utc::now();
-                }
-                Ok(())
-            });
-        }
-    }
-
-    Ok(())
-}
-
-pub fn set_thread_full_access(
-    workspace_id: &str,
-    thread_id: &str,
-    full_access: bool,
-) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.full_access = full_access;
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn clear_thread_claude_session(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.claude_session_id = None;
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn clear_thread_agent_session(
-    workspace_id: &str,
-    thread_id: &str,
-    agent_provider: AgentProvider,
-) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        if AgentProvider::from_agent_id(&thread.agent_id) != agent_provider {
-            return Err(anyhow!("Thread provider does not match requested session clear"));
-        }
-        match agent_provider {
-            AgentProvider::Claude => {
-                thread.claude_session_id = None;
-                thread.pending_fork_source_claude_session_id = None;
-                thread.pending_fork_known_child_session_ids.clear();
-                thread.pending_fork_requested_at = None;
-                thread.pending_fork_launch_consumed = false;
-            }
-            AgentProvider::Copilot => {
-                thread.copilot_session_id = None;
-            }
-        }
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn set_thread_claude_session_id(
-    workspace_id: &str,
-    thread_id: &str,
-    claude_session_id: &str,
-) -> Result<ThreadMetadata> {
-    let normalized = normalize_optional_session_id(claude_session_id);
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        if AgentProvider::from_agent_id(&thread.agent_id) != AgentProvider::Claude {
-            return Err(anyhow!("Claude session ids can only be assigned to Claude threads"));
-        }
-        if let Some(session_id) = normalized.as_deref() {
-            if claude_session_id_claimed_by_other_thread_unlocked(
-                workspace_id,
-                thread_id,
-                session_id,
-            )? {
-                return Err(anyhow!(
-                    "Claude session id is already claimed by another thread"
-                ));
-            }
-        }
-        thread.claude_session_id = normalized.clone();
-        if normalized.is_some() {
-            if let Some(source_session_id) = thread.pending_fork_source_claude_session_id.clone() {
-                thread.forked_from_claude_session_id = Some(source_session_id);
-                thread.pending_fork_source_claude_session_id = None;
-                thread.pending_fork_known_child_session_ids.clear();
-                thread.pending_fork_requested_at = None;
-                thread.pending_fork_launch_consumed = false;
-            }
-        }
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn set_thread_claude_session_id_if_missing(
-    workspace_id: &str,
-    thread_id: &str,
-    claude_session_id: &str,
-) -> Result<Option<ThreadMetadata>> {
-    let Some(normalized) = normalize_optional_session_id(claude_session_id) else {
-        return Ok(None);
-    };
-
-    let _guard = thread_metadata_lock()
-        .lock()
-        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
-    let mut thread = read_thread_metadata_unlocked(workspace_id, thread_id)?;
-    if AgentProvider::from_agent_id(&thread.agent_id) != AgentProvider::Claude {
-        return Err(anyhow!("Claude session ids can only be assigned to Claude threads"));
-    }
-    if thread.claude_session_id.is_some() {
-        return Ok(None);
-    }
-    if claude_session_id_claimed_by_other_thread_unlocked(workspace_id, thread_id, &normalized)? {
-        return Err(anyhow!(
-            "Claude session id is already claimed by another thread"
-        ));
-    }
-
-    thread.claude_session_id = Some(normalized.to_string());
-    thread.updated_at = Utc::now();
-    write_thread_metadata_unlocked(&thread)?;
-    Ok(Some(thread))
-}
-
-pub fn set_thread_copilot_session_id_if_missing(
-    workspace_id: &str,
-    thread_id: &str,
-    copilot_session_id: &str,
-) -> Result<Option<ThreadMetadata>> {
-    let Some(normalized) = normalize_optional_session_id(copilot_session_id) else {
-        return Ok(None);
-    };
-
-    let _guard = thread_metadata_lock()
-        .lock()
-        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
-    let mut thread = read_thread_metadata_unlocked(workspace_id, thread_id)?;
-    if AgentProvider::from_agent_id(&thread.agent_id) != AgentProvider::Copilot {
-        return Err(anyhow!(
-            "Copilot session ids can only be assigned to Copilot threads"
-        ));
-    }
-    if thread.copilot_session_id.is_some() {
-        return Ok(None);
-    }
-    if copilot_session_id_claimed_by_other_thread_unlocked(workspace_id, thread_id, &normalized)? {
-        return Err(anyhow!(
-            "Copilot session id is already claimed by another thread"
-        ));
-    }
-
-    thread.copilot_session_id = Some(normalized.to_string());
-    thread.updated_at = Utc::now();
-    write_thread_metadata_unlocked(&thread)?;
-    Ok(Some(thread))
-}
-
-pub fn create_forked_thread(
-    workspace_id: &str,
-    source_thread_id: &str,
-    known_child_session_ids: Vec<String>,
-) -> Result<ThreadMetadata> {
-    let source_thread = read_thread_metadata(workspace_id, source_thread_id)?;
-    if AgentProvider::from_agent_id(&source_thread.agent_id) != AgentProvider::Claude {
-        return Err(anyhow!("Thread forking is only supported for Claude threads"));
-    }
-    let source_claude_session_id = source_thread
-        .claude_session_id
-        .as_deref()
-        .and_then(normalize_uuid_session_id)
-        .ok_or_else(|| anyhow!("Source thread does not have a valid Claude session id"))?;
-    let now = Utc::now();
-    let thread = ThreadMetadata {
-        id: Uuid::new_v4().to_string(),
-        workspace_id: workspace_id.to_string(),
-        agent_id: source_thread.agent_id.clone(),
-        full_access: source_thread.full_access,
-        enabled_skills: source_thread.enabled_skills.clone(),
-        created_at: now,
-        updated_at: now,
-        title: format!("{} (Fork)", source_thread.title),
-        is_archived: false,
-        last_run_status: ThreadRunStatus::Idle,
-        last_run_started_at: None,
-        last_run_ended_at: None,
-        claude_session_id: None,
-        copilot_session_id: None,
-        forked_from_claude_session_id: Some(source_claude_session_id.clone()),
-        pending_fork_source_claude_session_id: Some(source_claude_session_id),
-        pending_fork_known_child_session_ids: known_child_session_ids,
-        pending_fork_requested_at: Some(now),
-        pending_fork_launch_consumed: false,
-        last_resume_at: None,
-        last_new_session_at: None,
-    };
-
-    initialize_thread_storage(&thread)?;
-    Ok(thread)
-}
-
-pub fn fork_thread_from_ui(
-    workspace_id: &str,
-    source_thread_id: &str,
-    source_title: &str,
-    forked_title: &str,
-    known_child_session_ids: Vec<String>,
-) -> Result<ForkThreadResult> {
-    let source_title = normalize_thread_title_input(source_title, "Source thread name")?;
-    let forked_title = normalize_thread_title_input(forked_title, "Forked thread name")?;
-    if source_title == forked_title {
-        return Err(anyhow!("Source and forked thread names must be different"));
-    }
-
-    let _guard = thread_metadata_lock()
-        .lock()
-        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
-    let mut source_thread = read_thread_metadata_unlocked(workspace_id, source_thread_id)?;
-    if AgentProvider::from_agent_id(&source_thread.agent_id) != AgentProvider::Claude {
-        return Err(anyhow!("Thread forking is only supported for Claude threads"));
-    }
-    let source_claude_session_id = source_thread
-        .claude_session_id
-        .as_deref()
-        .and_then(normalize_uuid_session_id)
-        .ok_or_else(|| anyhow!("Source thread does not have a valid Claude session id"))?;
-    let now = Utc::now();
-
-    source_thread.title = source_title;
-    source_thread.updated_at = now;
-
-    let forked_thread = ThreadMetadata {
-        id: Uuid::new_v4().to_string(),
-        workspace_id: workspace_id.to_string(),
-        agent_id: source_thread.agent_id.clone(),
-        full_access: source_thread.full_access,
-        enabled_skills: source_thread.enabled_skills.clone(),
-        created_at: now,
-        updated_at: now,
-        title: forked_title,
-        is_archived: false,
-        last_run_status: ThreadRunStatus::Idle,
-        last_run_started_at: None,
-        last_run_ended_at: None,
-        claude_session_id: None,
-        copilot_session_id: None,
-        forked_from_claude_session_id: Some(source_claude_session_id.clone()),
-        pending_fork_source_claude_session_id: Some(source_claude_session_id),
-        pending_fork_known_child_session_ids: known_child_session_ids,
-        pending_fork_requested_at: Some(now),
-        pending_fork_launch_consumed: false,
-        last_resume_at: None,
-        last_new_session_at: None,
-    };
-
-    write_thread_metadata_unlocked(&source_thread)?;
-    write_thread_metadata_unlocked(&forked_thread)?;
-    let dir = thread_dir(&forked_thread.workspace_id, &forked_thread.id)?;
-    fs::create_dir_all(dir.join("runs"))?;
-    let transcript_path = dir.join("transcript.jsonl");
-    if !transcript_path.exists() {
-        File::create(transcript_path)?;
-    }
-
-    Ok(ForkThreadResult {
-        source_thread,
-        forked_thread,
-    })
-}
-
-pub fn set_thread_pending_fork(
-    workspace_id: &str,
-    thread_id: &str,
-    source_claude_session_id: &str,
-    known_child_session_ids: Vec<String>,
-    requested_at: DateTime<Utc>,
-) -> Result<ThreadMetadata> {
-    let source_claude_session_id = normalize_uuid_session_id(source_claude_session_id)
-        .ok_or_else(|| anyhow!("Source Claude session id must be a UUID"))?;
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.pending_fork_source_claude_session_id = Some(source_claude_session_id.clone());
-        thread.pending_fork_known_child_session_ids = known_child_session_ids;
-        thread.pending_fork_requested_at = Some(requested_at);
-        thread.pending_fork_launch_consumed = false;
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn commit_prepared_thread_pending_fork(
-    workspace_id: &str,
-    thread_id: &str,
-    prepared: &PreparedNativeFork,
-) -> Result<ThreadMetadata> {
-    let source_claude_session_id = normalize_uuid_session_id(&prepared.source_claude_session_id)
-        .ok_or_else(|| anyhow!("Source Claude session id must be a UUID"))?;
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.pending_fork_source_claude_session_id = Some(source_claude_session_id.clone());
-        thread.pending_fork_known_child_session_ids = prepared.known_child_session_ids.clone();
-        thread.pending_fork_requested_at = Some(prepared.requested_at);
-        thread.pending_fork_launch_consumed = true;
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn clear_thread_pending_fork(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.pending_fork_source_claude_session_id = None;
-        thread.pending_fork_known_child_session_ids.clear();
-        thread.pending_fork_requested_at = None;
-        thread.pending_fork_launch_consumed = false;
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn mark_thread_pending_fork_consumed(
-    workspace_id: &str,
-    thread_id: &str,
-) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        if thread.pending_fork_source_claude_session_id.is_some() {
-            thread.pending_fork_launch_consumed = true;
-            thread.updated_at = Utc::now();
-        }
-        Ok(())
-    })
-}
-
-pub fn finalize_thread_native_fork(
-    workspace_id: &str,
-    thread_id: &str,
-    child_claude_session_id: &str,
-) -> Result<FinalizedNativeFork> {
-    let child_claude_session_id = normalize_uuid_session_id(child_claude_session_id)
-        .ok_or_else(|| anyhow!("Child Claude session id must be a UUID"))?;
-    let _guard = thread_metadata_lock()
-        .lock()
-        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
-    let mut current_thread = read_thread_metadata_unlocked(workspace_id, thread_id)?;
-    let source_claude_session_id = current_thread
-        .pending_fork_source_claude_session_id
-        .clone()
-        .or_else(|| current_thread.claude_session_id.clone())
-        .and_then(|value| normalize_uuid_session_id(&value))
-        .ok_or_else(|| anyhow!("Thread is not awaiting fork resolution"))?;
-    if claude_session_id_claimed_by_other_thread_unlocked(
-        workspace_id,
-        thread_id,
-        &child_claude_session_id,
-    )? {
-        return Err(anyhow!(
-            "Claude session id is already claimed by another thread"
-        ));
-    }
-
-    let now = Utc::now();
-    let preserved_thread = ThreadMetadata {
-        id: Uuid::new_v4().to_string(),
-        workspace_id: current_thread.workspace_id.clone(),
-        agent_id: current_thread.agent_id.clone(),
-        full_access: current_thread.full_access,
-        enabled_skills: current_thread.enabled_skills.clone(),
-        created_at: now,
-        updated_at: now,
-        title: format!("{} (Original)", current_thread.title),
-        is_archived: false,
-        last_run_status: current_thread.last_run_status.clone(),
-        last_run_started_at: current_thread.last_run_started_at,
-        last_run_ended_at: current_thread.last_run_ended_at,
-        claude_session_id: Some(source_claude_session_id.clone()),
-        copilot_session_id: None,
-        forked_from_claude_session_id: current_thread.forked_from_claude_session_id.clone(),
-        pending_fork_source_claude_session_id: None,
-        pending_fork_known_child_session_ids: Vec::new(),
-        pending_fork_requested_at: None,
-        pending_fork_launch_consumed: false,
-        last_resume_at: current_thread.last_resume_at,
-        last_new_session_at: current_thread.last_new_session_at,
-    };
-
-    current_thread.claude_session_id = Some(child_claude_session_id);
-    current_thread.forked_from_claude_session_id = Some(source_claude_session_id);
-    current_thread.pending_fork_source_claude_session_id = None;
-    current_thread.pending_fork_known_child_session_ids.clear();
-    current_thread.pending_fork_requested_at = None;
-    current_thread.pending_fork_launch_consumed = false;
-    current_thread.updated_at = now;
-
-    write_thread_metadata_unlocked(&current_thread)?;
-    write_thread_metadata_unlocked(&preserved_thread)?;
-    let current_dir = thread_dir(&current_thread.workspace_id, &current_thread.id)?;
-    let preserved_dir = thread_dir(&preserved_thread.workspace_id, &preserved_thread.id)?;
-    let current_runs_dir = current_dir.join("runs");
-    let preserved_runs_dir = preserved_dir.join("runs");
-    if current_runs_dir.is_dir() {
-        copy_dir_recursive(&current_runs_dir, &preserved_runs_dir)?;
-    } else {
-        fs::create_dir_all(&preserved_runs_dir)?;
-    }
-    let current_transcript_path = current_dir.join("transcript.jsonl");
-    let preserved_transcript_path = preserved_dir.join("transcript.jsonl");
-    if current_transcript_path.is_file() {
-        fs::copy(current_transcript_path, &preserved_transcript_path)?;
-    } else if !preserved_transcript_path.exists() {
-        File::create(preserved_transcript_path)?;
-    }
-
-    Ok(FinalizedNativeFork {
-        current_thread,
-        preserved_thread,
-    })
-}
-
-pub fn set_thread_skills(
-    workspace_id: &str,
-    thread_id: &str,
-    enabled_skills: Vec<String>,
-) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.enabled_skills = enabled_skills;
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn set_thread_agent(
-    workspace_id: &str,
-    thread_id: &str,
-    agent_id: String,
-) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        let current_provider = AgentProvider::from_agent_id(&thread.agent_id);
-        let next_provider = AgentProvider::from_agent_id(&agent_id);
-        if current_provider != next_provider {
-            return Err(anyhow!(
-                "Thread provider is fixed at creation and cannot be changed"
-            ));
-        }
-        thread.agent_id = agent_id;
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn rename_thread(workspace_id: &str, thread_id: &str, title: String) -> Result<ThreadMetadata> {
-    let trimmed = title.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!("Thread title cannot be empty"));
-    }
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.title = trimmed.chars().take(80).collect();
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn archive_thread(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.is_archived = true;
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-pub fn delete_thread(workspace_id: &str, thread_id: &str) -> Result<()> {
-    let path = thread_dir(workspace_id, thread_id)?;
-    if !path.exists() {
-        return Ok(());
-    }
-    let trash_dir = thread_workspace_dir(workspace_id)?.join(".trash");
-    fs::create_dir_all(&trash_dir)?;
-    let tombstone = trash_dir.join(format!("{thread_id}-{}", Uuid::new_v4()));
-
-    if fs::rename(&path, &tombstone).is_ok() {
-        std::thread::spawn(move || {
-            let _ = fs::remove_dir_all(tombstone);
-        });
-        return Ok(());
-    }
-
-    fs::remove_dir_all(path)?;
-    Ok(())
-}
-
-pub fn set_thread_run_state(
-    workspace_id: &str,
-    thread_id: &str,
-    status: ThreadRunStatus,
-    started_at: Option<chrono::DateTime<Utc>>,
-    ended_at: Option<chrono::DateTime<Utc>>,
-) -> Result<ThreadMetadata> {
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.last_run_status = status;
-        if started_at.is_some() {
-            thread.last_run_started_at = started_at;
-        }
-        if ended_at.is_some() {
-            thread.last_run_ended_at = ended_at;
-        }
-        thread.updated_at = Utc::now();
-        Ok(())
-    })
-}
-
-fn transcript_path(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
-    Ok(thread_dir(workspace_id, thread_id)?.join("transcript.jsonl"))
-}
-
-pub fn append_transcript_entry(
-    workspace_id: &str,
-    thread_id: &str,
-    entry: &TranscriptEntry,
-) -> Result<()> {
-    let path = transcript_path(workspace_id, thread_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if !path.exists() {
-        File::create(&path)?;
-    }
-    let mut file = OpenOptions::new().append(true).open(path)?;
-    let serialized = serde_json::to_string(entry)?;
-    writeln!(file, "{serialized}")?;
-
-    mutate_thread_metadata(workspace_id, thread_id, |thread| {
-        thread.updated_at = Utc::now();
-        if entry.role == "user" {
-            let first_line = entry.content.lines().next().unwrap_or("New thread").trim();
-            if thread.title == "New thread" && !first_line.is_empty() {
-                thread.title = first_line.chars().take(50).collect();
-            }
-        }
-        Ok(())
-    })?;
-    Ok(())
-}
-
-pub fn load_transcript(workspace_id: &str, thread_id: &str) -> Result<Vec<TranscriptEntry>> {
-    let path = transcript_path(workspace_id, thread_id)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let entry: TranscriptEntry = serde_json::from_str(&line)?;
-        entries.push(entry);
-    }
-    Ok(entries)
-}
-
-pub fn append_user_message(
-    workspace_id: &str,
-    thread_id: &str,
-    content: &str,
-) -> Result<TranscriptEntry> {
-    let entry = TranscriptEntry {
-        id: Uuid::new_v4().to_string(),
-        role: "user".to_string(),
-        content: content.to_string(),
-        created_at: Utc::now(),
-        run_id: None,
-    };
-    append_transcript_entry(workspace_id, thread_id, &entry)?;
-    Ok(entry)
-}
-
-pub fn resolve_workspace_id_by_path(workspace_path: &str) -> Result<Option<String>> {
-    let canonical = fs::canonicalize(workspace_path)
-        .unwrap_or_else(|_| Path::new(workspace_path).to_path_buf())
-        .to_string_lossy()
-        .to_string();
-    let workspaces = load_workspaces()?;
-    Ok(workspaces
-        .iter()
-        .find(|workspace| workspace.path == canonical)
-        .map(|workspace| workspace.id.clone()))
-}
-
 pub fn resolve_workspace_by_path(workspace_path: &str) -> Result<Option<Workspace>> {
-    let canonical = fs::canonicalize(workspace_path)
-        .unwrap_or_else(|_| Path::new(workspace_path).to_path_buf())
-        .to_string_lossy()
-        .to_string();
-    let workspaces = load_workspaces()?;
-    Ok(workspaces
-        .iter()
-        .find(|workspace| workspace.path == canonical)
-        .cloned())
+    let requested =
+        fs::canonicalize(workspace_path).unwrap_or_else(|_| PathBuf::from(workspace_path));
+    Ok(load_workspaces()?
+        .into_iter()
+        .find(|workspace| workspace_path_matches(workspace, &requested)))
 }
 
-pub fn write_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-    let raw = serde_json::to_string_pretty(value)?;
-    write_file_atomic(path, raw.as_bytes())?;
+pub fn list_codex_thread_ui_metadata(workspace_id: &str) -> Result<Vec<CodexThreadUiMetadata>> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let root = ensure_base_dirs()?;
+    let _guard = codex_thread_ui_lock()
+        .lock()
+        .map_err(|_| anyhow!("Codex thread UI metadata lock poisoned"))?;
+    let mut metadata = read_codex_thread_ui_store_at(&root)?
+        .threads
+        .into_values()
+        .filter(|thread| thread.workspace_id == workspace_id)
+        .collect::<Vec<_>>();
+    metadata.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at));
+    Ok(metadata)
+}
+
+pub fn get_codex_thread_ui_metadata(
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<CodexThreadUiMetadata> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let thread_id = validate_storage_segment(thread_id, "thread id")?;
+    let root = ensure_base_dirs()?;
+    let _guard = codex_thread_ui_lock()
+        .lock()
+        .map_err(|_| anyhow!("Codex thread UI metadata lock poisoned"))?;
+    let mut store = read_codex_thread_ui_store_at(&root)?;
+    if let Some(metadata) = store.threads.get(thread_id) {
+        if metadata.workspace_id != workspace_id {
+            return Err(anyhow!("Codex thread belongs to a different workspace"));
+        }
+        return Ok(metadata.clone());
+    }
+    let metadata =
+        CodexThreadUiMetadata::new(thread_id.to_string(), workspace_id.to_string()).normalized();
+    store
+        .threads
+        .insert(thread_id.to_string(), metadata.clone());
+    write_codex_thread_ui_store_at(&root, &store)?;
+    Ok(metadata)
+}
+
+pub fn save_codex_thread_ui_metadata(
+    metadata: CodexThreadUiMetadata,
+) -> Result<CodexThreadUiMetadata> {
+    let thread_id = validate_storage_segment(&metadata.thread_id, "thread id")?.to_string();
+    let workspace_id =
+        validate_storage_segment(&metadata.workspace_id, "workspace id")?.to_string();
+    let workspaces = load_workspaces()?;
+    if !workspaces
+        .iter()
+        .any(|workspace| workspace.id == workspace_id)
+    {
+        return Err(anyhow!("Workspace not found"));
+    }
+    let root = ensure_base_dirs()?;
+    let _guard = codex_thread_ui_lock()
+        .lock()
+        .map_err(|_| anyhow!("Codex thread UI metadata lock poisoned"))?;
+    let mut store = read_codex_thread_ui_store_at(&root)?;
+    if let Some(existing) = store.threads.get(&thread_id) {
+        if existing.workspace_id != workspace_id
+            && workspaces
+                .iter()
+                .any(|workspace| workspace.id == existing.workspace_id)
+        {
+            return Err(anyhow!("Codex thread belongs to a different workspace"));
+        }
+    }
+    let mut metadata = metadata.normalized();
+    metadata.thread_id = thread_id.clone();
+    metadata.workspace_id = workspace_id;
+    metadata.updated_at = Utc::now();
+    store.threads.insert(thread_id, metadata.clone());
+    write_codex_thread_ui_store_at(&root, &store)?;
+    Ok(metadata)
+}
+
+pub fn ensure_codex_thread_ui_metadata(
+    workspace_path: &str,
+    thread_id: &str,
+    fallback_title: &str,
+    permission_mode: &str,
+    requested_model: Option<String>,
+    requested_reasoning_effort: Option<String>,
+    requested_service_tier: Option<String>,
+) -> Result<CodexThreadUiMetadata> {
+    let workspace =
+        resolve_workspace_by_path(workspace_path)?.ok_or_else(|| anyhow!("Workspace not found"))?;
+    let mut metadata = get_codex_thread_ui_metadata(&workspace.id, thread_id)?;
+    if !fallback_title.trim().is_empty() {
+        metadata.fallback_title = fallback_title.to_string();
+    }
+    metadata.permission_mode = permission_mode.to_string();
+    metadata.requested_model = requested_model;
+    metadata.requested_reasoning_effort = requested_reasoning_effort;
+    metadata.requested_service_tier = requested_service_tier;
+    save_codex_thread_ui_metadata(metadata)
+}
+
+pub fn remove_codex_thread_ui_metadata(thread_id: &str) -> Result<()> {
+    let thread_id = validate_storage_segment(thread_id, "thread id")?;
+    let root = ensure_base_dirs()?;
+    let _guard = codex_thread_ui_lock()
+        .lock()
+        .map_err(|_| anyhow!("Codex thread UI metadata lock poisoned"))?;
+    let mut store = read_codex_thread_ui_store_at(&root)?;
+    if store.threads.remove(thread_id).is_some() {
+        write_codex_thread_ui_store_at(&root, &store)?;
+    }
     Ok(())
 }
 
@@ -1368,876 +1174,333 @@ pub fn write_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result<()
 mod tests {
     use super::*;
 
-    #[test]
-    fn add_workspace_persists_across_loads() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!("atcontroller-test-{}", Uuid::new_v4()));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let added = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let first_load = load_workspaces().expect("workspaces should load");
-        let second_load = load_workspaces().expect("workspaces should load after reload");
-
-        assert_eq!(first_load.len(), 1);
-        assert_eq!(second_load.len(), 1);
-        assert_eq!(first_load[0].id, added.id);
-        assert_eq!(first_load[0].path, second_load[0].path);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+    struct TestStorage {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        root: PathBuf,
     }
 
-    #[test]
-    fn add_ssh_workspace_persists_command_and_kind() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-ssh-workspace-test-{}",
-            Uuid::new_v4()
-        ));
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let added = add_ssh_workspace(
-            "ssh dev@remote-host",
-            Some("remote-host"),
-            Some("  ~/projects/example  "),
-        )
-        .expect("ssh workspace should be added");
-        assert_eq!(added.kind, WorkspaceKind::Ssh);
-        assert_eq!(added.ssh_command.as_deref(), Some("ssh dev@remote-host"));
-        assert_eq!(added.remote_path.as_deref(), Some("~/projects/example"));
-        assert!(
-            added.path.starts_with("ssh-workspace-"),
-            "ssh workspace path should use deterministic non-filesystem marker"
-        );
-
-        let loaded = load_workspaces().expect("workspaces should load");
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, added.id);
-        assert_eq!(loaded[0].kind, WorkspaceKind::Ssh);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn add_rdev_workspace_persists_command_and_kind() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-rdev-workspace-test-{}",
-            Uuid::new_v4()
-        ));
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let added = add_rdev_workspace("rdev ssh team/example-env", Some("example-env"))
-            .expect("rdev workspace should be added");
-        assert_eq!(added.kind, WorkspaceKind::Rdev);
-        assert_eq!(
-            added.rdev_ssh_command.as_deref(),
-            Some("rdev ssh team/example-env")
-        );
-        assert!(
-            added.path.starts_with("rdev-workspace-"),
-            "rdev workspace path should use deterministic non-filesystem marker"
-        );
-
-        let loaded = load_workspaces().expect("workspaces should load");
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, added.id);
-        assert_eq!(loaded[0].kind, WorkspaceKind::Rdev);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn set_workspace_remote_path_trims_and_clears() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-ssh-remote-path-test-{}",
-            Uuid::new_v4()
-        ));
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let added = add_ssh_workspace("ssh dev@remote-host", Some("remote-host"), None)
-            .expect("ssh workspace should be added");
-        assert!(added.remote_path.is_none());
-
-        let updated = set_workspace_remote_path(&added.id, Some("  ~/projects/foo  "))
-            .expect("should set remote path");
-        assert_eq!(updated.remote_path.as_deref(), Some("~/projects/foo"));
-
-        let cleared =
-            set_workspace_remote_path(&added.id, Some("   ")).expect("should clear remote path");
-        assert!(cleared.remote_path.is_none());
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn remove_workspace_prunes_registry_and_thread_storage() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-remove-workspace-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-        let thread_storage_dir =
-            thread_dir(&workspace.id, &thread.id).expect("thread dir should resolve");
-        assert!(
-            thread_storage_dir.exists(),
-            "thread storage should exist before workspace removal"
-        );
-
-        let removed = remove_workspace(&workspace.id).expect("workspace removal should succeed");
-        assert!(removed, "workspace should report removed");
-        assert!(
-            !thread_workspace_dir(&workspace.id)
-                .expect("workspace dir should resolve")
-                .exists(),
-            "workspace thread storage should be deleted"
-        );
-
-        let remaining = load_workspaces().expect("workspaces should still load");
-        assert!(remaining.is_empty(), "workspace registry should be empty");
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn full_access_persists_per_thread() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root =
-            std::env::temp_dir().join(format!("atcontroller-thread-test-{}", Uuid::new_v4()));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-
-        let updated = set_thread_full_access(&workspace.id, &thread.id, true)
-            .expect("full access should update");
-        assert!(updated.full_access);
-
-        let reloaded =
-            read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
-        assert!(reloaded.full_access);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn create_thread_can_start_with_full_access_enabled() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-create-thread-full-access-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), true)
-            .expect("thread should be created");
-
-        assert!(thread.full_access);
-
-        let reloaded =
-            read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
-        assert!(reloaded.full_access);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn claude_session_id_persists_per_thread() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root =
-            std::env::temp_dir().join(format!("atcontroller-session-test-{}", Uuid::new_v4()));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-
-        let captured = set_thread_claude_session_id_if_missing(
-            &workspace.id,
-            &thread.id,
-            "123e4567-e89b-12d3-a456-426614174000",
-        )
-        .expect("session id should persist")
-        .expect("thread should update");
-        assert_eq!(
-            captured.claude_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-
-        let duplicate = set_thread_claude_session_id_if_missing(
-            &workspace.id,
-            &thread.id,
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        )
-        .expect("duplicate capture should not error");
-        assert!(
-            duplicate.is_none(),
-            "capture should not overwrite existing session id"
-        );
-
-        let reloaded =
-            read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
-        assert_eq!(
-            reloaded.claude_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-
-        let cleared =
-            clear_thread_claude_session(&workspace.id, &thread.id).expect("clear should succeed");
-        assert!(cleared.claude_session_id.is_none());
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn set_thread_claude_session_id_overwrites_and_trims() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-force-session-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-
-        let updated = set_thread_claude_session_id(
-            &workspace.id,
-            &thread.id,
-            " 123e4567-e89b-12d3-a456-426614174000 ",
-        )
-        .expect("force set should succeed");
-        assert_eq!(
-            updated.claude_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-
-        let overwritten = set_thread_claude_session_id(
-            &workspace.id,
-            &thread.id,
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        )
-        .expect("overwrite should succeed");
-        assert_eq!(
-            overwritten.claude_session_id.as_deref(),
-            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-        );
-
-        let cleared = set_thread_claude_session_id(&workspace.id, &thread.id, "   ")
-            .expect("clear should succeed");
-        assert!(cleared.claude_session_id.is_none());
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn rejects_invalid_thread_path_segments() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-invalid-thread-id-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-
-        let error = read_thread_metadata(&workspace.id, "../escape")
-            .expect_err("invalid thread id should fail");
-        assert!(
-            error.to_string().contains("Invalid thread id"),
-            "unexpected error: {error}"
-        );
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
-    }
-
-    #[test]
-    fn set_thread_claude_session_id_is_atomic_across_threads() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root =
-            std::env::temp_dir().join(format!("atcontroller-session-race-test-{}", Uuid::new_v4()));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-
-        let mut handles = Vec::new();
-        for _ in 0..8 {
-            let workspace_id = workspace.id.clone();
-            let thread_id = thread.id.clone();
-            let session_candidate = Uuid::new_v4().to_string();
-            handles.push(std::thread::spawn(move || {
-                set_thread_claude_session_id_if_missing(
-                    &workspace_id,
-                    &thread_id,
-                    &session_candidate,
-                )
-                .expect("capture should not fail")
-                .and_then(|metadata| metadata.claude_session_id)
-            }));
-        }
-
-        let mut captured = Vec::new();
-        for handle in handles {
-            if let Some(session_id) = handle.join().expect("capture worker panicked") {
-                captured.push(session_id);
+    impl TestStorage {
+        fn new() -> Self {
+            let guard = test_env_lock().lock().expect("test environment lock");
+            let root =
+                std::env::temp_dir().join(format!("atcontroller-storage-test-{}", Uuid::new_v4()));
+            fs::create_dir_all(&root).expect("temporary storage");
+            std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &root);
+            Self {
+                _guard: guard,
+                root,
             }
         }
+    }
 
-        assert_eq!(
-            captured.len(),
-            1,
-            "exactly one concurrent capture should succeed"
-        );
-        let stored = read_thread_metadata(&workspace.id, &thread.id)
-            .expect("thread should reload")
-            .claude_session_id
-            .expect("session id should be stored");
-        assert_eq!(stored, captured[0]);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+    impl Drop for TestStorage {
+        fn drop(&mut self) {
+            std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 
     #[test]
-    fn create_forked_thread_clones_settings_and_sets_pending_fork_metadata() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root =
-            std::env::temp_dir().join(format!("atcontroller-fork-thread-test-{}", Uuid::new_v4()));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), true)
-            .expect("thread should be created");
-        let thread = set_thread_skills(
-            &workspace.id,
-            &thread.id,
-            vec!["checks".to_string(), "review".to_string()],
-        )
-        .expect("skills should update");
-        let thread = set_thread_claude_session_id(
-            &workspace.id,
-            &thread.id,
-            "123e4567-e89b-12d3-a456-426614174000",
-        )
-        .expect("session id should persist");
-
-        let forked = create_forked_thread(
-            &workspace.id,
-            &thread.id,
-            vec!["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()],
-        )
-        .expect("forked thread should be created");
-
-        assert_eq!(forked.title, "New thread (Fork)");
-        assert!(forked.full_access);
-        assert_eq!(forked.enabled_skills, vec!["checks", "review"]);
-        assert_eq!(
-            forked.pending_fork_source_claude_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-        assert_eq!(
-            forked.forked_from_claude_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-        assert_eq!(
-            forked.pending_fork_known_child_session_ids,
-            vec!["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()]
-        );
-        assert!(!forked.pending_fork_launch_consumed);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+    fn initializes_atcontroller_storage_files() {
+        let storage = TestStorage::new();
+        let root = ensure_base_dirs().expect("base directories");
+        assert_eq!(root, storage.root);
+        assert!(root.join(WORKSPACES_FILE).is_file());
+        assert!(root.join(SETTINGS_FILE).is_file());
+        assert!(root.join(APP_SERVER_MIGRATION_MARKER).is_file());
     }
 
     #[test]
-    fn fork_thread_from_ui_preserves_source_and_applies_custom_titles() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-ui-fork-thread-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), true)
-            .expect("thread should be created");
-        let thread = rename_thread(&workspace.id, &thread.id, "Main thread".to_string())
-            .expect("rename should succeed");
-        let thread = set_thread_skills(
-            &workspace.id,
-            &thread.id,
-            vec!["checks".to_string(), "review".to_string()],
-        )
-        .expect("skills should update");
-        let thread = set_thread_claude_session_id(
-            &workspace.id,
-            &thread.id,
-            "123e4567-e89b-12d3-a456-426614174000",
-        )
-        .expect("session id should persist");
-
-        let forked = fork_thread_from_ui(
-            &workspace.id,
-            &thread.id,
-            "Main thread (Original)",
-            "Main thread",
-            vec!["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()],
-        )
-        .expect("ui fork should succeed");
-
-        assert_eq!(forked.source_thread.id, thread.id);
-        assert_eq!(forked.source_thread.title, "Main thread (Original)");
-        assert_eq!(forked.forked_thread.title, "Main thread");
-        assert_eq!(forked.forked_thread.full_access, thread.full_access);
-        assert_eq!(
-            forked.forked_thread.enabled_skills,
-            vec!["checks", "review"]
-        );
-        assert_eq!(
-            forked
-                .forked_thread
-                .pending_fork_source_claude_session_id
-                .as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-        assert_eq!(
-            forked
-                .forked_thread
-                .forked_from_claude_session_id
-                .as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-
-        let listed_threads = list_threads(&workspace.id).expect("threads should list");
-        assert_eq!(listed_threads.len(), 2);
-        assert!(listed_threads
-            .iter()
-            .any(|item| item.id == forked.source_thread.id));
-        assert!(listed_threads
-            .iter()
-            .any(|item| item.id == forked.forked_thread.id));
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+    fn adds_and_reorders_local_projects_with_spaces() {
+        let storage = TestStorage::new();
+        let first_path = storage.root.join("Project With Spaces");
+        let second_path = storage.root.join("Second Project");
+        fs::create_dir_all(&first_path).expect("first project");
+        fs::create_dir_all(&second_path).expect("second project");
+        let first = add_workspace(first_path.to_str().unwrap()).expect("add first");
+        let second = add_workspace(second_path.to_str().unwrap()).expect("add second");
+        let duplicate = add_workspace(first_path.to_str().unwrap()).expect("dedupe");
+        assert_eq!(duplicate.id, first.id);
+        let ordered = set_workspace_order(vec![second.id.clone(), first.id.clone()])
+            .expect("reorder projects");
+        assert_eq!(ordered[0].id, second.id);
+        assert_eq!(ordered[1].id, first.id);
     }
 
     #[test]
-    fn finalize_thread_native_fork_creates_original_sibling_and_rebinds_current() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-finalize-native-fork-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-        let thread = rename_thread(&workspace.id, &thread.id, "Main thread".to_string())
-            .expect("rename should succeed");
-        let thread = set_thread_claude_session_id(
-            &workspace.id,
-            &thread.id,
-            "123e4567-e89b-12d3-a456-426614174000",
+    fn project_shelf_migration_backs_up_and_enriches_flat_workspace_records() {
+        let storage = TestStorage::new();
+        let project = storage.root.join("Legacy Project");
+        fs::create_dir_all(&project).expect("legacy project");
+        let created = "2026-01-01T00:00:00Z";
+        fs::write(
+            storage.root.join(WORKSPACES_FILE),
+            serde_json::to_vec_pretty(&serde_json::json!([{
+                "id": "legacy-project",
+                "name": "Legacy Project",
+                "path": project,
+                "createdAt": created,
+                "updatedAt": created
+            }]))
+            .expect("legacy workspaces"),
         )
-        .expect("session id should persist");
-        let prepared = set_thread_pending_fork(
-            &workspace.id,
-            &thread.id,
-            "123e4567-e89b-12d3-a456-426614174000",
-            vec![],
-            Utc::now(),
-        )
-        .expect("pending fork should persist");
-        append_user_message(&workspace.id, &prepared.id, "Explain the fork flow.")
-            .expect("user message should append");
-        let run_dir = runs_dir(&workspace.id, &prepared.id)
-            .expect("runs dir should resolve")
-            .join("run-1");
-        fs::create_dir_all(&run_dir).expect("run dir should exist");
-        fs::write(run_dir.join("output.log"), "Claude output\n").expect("run log should write");
+        .expect("write legacy workspaces");
 
-        let finalized = finalize_thread_native_fork(
-            &workspace.id,
-            &prepared.id,
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        )
-        .expect("native fork should finalize");
-
-        assert_eq!(
-            finalized.current_thread.claude_session_id.as_deref(),
-            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-        );
-        assert_eq!(
-            finalized
-                .current_thread
-                .forked_from_claude_session_id
-                .as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-        assert!(finalized
-            .current_thread
-            .pending_fork_source_claude_session_id
-            .is_none());
-        assert_eq!(
-            finalized.preserved_thread.claude_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-        assert_eq!(finalized.preserved_thread.title, "Main thread (Original)");
-
-        let all_threads = list_threads(&workspace.id).expect("threads should list");
-        assert_eq!(all_threads.len(), 2);
-        assert!(all_threads
-            .iter()
-            .any(|item| item.id == finalized.current_thread.id));
-        assert!(all_threads
-            .iter()
-            .any(|item| item.id == finalized.preserved_thread.id));
-        let preserved_transcript = load_transcript(&workspace.id, &finalized.preserved_thread.id)
-            .expect("preserved transcript should load");
-        assert_eq!(preserved_transcript.len(), 1);
-        assert_eq!(preserved_transcript[0].content, "Explain the fork flow.");
-        assert!(runs_dir(&workspace.id, &finalized.preserved_thread.id)
-            .expect("preserved runs dir should resolve")
-            .join("run-1")
-            .join("output.log")
+        let workspaces = load_workspaces().expect("migrated workspaces");
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].id, "legacy-project");
+        assert!(workspaces[0].is_expanded);
+        assert!(workspaces[0].is_available);
+        assert_eq!(workspaces[0].workspace_type, "local");
+        assert!(storage
+            .root
+            .join(PROJECT_SHELF_MIGRATION_BACKUP_DIR)
+            .join(WORKSPACES_FILE)
             .is_file());
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+        assert!(storage.root.join(PROJECT_SHELF_MIGRATION_MARKER).is_file());
     }
 
     #[test]
-    fn clear_thread_pending_fork_resets_pending_state_without_changing_session_id() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
+    fn project_updates_persist_expansion_pinning_icon_and_custom_order() {
+        let storage = TestStorage::new();
+        let first_path = storage.root.join("First");
+        let second_path = storage.root.join("Second");
+        fs::create_dir_all(&first_path).expect("first project");
+        fs::create_dir_all(&second_path).expect("second project");
+        let first = add_workspace(first_path.to_str().unwrap()).expect("add first");
+        let second = add_workspace(second_path.to_str().unwrap()).expect("add second");
 
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-clear-pending-fork-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-        let thread = set_thread_claude_session_id(
-            &workspace.id,
-            &thread.id,
-            "123e4567-e89b-12d3-a456-426614174000",
+        update_workspace(
+            &second.id,
+            WorkspaceUpdate {
+                display_name: Some("Pinned Project".to_string()),
+                is_pinned: Some(true),
+                is_expanded: Some(false),
+                icon_preference: Some("violet".to_string()),
+                mark_opened: true,
+                ..WorkspaceUpdate::default()
+            },
         )
-        .expect("session id should persist");
-        let prepared = set_thread_pending_fork(
-            &workspace.id,
-            &thread.id,
-            "123e4567-e89b-12d3-a456-426614174000",
-            vec!["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()],
-            Utc::now(),
-        )
-        .expect("pending fork should persist");
+        .expect("update project");
+        set_workspace_order(vec![first.id.clone(), second.id.clone()]).expect("custom order");
 
-        let cleared = clear_thread_pending_fork(&workspace.id, &prepared.id)
-            .expect("pending fork should clear");
-
+        let loaded = load_workspaces().expect("load projects");
         assert_eq!(
-            cleared.claude_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
+            loaded[0].id, second.id,
+            "pinned projects stay above custom order"
         );
-        assert!(cleared.pending_fork_source_claude_session_id.is_none());
-        assert!(cleared.pending_fork_known_child_session_ids.is_empty());
-        assert!(cleared.pending_fork_requested_at.is_none());
-        assert!(!cleared.pending_fork_launch_consumed);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+        assert_eq!(loaded[0].name, "Pinned Project");
+        assert!(!loaded[0].is_expanded);
+        assert_eq!(loaded[0].icon_preference.as_deref(), Some("violet"));
+        assert!(loaded[0].last_opened_at.is_some());
     }
 
     #[test]
-    fn mark_thread_pending_fork_consumed_sets_consumed_flag() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
+    fn missing_projects_remain_registered_and_can_be_relocated() {
+        let storage = TestStorage::new();
+        let original = storage.root.join("Original");
+        let replacement = storage.root.join("Replacement");
+        fs::create_dir_all(&original).expect("original");
+        fs::create_dir_all(&replacement).expect("replacement");
+        let workspace = add_workspace(original.to_str().unwrap()).expect("add project");
+        fs::remove_dir(&original).expect("remove original folder");
 
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-consume-pending-fork-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
+        let missing = load_workspaces().expect("load missing project");
+        assert_eq!(missing.len(), 1);
+        assert!(!missing[0].is_available);
+        assert_eq!(missing[0].path, workspace.path);
 
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-        let prepared = set_thread_pending_fork(
-            &workspace.id,
-            &thread.id,
-            "123e4567-e89b-12d3-a456-426614174000",
-            vec![],
-            Utc::now(),
+        let relocated =
+            relocate_workspace(&workspace.id, replacement.to_str().unwrap()).expect("relocate");
+        assert!(relocated.is_available);
+        assert_eq!(
+            relocated.path,
+            fs::canonicalize(replacement)
+                .expect("canonical replacement")
+                .to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_path_deduplication_resolves_symlinks() {
+        let storage = TestStorage::new();
+        let project = storage.root.join("Canonical");
+        let alias = storage.root.join("Alias");
+        fs::create_dir_all(&project).expect("project");
+        std::os::unix::fs::symlink(&project, &alias).expect("symlink");
+        let direct = add_workspace(project.to_str().unwrap()).expect("direct");
+        let through_alias = add_workspace(alias.to_str().unwrap()).expect("alias");
+        assert_eq!(direct.id, through_alias.id);
+        assert_eq!(load_workspaces().expect("workspaces").len(), 1);
+    }
+
+    #[test]
+    fn clone_repository_uses_argument_safe_git_invocation_and_registers_the_result() {
+        let storage = TestStorage::new();
+        let source = storage.root.join("source repository.git");
+        let destination_parent = storage.root.join("clones");
+        fs::create_dir_all(&destination_parent).expect("clone parent");
+        let status = Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&source)
+            .status()
+            .expect("launch git init");
+        assert!(status.success());
+
+        let cloned = clone_repository(
+            source.to_str().expect("source path"),
+            destination_parent.to_str().expect("destination path"),
         )
-        .expect("pending fork should persist");
-
-        let consumed = mark_thread_pending_fork_consumed(&workspace.id, &prepared.id)
-            .expect("pending fork should mark consumed");
-
-        assert!(consumed.pending_fork_launch_consumed);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+        .expect("clone repository");
+        assert!(Path::new(&cloned.path).is_dir());
+        assert_eq!(cloned.name, "source repository");
+        assert_eq!(load_workspaces().expect("workspaces").len(), 1);
     }
 
     #[test]
-    fn commit_prepared_thread_pending_fork_sets_pending_state_and_consumed_flag() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-commit-prepared-pending-fork-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread should be created");
-        let prepared = PreparedNativeFork {
-            source_claude_session_id: "123e4567-e89b-12d3-a456-426614174000".to_string(),
-            known_child_session_ids: vec!["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()],
-            requested_at: Utc::now(),
+    fn settings_round_trip_preserves_full_access_default() {
+        let _storage = TestStorage::new();
+        let settings = Settings {
+            default_model: Some(" runtime-model ".to_string()),
+            ..Settings::default()
         };
-
-        let committed = commit_prepared_thread_pending_fork(&workspace.id, &thread.id, &prepared)
-            .expect("prepared fork should commit");
-
-        assert_eq!(
-            committed.pending_fork_source_claude_session_id.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
-        assert_eq!(
-            committed.pending_fork_known_child_session_ids,
-            vec!["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()]
-        );
-        assert_eq!(
-            committed.pending_fork_requested_at,
-            Some(prepared.requested_at)
-        );
-        assert!(committed.pending_fork_launch_consumed);
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+        save_settings(&settings).expect("save settings");
+        let loaded = load_settings().expect("load settings");
+        assert_eq!(loaded.default_permission_mode, "fullAccess");
+        assert_eq!(loaded.default_model.as_deref(), Some("runtime-model"));
     }
 
     #[test]
-    fn set_thread_claude_session_id_rejects_duplicate_claims() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-duplicate-session-claim-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread_a = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread A should be created");
-        let thread_b = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread B should be created");
-        set_thread_claude_session_id(
-            &workspace.id,
-            &thread_a.id,
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    fn codex_settings_migration_removes_legacy_runtime_fields_after_backup() {
+        let storage = TestStorage::new();
+        let retired_runtime_one = ["cl", "aude"].concat();
+        let retired_runtime_two = ["co", "pilot"].concat();
+        let legacy_settings = serde_json::json!({
+            "appearanceMode": "dark",
+            format!("{retired_runtime_one}CliPath"): "/tmp/legacy-runtime",
+            format!("{retired_runtime_one}PermissionMode"): "autoMode",
+            format!("{retired_runtime_two}CliPath"): "/tmp/other-legacy-runtime",
+            "terminalScrollbackLines": 100000,
+            "defaultPermissionMode": "fullAccess"
+        });
+        fs::write(
+            storage.root.join(SETTINGS_FILE),
+            serde_json::to_vec_pretty(&legacy_settings).expect("serialize legacy settings"),
         )
-        .expect("thread A should claim the session");
+        .expect("write legacy settings");
 
-        let error = set_thread_claude_session_id(
-            &workspace.id,
-            &thread_b.id,
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        )
-        .expect_err("duplicate claim should fail");
+        ensure_base_dirs().expect("run migrations");
 
-        assert!(error
-            .to_string()
-            .contains("already claimed by another thread"));
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+        let rewritten =
+            fs::read_to_string(storage.root.join(SETTINGS_FILE)).expect("rewritten settings");
+        assert!(!rewritten.contains(&retired_runtime_one));
+        assert!(!rewritten.contains(&retired_runtime_two));
+        assert!(!rewritten.contains("terminalScrollbackLines"));
+        assert!(rewritten.contains("\"appearanceMode\": \"dark\""));
+        assert!(storage
+            .root
+            .join(CODEX_SETTINGS_MIGRATION_BACKUP_DIR)
+            .join(SETTINGS_FILE)
+            .is_file());
+        assert!(storage.root.join(CODEX_SETTINGS_MIGRATION_MARKER).is_file());
     }
 
     #[test]
-    fn set_thread_claude_session_id_allows_reuse_from_archived_thread() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
-
-        let temp_root = std::env::temp_dir().join(format!(
-            "atcontroller-archived-session-claim-test-{}",
-            Uuid::new_v4()
-        ));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
-            .expect("workspace should be added");
-        let thread_a = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread A should be created");
-        let thread_b = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("thread B should be created");
-
-        set_thread_claude_session_id(
-            &workspace.id,
-            &thread_a.id,
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        )
-        .expect("thread A should claim the session");
-        archive_thread(&workspace.id, &thread_a.id).expect("thread A should be archived");
-
-        let reused = set_thread_claude_session_id(
-            &workspace.id,
-            &thread_b.id,
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        )
-        .expect("archived thread should not block reuse");
-
-        assert_eq!(
-            reused.claude_session_id.as_deref(),
-            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-        );
-
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+    fn thread_ui_metadata_is_keyed_by_canonical_thread_id() {
+        let storage = TestStorage::new();
+        let project = storage.root.join("Project");
+        fs::create_dir_all(&project).expect("project");
+        let workspace = add_workspace(project.to_str().unwrap()).expect("workspace");
+        let mut metadata =
+            get_codex_thread_ui_metadata(&workspace.id, "thread-1").expect("metadata");
+        metadata.pinned = true;
+        metadata.draft = "continue here".to_string();
+        save_codex_thread_ui_metadata(metadata).expect("save metadata");
+        let listed = list_codex_thread_ui_metadata(&workspace.id).expect("list metadata");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].thread_id, "thread-1");
+        assert!(listed[0].pinned);
     }
 
     #[test]
-    fn source_session_is_unclaimed_after_native_fork_resolution_via_set_session_id() {
-        let _guard = test_env_lock().lock().expect("lock poisoned");
+    fn removing_and_reimporting_a_project_keeps_and_reassociates_thread_ui_metadata() {
+        let storage = TestStorage::new();
+        let project = storage.root.join("Reimport Me");
+        fs::create_dir_all(&project).expect("project");
+        let original = add_workspace(project.to_str().unwrap()).expect("workspace");
+        let mut metadata =
+            get_codex_thread_ui_metadata(&original.id, "thread-1").expect("metadata");
+        metadata.fallback_title = "Preserved title".to_string();
+        metadata.unread = true;
+        save_codex_thread_ui_metadata(metadata.clone()).expect("save original metadata");
 
-        let temp_root =
-            std::env::temp_dir().join(format!("atcontroller-fork-unclaim-test-{}", Uuid::new_v4()));
-        let workspace_path = temp_root.join("workspace");
-        fs::create_dir_all(&workspace_path).expect("create workspace");
-        std::env::set_var("ATCONTROLLER_APP_SUPPORT_ROOT", &temp_root);
-
-        let workspace =
-            add_workspace(workspace_path.to_string_lossy().as_ref()).expect("add workspace");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("create thread");
-
-        let source_session = "99999999-9999-9999-9999-999999999999";
-        let child_session = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-
-        // Bind source session to the thread.
-        set_thread_claude_session_id(&workspace.id, &thread.id, source_session)
-            .expect("set source session");
-
-        // Commit a pending native fork.
-        let prepared = PreparedNativeFork {
-            source_claude_session_id: source_session.to_string(),
-            known_child_session_ids: vec![],
-            requested_at: Utc::now(),
-        };
-        commit_prepared_thread_pending_fork(&workspace.id, &thread.id, &prepared)
-            .expect("commit pending fork");
-
-        // Simulate resolution: rebind thread to the child session.
-        let resolved = set_thread_claude_session_id(&workspace.id, &thread.id, child_session)
-            .expect("resolve with child session");
-        assert_eq!(resolved.claude_session_id.as_deref(), Some(child_session));
-        assert!(resolved.pending_fork_source_claude_session_id.is_none());
-        assert_eq!(
-            resolved.forked_from_claude_session_id.as_deref(),
-            Some(source_session)
+        assert!(remove_workspace(&original.id).expect("remove entry"));
+        assert!(
+            project.is_dir(),
+            "removing a project never removes its folder"
         );
+        let reimported = add_workspace(project.to_str().unwrap()).expect("reimport workspace");
+        assert_ne!(reimported.id, original.id);
+        metadata.workspace_id = reimported.id.clone();
+        let saved = save_codex_thread_ui_metadata(metadata).expect("reassociate metadata");
+        assert_eq!(saved.workspace_id, reimported.id);
+        assert_eq!(saved.fallback_title, "Preserved title");
+        assert!(saved.unread);
+    }
 
-        // Import the source session into a brand-new thread — must succeed.
-        let import_thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
-            .expect("create import thread");
-        let imported =
-            set_thread_claude_session_id(&workspace.id, &import_thread.id, source_session)
-                .expect("import source session should succeed");
-        assert_eq!(imported.claude_session_id.as_deref(), Some(source_session));
+    #[test]
+    fn migration_backs_up_and_never_maps_incompatible_records() {
+        let storage = TestStorage::new();
+        let legacy_root = storage.root.join("threads").join("workspace-1");
+        let valid_dir = legacy_root.join("local-valid");
+        let incompatible_dir = legacy_root.join("local-incompatible");
+        fs::create_dir_all(&valid_dir).expect("valid legacy directory");
+        fs::create_dir_all(&incompatible_dir).expect("incompatible legacy directory");
+        fs::write(
+            valid_dir.join("thread.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "local-valid",
+                "workspaceId": "workspace-1",
+                "title": "Real Codex thread",
+                "codexSessionId": "canonical-thread-1",
+                "fullAccess": true,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-02T00:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .expect("valid legacy metadata");
+        fs::write(
+            incompatible_dir.join("thread.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "local-incompatible",
+                "workspaceId": "workspace-1",
+                "provider": "legacy-runtime",
+                "codexSessionId": "must-not-be-used"
+            }))
+            .unwrap(),
+        )
+        .expect("incompatible legacy metadata");
 
-        std::env::remove_var("ATCONTROLLER_APP_SUPPORT_ROOT");
-        let _ = fs::remove_dir_all(temp_root);
+        ensure_base_dirs().expect("migration");
+        let store = read_codex_thread_ui_store_at(&storage.root).expect("UI store");
+        assert!(store.threads.contains_key("canonical-thread-1"));
+        assert!(!store.threads.contains_key("must-not-be-used"));
+        assert!(valid_dir.join("thread.json").is_file());
+        assert!(incompatible_dir.join("thread.json").is_file());
+        assert!(storage
+            .root
+            .join(APP_SERVER_MIGRATION_BACKUP_DIR)
+            .join("thread-metadata/workspace-1/local-valid.json")
+            .is_file());
+        let report = fs::read_to_string(
+            storage
+                .root
+                .join(APP_SERVER_MIGRATION_BACKUP_DIR)
+                .join("incompatible-legacy-metadata.json"),
+        )
+        .expect("migration report");
+        assert!(report.contains("local-incompatible"));
     }
 }
