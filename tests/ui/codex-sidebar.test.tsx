@@ -2,7 +2,10 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import { CodexSidebar } from '../../src/components/CodexSidebar';
+import {
+  CodexSidebar,
+  sidebarThreadStateEqual
+} from '../../src/components/CodexSidebar';
 import type { CodexThread, CodexThreadUiMetadata, Workspace } from '../../src/types';
 
 const workspace: Workspace = {
@@ -112,6 +115,45 @@ function sidebarProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Codex project shelf sidebar', () => {
+  it('ignores transcript-only changes when comparing sidebar thread state', () => {
+    const before = {
+      ...thread('active'),
+      turns: [
+        {
+          id: 'turn-1',
+          status: 'completed',
+          itemsView: 'full' as const,
+          items: []
+        }
+      ]
+    };
+    const after = {
+      ...before,
+      turns: [
+        {
+          id: 'turn-1',
+          status: 'completed',
+          itemsView: 'full' as const,
+          items: [
+            {
+              id: 'agent-1',
+              kind: 'agentMessage',
+              text: 'A large streamed response that the sidebar never renders.',
+              summary: [],
+              reasoning: [],
+              content: [],
+              changes: []
+            }
+          ]
+        }
+      ]
+    };
+    expect(sidebarThreadStateEqual(before, after)).toBe(true);
+    expect(
+      sidebarThreadStateEqual(before, { ...after, preview: 'Updated preview' })
+    ).toBe(false);
+  });
+
   it('puts the compact creation actions above projects without duplicate header menus', () => {
     const { container } = render(<CodexSidebar {...sidebarProps()} />);
     const quickActions = container.querySelector('.sidebar-global-actions-top');

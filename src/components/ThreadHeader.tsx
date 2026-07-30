@@ -1,13 +1,12 @@
+import { memo } from 'react';
+
 import type {
   BrowserAction,
   BrowserDiagnostics,
   BrowserSessionMetadata,
   CodexApprovalRequest,
   CodexThread,
-  CodexThreadSession,
   GitInfo,
-  PermissionMode,
-  ThreadPreferences,
   Workspace
 } from '../types';
 import { AppIcon } from './AppIcon';
@@ -16,8 +15,6 @@ import { BrowserMenu } from './BrowserMenu';
 interface ThreadHeaderProps {
   thread: CodexThread;
   workspace: Workspace;
-  session?: CodexThreadSession;
-  preferences: ThreadPreferences;
   gitInfo: GitInfo | null;
   approvals: CodexApprovalRequest[];
   disconnected: boolean;
@@ -37,23 +34,9 @@ interface ThreadHeaderProps {
   onOpenBrowserDiagnostics: () => void;
 }
 
-function permissionLabel(value?: PermissionMode): string {
-  switch (value) {
-    case 'standard':
-      return 'Standard';
-    case 'workspaceAccess':
-      return 'Workspace Access';
-    case 'fullAccess':
-    default:
-      return 'Full Access';
-  }
-}
-
-export function ThreadHeader({
+function ThreadHeaderComponent({
   thread,
   workspace,
-  session,
-  preferences,
   gitInfo,
   approvals,
   disconnected,
@@ -104,31 +87,6 @@ export function ThreadHeader({
           <span className={`session-status ${status}`}><i />{status}</span>
         </div>
       </div>
-      <div className="thread-header-metadata">
-        <span title={session ? 'Effective model' : 'Requested model'}>
-          {session?.settings.effectiveModel ?? preferences.model ?? 'Runtime model'}
-        </span>
-        <span title={session ? 'Effective reasoning effort' : 'Requested reasoning effort'}>
-          {session?.settings.effectiveReasoningEffort ??
-            preferences.reasoningEffort ??
-            'Default reasoning'}
-        </span>
-        {session?.settings.effectiveServiceTier ?? preferences.serviceTier ? (
-          <span title={session ? 'Effective service tier' : 'Requested service tier'}>
-            {session?.settings.effectiveServiceTier ?? preferences.serviceTier}
-          </span>
-        ) : null}
-        <span
-          className={
-            (session?.settings.permissionMode ?? preferences.permissionMode) === 'fullAccess'
-              ? 'full-access-chip'
-              : ''
-          }
-          title="Permission profile"
-        >
-          {permissionLabel(session?.settings.permissionMode ?? preferences.permissionMode)}
-        </span>
-      </div>
       <div className="thread-header-actions">
         <BrowserMenu
           session={browserSession}
@@ -173,3 +131,28 @@ export function ThreadHeader({
     </header>
   );
 }
+
+export const ThreadHeader = memo(
+  ThreadHeaderComponent,
+  (previous, next) => {
+    const previousLastTurn =
+      previous.thread.turns[previous.thread.turns.length - 1];
+    const nextLastTurn = next.thread.turns[next.thread.turns.length - 1];
+    return (
+      previous.thread.id === next.thread.id &&
+      previous.thread.title === next.thread.title &&
+      previous.thread.archived === next.thread.archived &&
+      previousLastTurn?.status === nextLastTurn?.status &&
+      previous.workspace.id === next.workspace.id &&
+      previous.workspace.name === next.workspace.name &&
+      previous.workspace.path === next.workspace.path &&
+      previous.gitInfo?.branch === next.gitInfo?.branch &&
+      previous.approvals.length === next.approvals.length &&
+      previous.disconnected === next.disconnected &&
+      previous.inspectorOpen === next.inspectorOpen &&
+      previous.browserSession === next.browserSession &&
+      previous.browserDiagnostics === next.browserDiagnostics &&
+      previous.browserBusy === next.browserBusy
+    );
+  }
+);

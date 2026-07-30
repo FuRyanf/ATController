@@ -10,6 +10,7 @@ import type {
   PermissionMode,
   Settings
 } from '../types';
+import { serviceTierDisplayName } from '../lib/codexLabels';
 import { AppIcon } from './AppIcon';
 
 type ControlCenterTab = 'settings' | 'diagnostics' | 'browser';
@@ -222,8 +223,9 @@ export function ControlCenterDialog({
                 </label>
                 {defaultModel?.serviceTiers.length ? (
                   <label>
-                    <span>Service tier</span>
+                    <span>Speed</span>
                     <select
+                      aria-label="Speed"
                       value={
                         draft.defaultServiceTier ??
                         defaultModel.defaultServiceTier ??
@@ -237,11 +239,11 @@ export function ControlCenterDialog({
                       }
                     >
                       {!defaultModel.defaultServiceTier ? (
-                        <option value="">Runtime tier</option>
+                        <option value="">Default speed</option>
                       ) : null}
                       {defaultModel.serviceTiers.map((tier) => (
                         <option key={tier.id} value={tier.id}>
-                          {tier.name || tier.id}
+                          {serviceTierDisplayName(tier)}
                         </option>
                       ))}
                     </select>

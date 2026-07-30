@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   ConversationTimeline,
-  findLocalDevelopmentUrl
+  findLocalDevelopmentUrl,
+  normalizeAgentMarkdown,
+  tokenUsagePresentation
 } from '../../src/components/ConversationTimeline';
 import type { CodexApprovalRequest, CodexThread } from '../../src/types';
 
@@ -106,6 +108,25 @@ function structuredThread(): CodexThread {
 }
 
 describe('structured Codex timeline', () => {
+  it('uses the current context rather than cumulative thread tokens for context percentage', () => {
+    expect(
+      tokenUsagePresentation({
+        totalTokens: 41_633_086,
+        inputTokens: 41_000_000,
+        cachedInputTokens: 0,
+        outputTokens: 633_086,
+        reasoningOutputTokens: 0,
+        lastTotalTokens: 32_000,
+        modelContextWindow: 256_000
+      })
+    ).toEqual({
+      label: '32,000 tokens · 13% context',
+      title:
+        'Current context: 32,000 of 256,000 tokens. ' +
+        'Thread cumulative: 41,633,086 tokens.'
+    });
+  });
+
   it('distinguishes history recovery from a genuinely empty thread', () => {
     const thread = structuredThread();
     thread.turns = [];
@@ -166,6 +187,97 @@ describe('structured Codex timeline', () => {
     expect(screen.queryByText('History message 1')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Show 2 earlier turns/ }));
     expect(screen.getByText('History message 1')).toBeInTheDocument();
+  });
+
+  it('pins a newly opened thread to the latest content through late layout changes', () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    const originalRequestAnimationFrame = window.requestAnimationFrame;
+    const originalCancelAnimationFrame = window.cancelAnimationFrame;
+    let resizeCallback: ResizeObserverCallback | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let frameId = 0;
+
+    class ResizeObserverHarness {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this as unknown as ResizeObserver;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+
+    globalThis.ResizeObserver =
+      ResizeObserverHarness as unknown as typeof ResizeObserver;
+    window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      callback(performance.now());
+      frameId += 1;
+      return frameId;
+    }) as typeof window.requestAnimationFrame;
+    window.cancelAnimationFrame = vi.fn();
+
+    const callbacks = {
+      onRespondToApproval: vi.fn(),
+      onRespondToUserInput: vi.fn(),
+      onCopy: vi.fn(),
+      onOpenFile: vi.fn(),
+      onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(),
+      onOpenTerminal: vi.fn()
+    };
+    const firstThread = structuredThread();
+    const { container, rerender, unmount } = render(
+      <ConversationTimeline
+        thread={firstThread}
+        approvals={[]}
+        {...callbacks}
+      />
+    );
+    const scrollElement = container.querySelector<HTMLElement>(
+      '.conversation-timeline'
+    )!;
+    let scrollHeight = 1_000;
+    Object.defineProperty(scrollElement, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight
+    });
+    Object.defineProperty(scrollElement, 'clientHeight', {
+      configurable: true,
+      get: () => 300
+    });
+
+    const secondThread = {
+      ...structuredThread(),
+      id: 'thread-2',
+      sessionId: 'thread-2'
+    };
+    rerender(
+      <ConversationTimeline
+        thread={secondThread}
+        approvals={[]}
+        {...callbacks}
+      />
+    );
+    expect(scrollElement.scrollTop).toBe(1_000);
+
+    scrollHeight = 1_600;
+    act(() => {
+      resizeCallback?.([], resizeObserver!);
+    });
+    expect(scrollElement.scrollTop).toBe(1_600);
+
+    scrollElement.scrollTop = 400;
+    fireEvent.scroll(scrollElement);
+    scrollHeight = 2_000;
+    act(() => {
+      resizeCallback?.([], resizeObserver!);
+    });
+    expect(scrollElement.scrollTop).toBe(400);
+
+    unmount();
+    globalThis.ResizeObserver = originalResizeObserver;
+    window.requestAnimationFrame = originalRequestAnimationFrame;
+    window.cancelAnimationFrame = originalCancelAnimationFrame;
   });
 
   it('finds and navigates matches across the full thread with Command-F events', async () => {
@@ -350,6 +462,54 @@ describe('structured Codex timeline', () => {
       'let errors = materialize(ctc_pipeline_logs);\nerrors | count',
       'Code block'
     );
+  });
+
+  it('unwraps balanced structured writing envelopes before rendering Markdown', () => {
+    const wrapped = [
+      ':::writing{variant="chat_message" id="48217"} Good morning team.',
+      '',
+      '- **Design:** Add the document.',
+      '- Keep the negative ID canonical.',
+      '',
+      'We will review it together. :::'
+    ].join('\n');
+    expect(normalizeAgentMarkdown(wrapped)).toBe(
+      [
+        'Good morning team.',
+        '',
+        '- **Design:** Add the document.',
+        '- Keep the negative ID canonical.',
+        '',
+        'We will review it together.'
+      ].join('\n')
+    );
+    expect(normalizeAgentMarkdown('Keep this ordinary ::: marker')).toBe(
+      'Keep this ordinary ::: marker'
+    );
+
+    const thread = structuredThread();
+    const agent = thread.turns[0].items.find(
+      (item) => item.kind === 'agentMessage'
+    )!;
+    agent.text = wrapped;
+    const { container } = render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={vi.fn()}
+        onOpenFile={vi.fn()}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Design:')).toHaveProperty('tagName', 'STRONG');
+    expect(screen.getByText('Keep the negative ID canonical.').closest('li')).not.toBeNull();
+    expect(container).not.toHaveTextContent(':::writing');
+    expect(container).not.toHaveTextContent('review it together. :::');
   });
 
   it('keeps large diffs compact until the user requests the full patch', async () => {

@@ -359,7 +359,8 @@ impl CodexRuntime {
         validate_id(&thread_id, "thread id")?;
         self.validate_preferences(&workspace_path, &preferences)
             .await?;
-        self.validate_skill_inputs(&workspace_path, &inputs).await?;
+        self.validate_composer_inputs(&workspace_path, &inputs)
+            .await?;
         let input = protocol::build_wire_inputs(&workspace_path, inputs)?;
         let mut params = json!({
             "threadId": thread_id,
@@ -401,7 +402,8 @@ impl CodexRuntime {
         let workspace_path = process::validate_workspace_path(&workspace_path)?;
         validate_id(&thread_id, "thread id")?;
         validate_id(&turn_id, "turn id")?;
-        self.validate_skill_inputs(&workspace_path, &inputs).await?;
+        self.validate_composer_inputs(&workspace_path, &inputs)
+            .await?;
         let input = protocol::build_wire_inputs(&workspace_path, inputs)?;
         self.request(
             "turn/steer",
@@ -518,30 +520,49 @@ impl CodexRuntime {
         Ok(())
     }
 
-    async fn validate_skill_inputs(
+    async fn validate_composer_inputs(
         self: &std::sync::Arc<Self>,
         workspace_path: &str,
         inputs: &[ComposerInput],
     ) -> Result<()> {
-        let requested = inputs
+        let requested_skills = inputs
             .iter()
             .filter_map(|input| match input {
                 ComposerInput::Skill { name, path } => Some((name, path)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        if requested.is_empty() {
-            return Ok(());
+        if !requested_skills.is_empty() {
+            let available = self.list_skills(workspace_path.to_string(), false).await?;
+            for (name, path) in requested_skills {
+                if !available
+                    .iter()
+                    .any(|skill| skill.enabled && skill.name == *name && skill.path == *path)
+                {
+                    return Err(anyhow!(
+                        "The selected Codex skill is unavailable for this workspace"
+                    ));
+                }
+            }
         }
-        let available = self.list_skills(workspace_path.to_string(), false).await?;
-        for (name, path) in requested {
-            if !available
-                .iter()
-                .any(|skill| skill.enabled && skill.name == *name && skill.path == *path)
-            {
-                return Err(anyhow!(
-                    "The selected Codex skill is unavailable for this workspace"
-                ));
+
+        let requested_plugins = inputs
+            .iter()
+            .filter_map(|input| match input {
+                ComposerInput::Plugin { id, name } => Some((id, name)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !requested_plugins.is_empty() {
+            let available = self.list_plugins(workspace_path.to_string()).await?;
+            for (id, name) in requested_plugins {
+                if !available.iter().any(|plugin| {
+                    plugin.enabled && plugin.id == *id && plugin.display_name == *name
+                }) {
+                    return Err(anyhow!(
+                        "The selected Codex plugin is unavailable for this workspace"
+                    ));
+                }
             }
         }
         Ok(())
@@ -834,6 +855,19 @@ mod tests {
         assert_eq!(params["sandbox"], "danger-full-access");
         assert_eq!(params["approvalPolicy"], "never");
         assert!(params.to_string().find("yolo").is_none());
+    }
+
+    #[test]
+    fn thread_reinstantiation_carries_reasoning_effort_as_generated_config() {
+        let params = thread_open_params(
+            "/tmp/project",
+            &ThreadPreferences {
+                reasoning_effort: Some("high".to_string()),
+                ..ThreadPreferences::default()
+            },
+            None,
+        );
+        assert_eq!(params["config"]["model_reasoning_effort"], "high");
     }
 
     #[test]

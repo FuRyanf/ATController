@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  coalesceCodexEvents,
   CodexStore,
   reduceCodexEvent,
   type CodexStoreSnapshot
@@ -49,6 +50,65 @@ function event(overrides: Partial<CodexEvent>): CodexEvent {
 }
 
 describe('structured Codex event reduction', () => {
+  it('coalesces adjacent high-frequency deltas without crossing item boundaries', () => {
+    const events = coalesceCodexEvents([
+      event({
+        sequence: 1,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-1',
+        itemId: 'agent-1',
+        delta: 'Hello'
+      }),
+      event({
+        sequence: 2,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-1',
+        itemId: 'agent-1',
+        delta: ' world'
+      }),
+      event({
+        sequence: 3,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-1',
+        itemId: 'agent-2',
+        delta: 'Separate'
+      })
+    ]);
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      sequence: 2,
+      itemId: 'agent-1',
+      delta: 'Hello world'
+    });
+    expect(events[1]).toMatchObject({
+      sequence: 3,
+      itemId: 'agent-2',
+      delta: 'Separate'
+    });
+  });
+
+  it('keeps unchanged store slices referentially stable for generic events', () => {
+    const before = snapshot();
+    const after = reduceCodexEvent(
+      before,
+      event({
+        sequence: 1,
+        kind: 'generic',
+        method: 'future/diagnostic',
+        threadId: 'thread-1'
+      })
+    );
+
+    expect(after.threads).toBe(before.threads);
+    expect(after.approvals).toBe(before.approvals);
+    expect(after.usage).toBe(before.usage);
+    expect(after.lastSequence).toBe(1);
+  });
+
   it('accepts item events before turn responses and streams into only that item', () => {
     let state = reduceCodexEvent(
       snapshot(),

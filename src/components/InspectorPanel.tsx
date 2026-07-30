@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 
 import { api } from '../lib/api';
+import { serviceTierDisplayName } from '../lib/codexLabels';
 import type {
   BrowserAction,
   BrowserDiagnostics,
@@ -21,6 +22,7 @@ type InspectorTab = 'changes' | 'commands' | 'browser' | 'thread' | 'runtime';
 
 interface InspectorPanelProps {
   thread: CodexThread;
+  workspacePath: string;
   session?: CodexThreadSession;
   metadata?: CodexThreadUiMetadata;
   diagnostics: CodexDiagnostics | null;
@@ -66,7 +68,7 @@ function formatTimestamp(timestamp: number): string {
   return new Date(timestamp > 10_000_000_000 ? timestamp : timestamp * 1000).toLocaleString();
 }
 
-export function InspectorPanel({
+function InspectorPanelComponent({
   thread,
   session,
   metadata,
@@ -438,7 +440,16 @@ export function InspectorPanel({
               <dl>
                 <div><dt>Model</dt><dd>{session?.settings.effectiveModel ?? metadata?.requestedModel ?? 'Runtime default'}</dd></div>
                 <div><dt>Reasoning</dt><dd>{session?.settings.effectiveReasoningEffort ?? metadata?.requestedReasoningEffort ?? 'Runtime default'}</dd></div>
-                <div><dt>Service tier</dt><dd>{session?.settings.effectiveServiceTier ?? metadata?.requestedServiceTier ?? 'Runtime default'}</dd></div>
+                <div>
+                  <dt>Speed</dt>
+                  <dd>
+                    {serviceTierDisplayName(
+                      undefined,
+                      session?.settings.effectiveServiceTier ??
+                        metadata?.requestedServiceTier
+                    ) || 'Runtime default'}
+                  </dd>
+                </div>
                 <div><dt>Permissions</dt><dd>{session?.settings.permissionMode ?? metadata?.permissionMode ?? 'fullAccess'}</dd></div>
                 <div><dt>Approval policy</dt><dd>{session?.settings.approvalPolicy ?? 'Runtime default'}</dd></div>
                 <div><dt>Sandbox</dt><dd>{session?.settings.sandboxPolicy ?? 'Runtime default'}</dd></div>
@@ -484,3 +495,31 @@ export function InspectorPanel({
     </aside>
   );
 }
+
+function inspectorMetadataEqual(
+  left: CodexThreadUiMetadata | undefined,
+  right: CodexThreadUiMetadata | undefined
+): boolean {
+  return (
+    left?.requestedModel === right?.requestedModel &&
+    left?.requestedReasoningEffort === right?.requestedReasoningEffort &&
+    left?.requestedServiceTier === right?.requestedServiceTier &&
+    left?.permissionMode === right?.permissionMode
+  );
+}
+
+export const InspectorPanel = memo(
+  InspectorPanelComponent,
+  (previous, next) =>
+    previous.thread === next.thread &&
+    previous.workspacePath === next.workspacePath &&
+    previous.session === next.session &&
+    inspectorMetadataEqual(previous.metadata, next.metadata) &&
+    previous.diagnostics === next.diagnostics &&
+    previous.browserSession === next.browserSession &&
+    previous.browserDiagnostics === next.browserDiagnostics &&
+    previous.browserBusy === next.browserBusy &&
+    previous.gitInfo === next.gitInfo &&
+    previous.gitStatus === next.gitStatus &&
+    previous.gitBranches === next.gitBranches
+);

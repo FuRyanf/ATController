@@ -458,6 +458,19 @@ async fn codex_list_runtime_skills(
 }
 
 #[tauri::command]
+async fn codex_list_runtime_plugins(
+    state: State<'_, AppState>,
+    workspace_path: String,
+) -> Result<Vec<codex::CodexPlugin>, String> {
+    state
+        .codex
+        .clone()
+        .list_plugins(workspace_path)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn codex_build_resume_command(
     state: State<'_, AppState>,
     request: ResumeCommandRequest,
@@ -958,6 +971,7 @@ fn main() {
             codex_interrupt_turn,
             codex_respond_to_server_request,
             codex_list_runtime_skills,
+            codex_list_runtime_plugins,
             codex_build_resume_command,
             codex_open_resume_in_terminal,
             get_app_storage_root,

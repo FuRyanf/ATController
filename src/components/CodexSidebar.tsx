@@ -315,10 +315,45 @@ interface ProjectShelfProps {
   onDragEnd: () => void;
 }
 
-function equalThreadReferences(left: CodexThread[], right: CodexThread[]): boolean {
+export function sidebarThreadStateEqual(
+  left: CodexThread,
+  right: CodexThread
+): boolean {
+  if (left === right) return true;
+  return (
+    left.id === right.id &&
+    left.title === right.title &&
+    left.preview === right.preview &&
+    left.status === right.status &&
+    left.archived === right.archived &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    left.recencyAt === right.recencyAt &&
+    lastTurn(left)?.status === lastTurn(right)?.status
+  );
+}
+
+function equalSidebarThreadLists(
+  left: CodexThread[],
+  right: CodexThread[]
+): boolean {
   return (
     left.length === right.length &&
-    left.every((thread, index) => thread === right[index])
+    left.every((thread, index) =>
+      sidebarThreadStateEqual(thread, right[index])
+    )
+  );
+}
+
+function sidebarMetadataEqual(
+  left?: CodexThreadUiMetadata,
+  right?: CodexThreadUiMetadata
+): boolean {
+  return (
+    left === right ||
+    (left?.fallbackTitle === right?.fallbackTitle &&
+      left?.pinned === right?.pinned &&
+      left?.unread === right?.unread)
   );
 }
 
@@ -334,7 +369,7 @@ function areProjectShelfPropsEqual(
     previous.runtimeFailed !== next.runtimeFailed ||
     previous.draggable !== next.draggable ||
     previous.dragging !== next.dragging ||
-    !equalThreadReferences(previous.threads, next.threads)
+    !equalSidebarThreadLists(previous.threads, next.threads)
   ) {
     return false;
   }
@@ -364,7 +399,10 @@ function areProjectShelfPropsEqual(
   if (previousDrop !== nextDrop) return false;
   return previous.threads.every(
     (thread) =>
-      previous.metadata[thread.id] === next.metadata[thread.id] &&
+      sidebarMetadataEqual(
+        previous.metadata[thread.id],
+        next.metadata[thread.id]
+      ) &&
       previous.waitingThreadIds.has(thread.id) === next.waitingThreadIds.has(thread.id)
   );
 }
@@ -734,7 +772,7 @@ const ProjectShelf = memo(function ProjectShelf({
   );
 }, areProjectShelfPropsEqual);
 
-export function CodexSidebar({
+function CodexSidebarComponent({
   workspaces,
   selectedWorkspaceId,
   selectedThreadId,
@@ -1080,3 +1118,77 @@ export function CodexSidebar({
     </aside>
   );
 }
+
+function equalWorkspaceReferences(left: Workspace[], right: Workspace[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((workspace, index) => workspace === right[index])
+  );
+}
+
+function approvalThreadIds(
+  approvals: Record<string, CodexApprovalRequest>
+): Set<string> {
+  return new Set(
+    Object.values(approvals)
+      .map((approval) => approval.threadId)
+      .filter((threadId): threadId is string => Boolean(threadId))
+  );
+}
+
+function areCodexSidebarPropsEqual(
+  previous: CodexSidebarProps,
+  next: CodexSidebarProps
+): boolean {
+  if (
+    previous.selectedWorkspaceId !== next.selectedWorkspaceId ||
+    previous.selectedThreadId !== next.selectedThreadId ||
+    previous.filter !== next.filter ||
+    previous.sortMode !== next.sortMode ||
+    previous.connectionState !== next.connectionState ||
+    previous.collapsed !== next.collapsed ||
+    !equalWorkspaceReferences(previous.workspaces, next.workspaces)
+  ) {
+    return false;
+  }
+  const previousWaiting = approvalThreadIds(previous.approvals);
+  const nextWaiting = approvalThreadIds(next.approvals);
+  if (
+    previousWaiting.size !== nextWaiting.size ||
+    [...previousWaiting].some((threadId) => !nextWaiting.has(threadId))
+  ) {
+    return false;
+  }
+  for (const workspace of previous.workspaces) {
+    const previousThreads =
+      previous.threadsByWorkspace[workspace.id] ?? [];
+    const nextThreads = next.threadsByWorkspace[workspace.id] ?? [];
+    if (!equalSidebarThreadLists(previousThreads, nextThreads)) {
+      return false;
+    }
+    if (
+      previous.gitInfoByWorkspace[workspace.id] !==
+        next.gitInfoByWorkspace[workspace.id] ||
+      Boolean(previous.loadingWorkspaceIds?.has(workspace.id)) !==
+        Boolean(next.loadingWorkspaceIds?.has(workspace.id))
+    ) {
+      return false;
+    }
+    for (const thread of previousThreads) {
+      if (
+        !sidebarMetadataEqual(
+          previous.metadata[thread.id],
+          next.metadata[thread.id]
+        )
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+export const CodexSidebar = memo(
+  CodexSidebarComponent,
+  areCodexSidebarPropsEqual
+);

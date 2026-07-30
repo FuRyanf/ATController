@@ -43,11 +43,20 @@ import {
   normalizeAppearanceMode,
   persistAppearanceMode
 } from './lib/appearance';
+import { serviceTierDisplayName } from './lib/codexLabels';
 import {
   bootstrapCodexRuntime,
   readStableRuntimeDiagnostics
 } from './lib/runtimeBootstrap';
-import { codexStore, useCodexStore } from './stores/codexStore';
+import {
+  reinstantiateCodexThreadSession,
+  requiresSessionReinstantiation
+} from './lib/sessionReconfiguration';
+import {
+  codexStore,
+  useCodexStore,
+  type CodexStoreSnapshot
+} from './stores/codexStore';
 import type {
   BrowserAction,
   BrowserDiagnostics,
@@ -57,6 +66,7 @@ import type {
   CodexApprovalRequest,
   CodexDiscoveredProject,
   CodexEvent,
+  CodexPlugin,
   CodexRuntimeCatalog,
   CodexSkill,
   CodexThread,
@@ -92,6 +102,13 @@ const SELECTED_THREAD_KEY = 'atcontroller:selected-codex-thread-v2';
 const SIDEBAR_WIDTH_KEY = 'atcontroller:sidebar-width-v2';
 const INSPECTOR_OPEN_KEY = 'atcontroller:inspector-open-v2';
 const PROJECT_SORT_KEY = 'atcontroller:project-sort-v1';
+
+const selectCodexThreads = (snapshot: CodexStoreSnapshot) => snapshot.threads;
+const selectCodexSessions = (snapshot: CodexStoreSnapshot) => snapshot.sessions;
+const selectCodexApprovals = (snapshot: CodexStoreSnapshot) => snapshot.approvals;
+const selectCodexUsage = (snapshot: CodexStoreSnapshot) => snapshot.usage;
+const selectCodexDiagnostics = (snapshot: CodexStoreSnapshot) =>
+  snapshot.diagnostics;
 
 interface Toast {
   id: string;
@@ -259,7 +276,18 @@ function EmptyWorkspace({
 }
 
 export default function App() {
-  const codex = useCodexStore((snapshot) => snapshot);
+  const codexThreads = useCodexStore(selectCodexThreads);
+  const codexSessions = useCodexStore(selectCodexSessions);
+  const codexApprovals = useCodexStore(selectCodexApprovals);
+  const codexUsage = useCodexStore(selectCodexUsage);
+  const codexDiagnostics = useCodexStore(selectCodexDiagnostics);
+  const codex = {
+    threads: codexThreads,
+    sessions: codexSessions,
+    approvals: codexApprovals,
+    usage: codexUsage,
+    diagnostics: codexDiagnostics
+  };
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
     () => window.localStorage.getItem(SELECTED_WORKSPACE_KEY)
@@ -274,13 +302,17 @@ export default function App() {
   const [filter, setFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [recoveringThread, setRecoveringThread] = useState(false);
+  const [reconfiguringThreadId, setReconfiguringThreadId] =
+    useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [attachmentsByThread, setAttachmentsByThread] = useState<Record<string, ComposerAttachment[]>>({});
   const [runtimeSkills, setRuntimeSkills] = useState<CodexSkill[]>([]);
+  const [runtimePlugins, setRuntimePlugins] = useState<CodexPlugin[]>([]);
   const [skillsByThread, setSkillsByThread] = useState<Record<string, CodexSkill[]>>({});
+  const [pluginsByThread, setPluginsByThread] = useState<Record<string, CodexPlugin[]>>({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [projectContextMenu, setProjectContextMenu] =
     useState<ProjectContextMenuState | null>(null);
@@ -334,6 +366,7 @@ export default function App() {
   const [gitInfoByWorkspace, setGitInfoByWorkspace] = useState<Record<string, GitInfo | null>>({});
   const [gitStatus, setGitStatus] = useState<GitWorkspaceStatus | null>(null);
   const [gitBranches, setGitBranches] = useState<GitBranchEntry[]>([]);
+  const metadataWorkspaceAssignmentsCache = useRef<Record<string, string>>({});
 
   const selectedWorkspace = workspaces.find((workspace) => workspace.id === selectedWorkspaceId);
   const projectTerminalWorkspace = projectTerminalTarget
@@ -346,13 +379,35 @@ export default function App() {
       : undefined;
   const selectedMetadata = selectedThreadId ? metadata[selectedThreadId] : undefined;
   const selectedPreferences = preferencesFromMetadata(selectedMetadata, settings);
-  const selectedApprovals = Object.values(codex.approvals).filter(
-    (approval) => approval.threadId === selectedThreadId
+  const selectedApprovals = useMemo(
+    () =>
+      Object.values(codex.approvals).filter(
+        (approval) => approval.threadId === selectedThreadId
+      ),
+    [codex.approvals, selectedThreadId]
   );
   const selectedRunningTurn = lastRunningTurn(selectedThread);
+  const selectedThreadRecovering =
+    recoveringThread || reconfiguringThreadId === selectedThreadId;
   const selectedBrowserSession = selectedThreadId
     ? browserSessions[selectedThreadId]
     : undefined;
+  const metadataWorkspaceAssignments = useMemo(() => {
+    const previous = metadataWorkspaceAssignmentsCache.current;
+    const entries = Object.values(metadata);
+    const previousIds = Object.keys(previous);
+    const unchanged =
+      previousIds.length === entries.length &&
+      entries.every(
+        (item) => previous[item.threadId] === item.workspaceId
+      );
+    if (unchanged) return previous;
+    const next = Object.fromEntries(
+      entries.map((item) => [item.threadId, item.workspaceId])
+    );
+    metadataWorkspaceAssignmentsCache.current = next;
+    return next;
+  }, [metadata]);
   const threadsByWorkspace = useMemo(() => {
     const result: Record<string, CodexThread[]> = Object.fromEntries(
       workspaces.map((workspace) => [workspace.id, []])
@@ -370,8 +425,12 @@ export default function App() {
     }
     for (const thread of Object.values(codex.threads)) {
       if (assigned.has(thread.id)) continue;
-      const workspace = workspaces.find((candidate) =>
-        workspaceMatchesThread(candidate, thread, metadata[thread.id])
+      const metadataWorkspaceId =
+        metadataWorkspaceAssignments[thread.id];
+      const workspace = workspaces.find(
+        (candidate) =>
+          candidate.id === metadataWorkspaceId ||
+          workspaceMatchesThread(candidate, thread)
       );
       if (!workspace) continue;
       result[workspace.id].push(thread);
@@ -384,7 +443,12 @@ export default function App() {
       );
     }
     return result;
-  }, [codex.threads, metadata, threadIdsByWorkspace, workspaces]);
+  }, [
+    codex.threads,
+    metadataWorkspaceAssignments,
+    threadIdsByWorkspace,
+    workspaces
+  ]);
   const visibleThreads = selectedWorkspaceId
     ? threadsByWorkspace[selectedWorkspaceId] ?? []
     : [];
@@ -398,6 +462,11 @@ export default function App() {
   const connected = codex.diagnostics?.connectionState === 'ready';
   const currentAttachments = selectedThreadId ? attachmentsByThread[selectedThreadId] ?? [] : [];
   const currentSkills = selectedThreadId ? skillsByThread[selectedThreadId] ?? [] : [];
+  const currentPlugins = selectedThreadId ? pluginsByThread[selectedThreadId] ?? [] : [];
+  const unreadCount = useMemo(
+    () => Object.values(metadata).filter((item) => item.unread).length,
+    [metadata]
+  );
 
   const selectedWorkspaceRef = useRef<Workspace | undefined>(selectedWorkspace);
   const workspacesRef = useRef<Workspace[]>(workspaces);
@@ -408,6 +477,8 @@ export default function App() {
   const runtimeEventRevision = useRef(0);
   const gitRefreshTimer = useRef<number | null>(null);
   const threadRefreshSequence = useRef<Record<string, number>>({});
+  const sessionReconfigurationSequence = useRef<Record<string, number>>({});
+  const sessionReconfigurationQueue = useRef<Record<string, Promise<void>>>({});
   const restoredWorkspace = useRef<string | null>(null);
 
   useEffect(() => {
@@ -435,9 +506,8 @@ export default function App() {
     return () => media.removeEventListener('change', update);
   }, [settings.appearanceMode]);
   useEffect(() => {
-    const unreadCount = Object.values(metadata).filter((item) => item.unread).length;
     void api.setAppBadgeCount(unreadCount > 0 ? unreadCount : null).catch(() => undefined);
-  }, [metadata]);
+  }, [unreadCount]);
 
   const showToast = useCallback((message: string, tone: Toast['tone'] = 'neutral') => {
     const id = crypto.randomUUID();
@@ -448,6 +518,11 @@ export default function App() {
   }, []);
 
   const removeThreadFromUi = useCallback((threadId: string) => {
+    sessionReconfigurationSequence.current[threadId] =
+      (sessionReconfigurationSequence.current[threadId] ?? 0) + 1;
+    setReconfiguringThreadId((current) =>
+      current === threadId ? null : current
+    );
     codexStore.removeThread(threadId);
     setThreadIdsByWorkspace((current) =>
       Object.fromEntries(
@@ -467,6 +542,11 @@ export default function App() {
       return next;
     });
     setSkillsByThread((current) => {
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
+    setPluginsByThread((current) => {
       const next = { ...current };
       delete next[threadId];
       return next;
@@ -1139,6 +1219,15 @@ export default function App() {
       ) {
         void api.getCodexCatalog().then(setCatalog).catch(() => undefined);
       }
+      if (event.kind === 'skillsChanged') {
+        const workspace = selectedWorkspaceRef.current;
+        if (workspace) {
+          void api
+            .listCodexRuntimeSkills(workspace.path, true)
+            .then((skills) => setRuntimeSkills(skills.filter((skill) => skill.enabled)))
+            .catch(() => undefined);
+        }
+      }
     }).then((stop) => (disposed ? releaseTauriListener(stop) : unlisten.push(stop)));
     void apiModule
       .onCodexRuntimeState((diagnostics) => {
@@ -1202,10 +1291,14 @@ export default function App() {
     restoredWorkspace.current = null;
     void refreshGit(selectedWorkspace);
     void api
-      .listCodexRuntimeSkills(selectedWorkspace.path)
+      .listCodexRuntimeSkills(selectedWorkspace.path, true)
       .then((skills) => setRuntimeSkills(skills.filter((skill) => skill.enabled)))
       .catch(() => setRuntimeSkills([]));
-  }, [refreshGit, refreshThreads, selectedWorkspace?.id]);
+    void api
+      .listCodexRuntimePlugins(selectedWorkspace.path)
+      .then((plugins) => setRuntimePlugins(plugins.filter((plugin) => plugin.enabled)))
+      .catch(() => setRuntimePlugins([]));
+  }, [connected, refreshGit, refreshThreads, selectedWorkspace?.id]);
 
   useEffect(() => {
     if (
@@ -1266,19 +1359,121 @@ export default function App() {
   const updatePreferences = useCallback(
     (preferences: ThreadPreferences) => {
       if (!selectedThread || !selectedWorkspace) return;
+      const threadId = selectedThread.id;
+      const previous = preferencesFromMetadata(
+        metadataRef.current[threadId],
+        settingsRef.current
+      );
       const current =
-        metadataRef.current[selectedThread.id] ??
+        metadataRef.current[threadId] ??
         createUiMetadata(selectedWorkspace, selectedThread, preferences);
-      void persistMetadata({
+      const next = {
         ...current,
         permissionMode: preferences.permissionMode,
         requestedModel: preferences.model ?? null,
         requestedReasoningEffort: preferences.reasoningEffort ?? null,
         requestedServiceTier: preferences.serviceTier ?? null,
         updatedAt: nowIso()
-      });
+      };
+      metadataRef.current = { ...metadataRef.current, [threadId]: next };
+      setMetadata((all) => ({ ...all, [threadId]: next }));
+
+      if (
+        selectedThread.archived ||
+        !requiresSessionReinstantiation(previous, preferences)
+      ) {
+        void persistMetadata(next);
+        return;
+      }
+
+      const sequence =
+        (sessionReconfigurationSequence.current[threadId] ?? 0) + 1;
+      sessionReconfigurationSequence.current[threadId] = sequence;
+      setReconfiguringThreadId(threadId);
+      const previousOperation =
+        sessionReconfigurationQueue.current[threadId] ?? Promise.resolve();
+      const operation = previousOperation
+        .catch(() => undefined)
+        .then(async () => {
+          if (
+            sessionReconfigurationSequence.current[threadId] !== sequence
+          ) {
+            return;
+          }
+          const permissionChanged =
+            previous.permissionMode !== preferences.permissionMode;
+          const reasoningChanged =
+            previous.reasoningEffort !== preferences.reasoningEffort;
+          const changeLabel = [
+            reasoningChanged ? 'reasoning effort' : '',
+            permissionChanged ? 'access' : ''
+          ]
+            .filter(Boolean)
+            .join(' and ');
+          try {
+            await persistMetadata(next);
+            if (
+              sessionReconfigurationSequence.current[threadId] !== sequence
+            ) {
+              return;
+            }
+            if (connectionStateRef.current !== 'ready') {
+              showToast(
+                `Saved ${changeLabel}; it will apply when Codex reconnects`
+              );
+              return;
+            }
+            const activeTurnId = lastRunningTurn(
+              codexStore.getSnapshot().threads[threadId]
+            )?.id;
+            const { session, interrupted } =
+              await reinstantiateCodexThreadSession(api, {
+                workspacePath: selectedWorkspace.path,
+                threadId,
+                activeTurnId,
+                preferences
+              });
+            if (
+              sessionReconfigurationSequence.current[threadId] !== sequence
+            ) {
+              return;
+            }
+            codexStore.setSession(session);
+            if (selectedThreadIdRef.current === threadId) {
+              setThreadError(null);
+            }
+            showToast(
+              interrupted
+                ? `Updated ${changeLabel}; stopped the active turn and resumed the thread`
+                : `Updated ${changeLabel} and resumed the thread`,
+              'success'
+            );
+          } catch (error) {
+            if (
+              sessionReconfigurationSequence.current[threadId] !== sequence
+            ) {
+              return;
+            }
+            const message =
+              `Could not reinstantiate the Codex thread with the new ` +
+              `${changeLabel}: ${String(error)}`;
+            if (selectedThreadIdRef.current === threadId) {
+              setThreadError(message);
+            }
+            showToast(message, 'error');
+          } finally {
+            if (
+              sessionReconfigurationSequence.current[threadId] === sequence
+            ) {
+              setReconfiguringThreadId((currentId) =>
+                currentId === threadId ? null : currentId
+              );
+            }
+          }
+        });
+      sessionReconfigurationQueue.current[threadId] = operation;
     },
-    [persistMetadata, selectedThread, selectedWorkspace]
+    [persistMetadata, selectedThread, selectedWorkspace, showToast]
   );
 
   const submitInputs = useCallback(
@@ -1318,6 +1513,7 @@ export default function App() {
         });
         setAttachmentsByThread((all) => ({ ...all, [selectedThread.id]: [] }));
         setSkillsByThread((all) => ({ ...all, [selectedThread.id]: [] }));
+        setPluginsByThread((all) => ({ ...all, [selectedThread.id]: [] }));
       } catch (error) {
         setThreadError(`Codex could not start this turn: ${String(error)}`);
       } finally {
@@ -1723,6 +1919,40 @@ export default function App() {
     }
     openProjectTerminal();
   }, [openProjectTerminal, projectTerminalOpen]);
+
+  const openTimelineFile = useCallback((path: string) => {
+    const workspace = selectedWorkspaceRef.current;
+    if (workspace) void api.openProjectFile(workspace.path, path);
+  }, []);
+
+  const revealTimelinePath = useCallback((path: string) => {
+    const workspace = selectedWorkspaceRef.current;
+    if (workspace) void api.revealProjectFile(workspace.path, path);
+  }, []);
+
+  const openTimelineTerminal = useCallback(
+    (path: string) => openProjectTerminal(path),
+    [openProjectTerminal]
+  );
+
+  const openTimelineBrowser = useCallback(
+    (url: string) => {
+      if (browserDiagnostics?.configuration.configured !== true) {
+        setControlCenter('browser');
+        showToast(
+          'Configure Playwright MCP before opening a development server',
+          'error'
+        );
+        return;
+      }
+      void runBrowserAction('open', url);
+    },
+    [
+      browserDiagnostics?.configuration.configured,
+      runBrowserAction,
+      showToast
+    ]
+  );
 
   const removeProject = useCallback(
     async (workspaceId: string) => {
@@ -2407,6 +2637,7 @@ export default function App() {
   );
 
   const paletteActions = useMemo<PaletteAction[]>(() => {
+    if (!paletteOpen) return [];
     const actions: PaletteAction[] = [
       {
         id: 'open-project',
@@ -2661,7 +2892,7 @@ export default function App() {
     for (const tier of activeModel?.serviceTiers ?? []) {
       actions.push({
         id: `tier-${tier.id}`,
-        label: `Service Tier: ${tier.name || tier.id}`,
+        label: `Speed: ${serviceTierDisplayName(tier)}`,
         description: tier.description,
         icon: 'refresh',
         disabled: !selectedThread,
@@ -2693,6 +2924,7 @@ export default function App() {
     openCloneDialog,
     openThread,
     openProjectImport,
+    paletteOpen,
     pickProject,
     renameThread,
     restartRuntime,
@@ -2894,8 +3126,6 @@ export default function App() {
             <ThreadHeader
               thread={selectedThread}
               workspace={selectedWorkspace}
-              session={selectedSession}
-              preferences={selectedPreferences}
               gitInfo={gitInfo}
               approvals={selectedApprovals}
               disconnected={!connected}
@@ -2961,25 +3191,15 @@ export default function App() {
                     thread={selectedThread}
                     approvals={selectedApprovals}
                     usage={codex.usage[selectedThread.id]}
-                    recovering={recoveringThread}
-                    onRespondToApproval={(approval, decision) => void respondToApproval(approval, decision)}
-                    onRespondToUserInput={(approval, answers) => void respondToUserInput(approval, answers)}
-                    onCopy={(value, label) => void copyText(value, label)}
-                    onOpenFile={(path) => void api.openProjectFile(selectedWorkspace.path, path)}
-                    onRevealPath={(path) => void api.revealProjectFile(selectedWorkspace.path, path)}
-                    onRevertFile={(path) => void revertGitFile(path)}
-                    onOpenTerminal={(path) => openProjectTerminal(path, selectedWorkspace)}
-                    onOpenBrowser={(url) => {
-                      if (browserDiagnostics?.configuration.configured !== true) {
-                        setControlCenter('browser');
-                        showToast(
-                          'Configure Playwright MCP before opening a development server',
-                          'error'
-                        );
-                        return;
-                      }
-                      void runBrowserAction('open', url);
-                    }}
+                    recovering={selectedThreadRecovering}
+                    onRespondToApproval={respondToApproval}
+                    onRespondToUserInput={respondToUserInput}
+                    onCopy={copyText}
+                    onOpenFile={openTimelineFile}
+                    onRevealPath={revealTimelinePath}
+                    onRevertFile={revertGitFile}
+                    onOpenTerminal={openTimelineTerminal}
+                    onOpenBrowser={openTimelineBrowser}
                   />
                 </Suspense>
                 <MessageComposer
@@ -2990,14 +3210,19 @@ export default function App() {
                   attachments={currentAttachments}
                   skills={runtimeSkills}
                   selectedSkills={currentSkills}
+                  plugins={runtimePlugins}
+                  selectedPlugins={currentPlugins}
                   preferences={selectedPreferences}
+                  effectiveServiceTier={
+                    selectedSession?.settings.effectiveServiceTier
+                  }
                   models={catalog?.models ?? []}
                   fiveHourLimit={catalog?.account.fiveHourLimit}
                   weeklyLimit={catalog?.account.weeklyLimit}
                   archived={selectedThread.archived}
                   running={Boolean(selectedRunningTurn)}
                   connected={connected}
-                  recovering={recoveringThread}
+                  recovering={selectedThreadRecovering}
                   submitting={submitting}
                   commandEnterToSend={settings.commandEnterToSend !== false}
                   onChange={updateDraft}
@@ -3013,6 +3238,12 @@ export default function App() {
                       [selectedThread.id]: skills
                     }))
                   }
+                  onSelectedPluginsChange={(plugins) =>
+                    setPluginsByThread((current) => ({
+                      ...current,
+                      [selectedThread.id]: plugins
+                    }))
+                  }
                   onPreferencesChange={updatePreferences}
                   onPickAttachments={() => void pickAttachments()}
                   onDropPaths={attachPaths}
@@ -3025,6 +3256,7 @@ export default function App() {
                 <Suspense fallback={null}>
                   <InspectorPanel
                     thread={selectedThread}
+                    workspacePath={selectedWorkspace.path}
                     session={selectedSession}
                     metadata={selectedMetadata}
                     diagnostics={codex.diagnostics}

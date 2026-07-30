@@ -401,6 +401,17 @@ pub struct CodexSkill {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct CodexPlugin {
+    pub id: String,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub marketplace: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexLoginSession {
     pub login_id: String,
     pub authorization_url: String,
@@ -438,6 +449,10 @@ pub enum ComposerInput {
     Skill {
         name: String,
         path: String,
+    },
+    Plugin {
+        id: String,
+        name: String,
     },
 }
 
@@ -538,6 +553,25 @@ pub fn build_wire_inputs(workspace_path: &str, inputs: Vec<ComposerInput>) -> Re
                     return Err(anyhow!("Skill input requires a name and path"));
                 }
                 result.push(json!({ "type": "skill", "name": name, "path": path }));
+            }
+            ComposerInput::Plugin { id, name } => {
+                let valid_id = !id.is_empty()
+                    && id.len() <= 512
+                    && id.chars().all(|character| {
+                        character.is_ascii_alphanumeric()
+                            || matches!(character, '-' | '_' | '.' | '@')
+                    });
+                let valid_name = !name.trim().is_empty()
+                    && name.len() <= 256
+                    && !name.chars().any(char::is_control);
+                if !valid_id || !valid_name {
+                    return Err(anyhow!("Plugin input requires a valid installed plugin"));
+                }
+                result.push(json!({
+                    "type": "mention",
+                    "name": name,
+                    "path": format!("plugin://{id}")
+                }));
             }
         }
     }
@@ -1488,6 +1522,7 @@ fn event_kind(method: &str) -> &'static str {
         "thread/name/updated" => "threadNameUpdated",
         "thread/settings/updated" => "threadSettingsUpdated",
         "thread/tokenUsage/updated" => "tokenUsageUpdated",
+        "skills/changed" => "skillsChanged",
         "turn/started" => "turnStarted",
         "turn/completed" => "turnCompleted",
         "item/started" => "itemStarted",
@@ -1764,6 +1799,62 @@ pub fn normalize_skills(result: &Value) -> Vec<CodexSkill> {
         .collect()
 }
 
+pub fn normalize_plugins(result: &Value) -> Vec<CodexPlugin> {
+    let mut plugins = result
+        .get("marketplaces")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|marketplace| {
+            let marketplace_name = optional_string(marketplace, "name").unwrap_or_default();
+            marketplace
+                .get("plugins")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(move |plugin| {
+                    let installed = plugin
+                        .get("installed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let enabled = plugin
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let disabled_by_admin = plugin.get("availability").and_then(Value::as_str)
+                        == Some("DISABLED_BY_ADMIN");
+                    if !installed || !enabled || disabled_by_admin {
+                        return None;
+                    }
+                    let id = optional_string(plugin, "id")?;
+                    let name = optional_string(plugin, "name")?;
+                    let interface = plugin.get("interface").unwrap_or(&Value::Null);
+                    let display_name = optional_string(interface, "displayName")
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| name.clone());
+                    let description =
+                        optional_string(interface, "shortDescription").unwrap_or_default();
+                    Some(CodexPlugin {
+                        id,
+                        name,
+                        display_name,
+                        description,
+                        marketplace: marketplace_name.clone(),
+                        enabled,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    plugins.sort_by(|left, right| {
+        left.display_name
+            .to_lowercase()
+            .cmp(&right.display_name.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    plugins
+}
+
 fn normalize_token_usage(value: &Value) -> CodexTokenUsage {
     let total = value.get("total").unwrap_or(&Value::Null);
     let last = value.get("last").unwrap_or(&Value::Null);
@@ -1829,8 +1920,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        build_wire_inputs, normalize_item, normalize_notification, normalize_rate_limits,
-        normalize_server_request, ComposerInput,
+        build_wire_inputs, normalize_item, normalize_notification, normalize_plugins,
+        normalize_rate_limits, normalize_server_request, ComposerInput,
     };
 
     #[test]
@@ -1983,6 +2074,20 @@ mod tests {
     }
 
     #[test]
+    fn skill_change_notifications_invalidate_composer_discovery() {
+        let event = normalize_notification(
+            8,
+            "skills/changed",
+            &json!({"paths":["/tmp/project/.github/skills/review/SKILL.md"]}),
+        );
+        assert_eq!(event.kind, "skillsChanged");
+        assert_eq!(
+            event.data.unwrap()["paths"][0],
+            "/tmp/project/.github/skills/review/SKILL.md"
+        );
+    }
+
+    #[test]
     fn rate_limit_windows_are_selected_by_duration() {
         let (five_hour, weekly) = normalize_rate_limits(&json!({
             "rateLimitsByLimitId": {
@@ -2046,5 +2151,57 @@ mod tests {
         )
         .expect_err("empty input should fail");
         assert!(error.to_string().contains("non-empty"));
+    }
+
+    #[test]
+    fn plugin_inputs_use_the_structured_plugin_mention_scheme() {
+        let inputs = build_wire_inputs(
+            "/tmp",
+            vec![ComposerInput::Plugin {
+                id: "computer-use@openai-bundled".to_string(),
+                name: "Computer Use".to_string(),
+            }],
+        )
+        .expect("installed plugin mention should serialize");
+        assert_eq!(
+            inputs,
+            vec![json!({
+                "type": "mention",
+                "name": "Computer Use",
+                "path": "plugin://computer-use@openai-bundled"
+            })]
+        );
+    }
+
+    #[test]
+    fn installed_plugins_are_normalized_for_composer_mentions() {
+        let plugins = normalize_plugins(&json!({
+            "marketplaces": [{
+                "name": "openai-bundled",
+                "plugins": [
+                    {
+                        "id": "computer-use@openai-bundled",
+                        "name": "computer-use",
+                        "installed": true,
+                        "enabled": true,
+                        "availability": "AVAILABLE",
+                        "interface": {
+                            "displayName": "Computer Use",
+                            "shortDescription": "Control Mac apps"
+                        }
+                    },
+                    {
+                        "id": "disabled@openai-bundled",
+                        "name": "disabled",
+                        "installed": true,
+                        "enabled": false,
+                        "availability": "AVAILABLE"
+                    }
+                ]
+            }]
+        }));
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].id, "computer-use@openai-bundled");
+        assert_eq!(plugins[0].display_name, "Computer Use");
     }
 }

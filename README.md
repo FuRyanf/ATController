@@ -196,6 +196,8 @@ Model, reasoning-effort, service-tier, permission-profile, account, plan, and ra
 
 Requested and effective settings remain distinct. Runtime defaults and fallbacks are shown instead of silently presenting a rejected value as applied. Ultra appears only when the selected runtime model reports it.
 
+Changing reasoning effort or access reinstantiates the same canonical Codex thread. If a turn is active, ATController interrupts it first, resumes the thread with the new structured settings, and leaves the last prompt stopped rather than silently replaying commands or edits.
+
 ## Attachments and skills
 
 The composer serializes the exact structured input forms accepted by the generated protocol:
@@ -204,7 +206,14 @@ The composer serializes the exact structured input forms accepted by the generat
 - local images
 - bounded inline PNG, JPEG, GIF, and WebP data
 - local file paths
-- runtime-reported skills
+- runtime-reported plugins and project skills
+
+Type `@` in the composer to search with the keyboard. ATController uses app-server
+`plugin/list` for the same plugin-level entries shown by Codex CLI, such as Browser,
+Chrome, and Computer Use. Project skills discovered through `skills/list` under
+`.github/skills` or `.agents/skills` remain individually selectable. Plugins use
+their canonical `plugin://` mention identity; project skills use structured skill
+inputs.
 
 Inline images are limited to 10 MB. Files outside the active project are visibly marked, and the file picker requires confirmation before sharing them. Large ordinary files are passed by path instead of being converted into prompt text.
 

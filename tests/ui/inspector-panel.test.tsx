@@ -145,6 +145,7 @@ const browserSession: BrowserSessionMetadata = {
 function props() {
   return {
     thread,
+    workspacePath: '/tmp/project',
     diagnostics,
     browserDiagnostics: null,
     browserBusy: false,

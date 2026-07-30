@@ -11,6 +11,7 @@ import type {
   CodexDiagnostics,
   CodexEvent,
   CodexLoginSession,
+  CodexPlugin,
   CodexRuntimeCatalog,
   CodexResumeCommand,
   CodexSkill,
@@ -169,6 +170,8 @@ export const api = {
     invoke<void>('codex_respond_to_server_request', { response }),
   listCodexRuntimeSkills: (workspacePath: string, forceReload = false) =>
     invoke<CodexSkill[]>('codex_list_runtime_skills', { workspacePath, forceReload }),
+  listCodexRuntimePlugins: (workspacePath: string) =>
+    invoke<CodexPlugin[]>('codex_list_runtime_plugins', { workspacePath }),
   buildCodexResumeCommand: (request: ResumeCommandRequest) =>
     invoke<CodexResumeCommand>('codex_build_resume_command', { request }),
   openCodexResumeInTerminal: (request: ResumeCommandRequest, execute: boolean) =>

@@ -1,16 +1,26 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
+import {
+  memo,
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+  type KeyboardEvent
+} from 'react';
 
 import { isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import type {
   CodexModel,
+  CodexPlugin,
   CodexRateLimitWindowV2,
   CodexSkill,
   ComposerInput,
   PermissionMode,
   ThreadPreferences
 } from '../types';
+import { serviceTierDisplayName } from '../lib/codexLabels';
 import { AppIcon } from './AppIcon';
 
 export interface ComposerAttachment {
@@ -28,9 +38,12 @@ interface MessageComposerProps {
   value: string;
   promptHistory: string[];
   attachments: ComposerAttachment[];
+  plugins: CodexPlugin[];
+  selectedPlugins: CodexPlugin[];
   skills: CodexSkill[];
   selectedSkills: CodexSkill[];
   preferences: ThreadPreferences;
+  effectiveServiceTier?: string | null;
   models: CodexModel[];
   fiveHourLimit?: CodexRateLimitWindowV2 | null;
   weeklyLimit?: CodexRateLimitWindowV2 | null;
@@ -42,6 +55,7 @@ interface MessageComposerProps {
   commandEnterToSend: boolean;
   onChange: (value: string) => void;
   onAttachmentsChange: (attachments: ComposerAttachment[]) => void;
+  onSelectedPluginsChange: (plugins: CodexPlugin[]) => void;
   onSelectedSkillsChange: (skills: CodexSkill[]) => void;
   onPreferencesChange: (preferences: ThreadPreferences) => void;
   onPickAttachments: () => void;
@@ -51,8 +65,155 @@ interface MessageComposerProps {
   onRestore: () => void;
 }
 
+interface ActiveSkillMention {
+  start: number;
+  end: number;
+  query: string;
+}
+
+interface ComposerMentionOption {
+  key: string;
+  kind: 'plugin' | 'skill';
+  displayName: string;
+  description: string;
+  sourceLabel: 'Plugin' | 'Project skill';
+  plugin?: CodexPlugin;
+  skill?: CodexSkill;
+}
+
 const MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const MAX_SKILL_MENTION_RESULTS = 80;
+
+export function findActiveSkillMention(
+  value: string,
+  cursor: number
+): ActiveSkillMention | null {
+  if (cursor < 0 || cursor > value.length) return null;
+  const beforeCursor = value.slice(0, cursor);
+  const match = beforeCursor.match(/(?:^|\s)@([^\s@]*)$/);
+  if (!match) return null;
+  return {
+    start: cursor - match[1].length - 1,
+    end: cursor,
+    query: match[1]
+  };
+}
+
+function humanizeMentionName(name: string): string {
+  const nameParts = name.split(':');
+  const baseName = nameParts[nameParts.length - 1] || name;
+  return baseName
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) =>
+      /^[A-Z0-9]{2,}$/.test(part)
+        ? part
+        : `${part.charAt(0).toUpperCase()}${part.slice(1)}`
+    )
+    .join(' ');
+}
+
+export function skillDisplayName(skill: CodexSkill): string {
+  return humanizeMentionName(skill.name);
+}
+
+export function skillSourceLabel(skill: CodexSkill): string {
+  if (skill.path.includes('/.codex/plugins/') || skill.path.includes('/plugins/cache/')) {
+    return 'Plugin skill';
+  }
+  if (
+    skill.scope === 'repo' ||
+    skill.path.includes('/.github/skills/') ||
+    skill.path.includes('/.agents/skills/')
+  ) {
+    return 'Project skill';
+  }
+  return `${readableKind(skill.scope || 'runtime')} skill`;
+}
+
+export function isComposerSkill(skill: CodexSkill): boolean {
+  const normalizedPath = skill.path.toLocaleLowerCase();
+  return (
+    skill.scope === 'repo' ||
+    normalizedPath.includes('/.github/skills/') ||
+    normalizedPath.includes('/.agents/skills/')
+  );
+}
+
+function composerMentionMatches(
+  plugins: CodexPlugin[],
+  skills: CodexSkill[],
+  selectedPlugins: CodexPlugin[],
+  selectedSkills: CodexSkill[],
+  query: string
+): ComposerMentionOption[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const selectedPluginIds = new Set(selectedPlugins.map((plugin) => plugin.id));
+  const selectedSkillPaths = new Set(selectedSkills.map((skill) => skill.path));
+  const options: ComposerMentionOption[] = [
+    ...plugins
+      .filter((plugin) => plugin.enabled && !selectedPluginIds.has(plugin.id))
+      .map((plugin) => ({
+        key: `plugin:${plugin.id}`,
+        kind: 'plugin' as const,
+        displayName: plugin.displayName || humanizeMentionName(plugin.name),
+        description: plugin.description,
+        sourceLabel: 'Plugin' as const,
+        plugin
+      })),
+    ...skills
+      .filter(isComposerSkill)
+      .filter((skill) => !selectedSkillPaths.has(skill.path))
+      .map((skill) => ({
+        key: `skill:${skill.path}`,
+        kind: 'skill' as const,
+        displayName: skillDisplayName(skill),
+        description: skill.shortDescription || skill.description,
+        sourceLabel: 'Project skill' as const,
+        skill
+      }))
+  ];
+  const matchRank = (option: ComposerMentionOption) => {
+    if (!normalizedQuery) return 0;
+    const name = (
+      option.plugin?.name ??
+      option.skill?.name ??
+      option.displayName
+    ).toLocaleLowerCase();
+    const displayName = option.displayName.toLocaleLowerCase();
+    if (name === normalizedQuery || displayName === normalizedQuery) return 0;
+    if (name.startsWith(normalizedQuery) || displayName.startsWith(normalizedQuery)) {
+      return 1;
+    }
+    if (
+      name.split(/[-_:\s]+/).some((part) => part.startsWith(normalizedQuery)) ||
+      displayName.split(/\s+/).some((part) => part.startsWith(normalizedQuery))
+    ) {
+      return 2;
+    }
+    return 3;
+  };
+  return options
+    .filter((option) => {
+      if (!normalizedQuery) return true;
+      return [
+        option.displayName,
+        option.description,
+        option.plugin?.name ?? '',
+        option.plugin?.id ?? '',
+        option.skill?.name ?? '',
+        option.skill?.path ?? ''
+      ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
+    })
+    .sort(
+      (left, right) =>
+        matchRank(left) - matchRank(right) ||
+        (left.kind === right.kind ? 0 : left.kind === 'plugin' ? -1 : 1) ||
+        left.displayName.localeCompare(right.displayName)
+    )
+    .slice(0, MAX_SKILL_MENTION_RESULTS);
+}
 
 export function physicalPointInsideRect(
   position: { x: number; y: number },
@@ -148,7 +309,8 @@ function formatAllowance(window?: CodexRateLimitWindowV2 | null): string {
 export function attachmentsToInputs(
   text: string,
   attachments: ComposerAttachment[],
-  skills: CodexSkill[] = []
+  skills: CodexSkill[] = [],
+  plugins: CodexPlugin[] = []
 ): ComposerInput[] {
   const inputs: ComposerInput[] = [];
   if (text.trim()) {
@@ -176,18 +338,28 @@ export function attachmentsToInputs(
   for (const skill of skills) {
     inputs.push({ type: 'skill', name: skill.name, path: skill.path });
   }
+  for (const plugin of plugins) {
+    inputs.push({
+      type: 'plugin',
+      id: plugin.id,
+      name: plugin.displayName || plugin.name
+    });
+  }
   return inputs;
 }
 
-export function MessageComposer({
+function MessageComposerComponent({
   threadId,
   workspacePath,
   value,
   promptHistory,
   attachments,
+  plugins,
+  selectedPlugins,
   skills,
   selectedSkills,
   preferences,
+  effectiveServiceTier,
   models,
   fiveHourLimit,
   weeklyLimit,
@@ -199,6 +371,7 @@ export function MessageComposer({
   commandEnterToSend,
   onChange,
   onAttachmentsChange,
+  onSelectedPluginsChange,
   onSelectedSkillsChange,
   onPreferencesChange,
   onPickAttachments,
@@ -211,22 +384,55 @@ export function MessageComposer({
   const dropTargetRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
   const nativeFileDragRef = useRef(false);
+  const pendingSelectionRef = useRef<number | null>(null);
   const [dragging, setDragging] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [historyCursor, setHistoryCursor] = useState<number | null>(null);
   const [historyDraft, setHistoryDraft] = useState('');
+  const [skillMention, setSkillMention] = useState<ActiveSkillMention | null>(null);
+  const [skillMentionIndex, setSkillMentionIndex] = useState(0);
   const selectedModel =
     models.find((model) => model.id === preferences.model || model.model === preferences.model) ??
     models.find((model) => model.isDefault) ??
     models[0];
   const efforts = selectedModel?.reasoningEfforts ?? [];
   const serviceTiers = selectedModel?.serviceTiers ?? [];
+  const composerSkills = skills.filter(isComposerSkill);
+  const composerPlugins = plugins.filter((plugin) => plugin.enabled);
+  const effectiveTier = serviceTiers.find(
+    (tier) => tier.id === effectiveServiceTier
+  );
+  const selectedTierId =
+    preferences.serviceTier ?? selectedModel?.defaultServiceTier ?? '';
+  const selectedTier = serviceTiers.find((tier) => tier.id === selectedTierId);
+  const speedDescription =
+    selectedTier?.description ||
+    effectiveTier?.description ||
+    'Controls the Codex runtime processing speed for future turns.';
   const canSubmit =
     connected &&
     !archived &&
     !recovering &&
     !submitting &&
-    Boolean(value.trim() || attachments.length || selectedSkills.length);
+    Boolean(
+      value.trim() ||
+        attachments.length ||
+        selectedSkills.length ||
+        selectedPlugins.length
+    );
+  const skillMentionResults = skillMention
+    ? composerMentionMatches(
+        composerPlugins,
+        composerSkills,
+        selectedPlugins,
+        selectedSkills,
+        skillMention.query
+      )
+    : [];
+  const activeSkillMentionIndex = Math.min(
+    skillMentionIndex,
+    Math.max(0, skillMentionResults.length - 1)
+  );
   const setDropActive = (active: boolean) => {
     draggingRef.current = active;
     setDragging(active);
@@ -237,6 +443,12 @@ export function MessageComposer({
     if (!textarea) return;
     textarea.style.height = '0px';
     textarea.style.height = `${Math.min(240, Math.max(44, textarea.scrollHeight))}px`;
+    if (pendingSelectionRef.current != null) {
+      const cursor = pendingSelectionRef.current;
+      pendingSelectionRef.current = null;
+      textarea.focus();
+      textarea.setSelectionRange(cursor, cursor);
+    }
   }, [value]);
 
   useEffect(() => {
@@ -248,7 +460,13 @@ export function MessageComposer({
   useEffect(() => {
     setHistoryCursor(null);
     setHistoryDraft('');
+    setSkillMention(null);
+    setSkillMentionIndex(0);
   }, [threadId]);
+
+  useEffect(() => {
+    setSkillMentionIndex(0);
+  }, [skillMention?.query]);
 
   useEffect(() => {
     if (!isTauri() || archived) return;
@@ -339,13 +557,61 @@ export function MessageComposer({
   };
 
   const submit = () => {
-    const inputs = attachmentsToInputs(value, attachments, selectedSkills);
+    const inputs = attachmentsToInputs(
+      value,
+      attachments,
+      selectedSkills,
+      selectedPlugins
+    );
     if (inputs.length > 0 && canSubmit) {
+      setSkillMention(null);
       onSubmit(inputs);
     }
   };
 
+  const selectMention = (option: ComposerMentionOption) => {
+    if (!skillMention) return;
+    const nextValue =
+      value.slice(0, skillMention.start) + value.slice(skillMention.end);
+    const nextCursor = skillMention.start;
+    pendingSelectionRef.current = nextCursor;
+    onChange(nextValue);
+    if (option.plugin) {
+      onSelectedPluginsChange([...selectedPlugins, option.plugin]);
+    } else if (option.skill) {
+      onSelectedSkillsChange([...selectedSkills, option.skill]);
+    }
+    setSkillMention(null);
+    setSkillMentionIndex(0);
+  };
+
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (skillMention) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSkillMention(null);
+        return;
+      }
+      if (skillMentionResults.length > 0) {
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setSkillMentionIndex((current) => (current + 1) % skillMentionResults.length);
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setSkillMentionIndex(
+            (current) => (current - 1 + skillMentionResults.length) % skillMentionResults.length
+          );
+          return;
+        }
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          event.preventDefault();
+          selectMention(skillMentionResults[activeSkillMentionIndex]);
+          return;
+        }
+      }
+    }
     const plainEnter =
       event.key === 'Enter' &&
       !event.shiftKey &&
@@ -461,7 +727,9 @@ export function MessageComposer({
     >
       {dragging ? <div className="composer-drop-overlay">Drop files or images to attach</div> : null}
       <div className="composer">
-        {attachments.length > 0 || selectedSkills.length > 0 ? (
+        {attachments.length > 0 ||
+        selectedPlugins.length > 0 ||
+        selectedSkills.length > 0 ? (
           <div className="composer-attachments">
             {attachments.map((attachment) => (
               <div key={attachment.id} className="attachment-chip">
@@ -480,14 +748,34 @@ export function MessageComposer({
             {selectedSkills.map((skill) => (
               <div key={skill.path} className="attachment-chip skill-chip">
                 <AppIcon name="code" />
-                <span>{skill.name}</span>
-                <em>Skill</em>
+                <span title={skill.name}>{skillDisplayName(skill)}</span>
+                <em>{skillSourceLabel(skill)}</em>
                 <button
                   type="button"
                   aria-label={`Remove ${skill.name}`}
                   onClick={() =>
                     onSelectedSkillsChange(
                       selectedSkills.filter((candidate) => candidate.path !== skill.path)
+                    )
+                  }
+                >
+                  <AppIcon name="close" size={13} />
+                </button>
+              </div>
+            ))}
+            {selectedPlugins.map((plugin) => (
+              <div key={plugin.id} className="attachment-chip plugin-chip">
+                <AppIcon name="code" />
+                <span title={plugin.id}>@{plugin.displayName || plugin.name}</span>
+                <em>Plugin</em>
+                <button
+                  type="button"
+                  aria-label={`Remove ${plugin.displayName || plugin.name}`}
+                  onClick={() =>
+                    onSelectedPluginsChange(
+                      selectedPlugins.filter(
+                        (candidate) => candidate.id !== plugin.id
+                      )
                     )
                   }
                 >
@@ -516,24 +804,122 @@ export function MessageComposer({
           onChange={(event) => {
             setHistoryCursor(null);
             onChange(event.target.value);
+            setSkillMention(
+              findActiveSkillMention(event.target.value, event.target.selectionStart)
+            );
+          }}
+          onClick={(event) => {
+            setSkillMention(
+              findActiveSkillMention(
+                event.currentTarget.value,
+                event.currentTarget.selectionStart
+              )
+            );
+          }}
+          onSelect={(event) => {
+            setSkillMention(
+              findActiveSkillMention(
+                event.currentTarget.value,
+                event.currentTarget.selectionStart
+              )
+            );
           }}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          aria-autocomplete="list"
+          aria-controls={skillMention ? 'composer-skill-mentions' : undefined}
+          aria-expanded={Boolean(skillMention)}
+          aria-activedescendant={
+            skillMentionResults.length
+              ? `composer-skill-option-${activeSkillMentionIndex}`
+              : undefined
+          }
         />
+        {skillMention ? (
+          <div
+            id="composer-skill-mentions"
+            className="composer-skill-mentions"
+            role="listbox"
+            aria-label="Codex plugins and skills"
+          >
+            <header>
+              <strong>Plugins and skills</strong>
+              <span>Installed plugins and this project</span>
+            </header>
+            {skillMentionResults.length ? (
+              skillMentionResults.map((option, index) => (
+                <button
+                  id={`composer-skill-option-${index}`}
+                  key={option.key}
+                  type="button"
+                  role="option"
+                  aria-selected={index === activeSkillMentionIndex}
+                  className={index === activeSkillMentionIndex ? 'selected' : ''}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => selectMention(option)}
+                >
+                  <AppIcon name="code" size={14} />
+                  <span>
+                    <strong>{option.displayName}</strong>
+                    <small>
+                      <em>{option.sourceLabel}</em>
+                      {option.description}
+                    </small>
+                  </span>
+                </button>
+              ))
+            ) : (
+              <p>No matching plugins or project skills.</p>
+            )}
+          </div>
+        ) : null}
         {attachmentError ? <p className="composer-error">{attachmentError}</p> : null}
         <footer className="composer-footer">
           <div className="composer-tools">
             <button type="button" className="icon-button" aria-label="Attach files" title="Attach files" onClick={onPickAttachments}>
               <AppIcon name="attachment" />
             </button>
-            {skills.length ? (
+            {composerPlugins.length || composerSkills.length ? (
               <details className="composer-skills">
-                <summary className="icon-button" aria-label="Use a Codex skill" title="Use a Codex skill">
+                <summary
+                  className="icon-button"
+                  aria-label="Use a Codex plugin or project skill"
+                  title="Use a Codex plugin or project skill"
+                >
                   <AppIcon name="code" />
                 </summary>
                 <div className="composer-skills-menu">
-                  <strong>Skills</strong>
-                  {skills.map((skill) => {
+                  {composerPlugins.length ? <strong>Plugins</strong> : null}
+                  {composerPlugins.map((plugin) => {
+                    const selected = selectedPlugins.some(
+                      (candidate) => candidate.id === plugin.id
+                    );
+                    return (
+                      <label key={plugin.id}>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() =>
+                            onSelectedPluginsChange(
+                              selected
+                                ? selectedPlugins.filter(
+                                    (candidate) => candidate.id !== plugin.id
+                                  )
+                                : [...selectedPlugins, plugin]
+                            )
+                          }
+                        />
+                        <span>
+                          <strong>
+                            {plugin.displayName || humanizeMentionName(plugin.name)}
+                          </strong>
+                          <small>Plugin · {plugin.description}</small>
+                        </span>
+                      </label>
+                    );
+                  })}
+                  {composerSkills.length ? <strong>Project skills</strong> : null}
+                  {composerSkills.map((skill) => {
                     const selected = selectedSkills.some((candidate) => candidate.path === skill.path);
                     return (
                       <label key={skill.path}>
@@ -549,8 +935,10 @@ export function MessageComposer({
                           }
                         />
                         <span>
-                          <strong>{skill.name}</strong>
-                          <small>{skill.shortDescription || skill.description}</small>
+                          <strong>{skillDisplayName(skill)}</strong>
+                          <small>
+                            {skillSourceLabel(skill)} · {skill.shortDescription || skill.description}
+                          </small>
                         </span>
                       </label>
                     );
@@ -591,14 +979,11 @@ export function MessageComposer({
               </select>
             </label>
             {serviceTiers.length ? (
-              <label className="composer-select">
-                <span className="sr-only">Service tier</span>
+              <label className="composer-select" title={speedDescription}>
+                <span className="sr-only">Speed</span>
                 <select
-                  value={
-                    preferences.serviceTier ??
-                    selectedModel?.defaultServiceTier ??
-                    ''
-                  }
+                  aria-label="Speed"
+                  value={selectedTierId}
                   onChange={(event) =>
                     onPreferencesChange({
                       ...preferences,
@@ -607,11 +992,15 @@ export function MessageComposer({
                   }
                 >
                   {!selectedModel?.defaultServiceTier ? (
-                    <option value="">Runtime tier</option>
+                    <option value="">
+                      {effectiveTier
+                        ? `Speed: ${serviceTierDisplayName(effectiveTier)}`
+                        : 'Speed: Default'}
+                    </option>
                   ) : null}
                   {serviceTiers.map((tier) => (
                     <option key={tier.id} value={tier.id}>
-                      {tier.name || readableKind(tier.id)}
+                      {`Speed: ${serviceTierDisplayName(tier)}`}
                     </option>
                   ))}
                 </select>
@@ -663,6 +1052,51 @@ export function MessageComposer({
     </div>
   );
 }
+
+function equalStringArrays(left: string[], right: string[]): boolean {
+  return (
+    left === right ||
+    (left.length === right.length &&
+      left.every((value, index) => value === right[index]))
+  );
+}
+
+function messageComposerPropsEqual(
+  previous: MessageComposerProps,
+  next: MessageComposerProps
+): boolean {
+  return (
+    previous.threadId === next.threadId &&
+    previous.workspacePath === next.workspacePath &&
+    previous.value === next.value &&
+    equalStringArrays(previous.promptHistory, next.promptHistory) &&
+    previous.attachments === next.attachments &&
+    previous.plugins === next.plugins &&
+    previous.selectedPlugins === next.selectedPlugins &&
+    previous.skills === next.skills &&
+    previous.selectedSkills === next.selectedSkills &&
+    previous.preferences.permissionMode === next.preferences.permissionMode &&
+    previous.preferences.model === next.preferences.model &&
+    previous.preferences.reasoningEffort ===
+      next.preferences.reasoningEffort &&
+    previous.preferences.serviceTier === next.preferences.serviceTier &&
+    previous.effectiveServiceTier === next.effectiveServiceTier &&
+    previous.models === next.models &&
+    previous.fiveHourLimit === next.fiveHourLimit &&
+    previous.weeklyLimit === next.weeklyLimit &&
+    previous.archived === next.archived &&
+    previous.running === next.running &&
+    previous.connected === next.connected &&
+    previous.recovering === next.recovering &&
+    previous.submitting === next.submitting &&
+    previous.commandEnterToSend === next.commandEnterToSend
+  );
+}
+
+export const MessageComposer = memo(
+  MessageComposerComponent,
+  messageComposerPropsEqual
+);
 
 function readableKind(value: string): string {
   return value

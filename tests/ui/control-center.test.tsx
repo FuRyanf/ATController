@@ -167,7 +167,7 @@ describe('ATController control center', () => {
       'standard'
     );
     await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Service tier' }),
+      screen.getByRole('combobox', { name: 'Speed' }),
       'priority'
     );
     await user.click(

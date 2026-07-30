@@ -5,12 +5,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   attachmentsToInputs,
+  findActiveSkillMention,
+  isComposerSkill,
   MessageComposer,
   pathsFromDataTransfer,
   physicalPointInsideRect,
+  skillDisplayName,
+  skillSourceLabel,
   type ComposerAttachment
 } from '../../src/components/MessageComposer';
-import type { CodexModel, ThreadPreferences } from '../../src/types';
+import type {
+  CodexModel,
+  CodexPlugin,
+  CodexSkill,
+  ThreadPreferences
+} from '../../src/types';
 
 const nativeDrop = vi.hoisted(() => ({
   handler: null as ((event: { payload: unknown }) => void) | null
@@ -55,6 +64,39 @@ const preferences: ThreadPreferences = {
   serviceTier: null
 };
 
+const computerUseSkill: CodexSkill = {
+  name: 'computer-use:computer-use',
+  description: 'Control local Mac apps through Computer Use.',
+  path: '/Users/test/.codex/plugins/cache/openai-bundled/computer-use/1.0.0/skills/computer-use/SKILL.md',
+  scope: 'user',
+  enabled: true
+};
+
+const computerUsePlugin: CodexPlugin = {
+  id: 'computer-use@openai-bundled',
+  name: 'computer-use',
+  displayName: 'Computer Use',
+  description: 'Control local Mac apps through Computer Use.',
+  marketplace: 'openai-bundled',
+  enabled: true
+};
+
+const projectSkill: CodexSkill = {
+  name: 'deployment-verification',
+  description: 'Verify a project deployment.',
+  path: '/tmp/project/.github/skills/deployment-verification/SKILL.md',
+  scope: 'repo',
+  enabled: true
+};
+
+const unrelatedPluginSkill: CodexSkill = {
+  name: 'artifact-template-analytics-dashboard',
+  description: 'Create a spreadsheet from an installed artifact template.',
+  path: '/Users/test/.codex/plugins/cache/templates/skills/analytics/SKILL.md',
+  scope: 'user',
+  enabled: true
+};
+
 function renderComposer(overrides: Partial<React.ComponentProps<typeof MessageComposer>> = {}) {
   const props: React.ComponentProps<typeof MessageComposer> = {
     threadId: 'thread-1',
@@ -62,6 +104,8 @@ function renderComposer(overrides: Partial<React.ComponentProps<typeof MessageCo
     value: 'Run the tests',
     promptHistory: [],
     attachments: [],
+    plugins: [],
+    selectedPlugins: [],
     skills: [],
     selectedSkills: [],
     preferences,
@@ -74,6 +118,7 @@ function renderComposer(overrides: Partial<React.ComponentProps<typeof MessageCo
     commandEnterToSend: true,
     onChange: vi.fn(),
     onAttachmentsChange: vi.fn(),
+    onSelectedPluginsChange: vi.fn(),
     onSelectedSkillsChange: vi.fn(),
     onPreferencesChange: vi.fn(),
     onPickAttachments: vi.fn(),
@@ -122,12 +167,27 @@ describe('Codex message composer', () => {
       ...preferences,
       reasoningEffort: 'ultra'
     });
-    const tier = screen.getByRole('combobox', { name: 'Service tier' });
+    const tier = screen.getByRole('combobox', { name: 'Speed' });
     await user.selectOptions(tier, 'priority');
     expect(props.onPreferencesChange).toHaveBeenCalledWith({
       ...preferences,
       serviceTier: 'priority'
     });
+  });
+
+  it('shows the effective runtime speed with a friendly label', () => {
+    const runtimeDefaultModel = {
+      ...model,
+      defaultServiceTier: null
+    };
+    renderComposer({
+      models: [runtimeDefaultModel],
+      effectiveServiceTier: 'priority'
+    });
+
+    expect(screen.getByRole('combobox', { name: 'Speed' })).toHaveDisplayValue(
+      'Speed: Fast'
+    );
   });
 
   it('serializes path attachments and bounded inline images as structured inputs', () => {
@@ -173,6 +233,132 @@ describe('Codex message composer', () => {
     ).toEqual([
       { type: 'skill', name: 'review', path: '/tmp/skills/review/SKILL.md' }
     ]);
+  });
+
+  it('serializes selected plugins with the official structured mention identity', () => {
+    expect(attachmentsToInputs('', [], [], [computerUsePlugin])).toEqual([
+      {
+        type: 'plugin',
+        id: 'computer-use@openai-bundled',
+        name: 'Computer Use'
+      }
+    ]);
+  });
+
+  it('recognizes active @ skill mentions without treating email addresses as mentions', () => {
+    expect(findActiveSkillMention('Use @computer', 13)).toEqual({
+      start: 4,
+      end: 13,
+      query: 'computer'
+    });
+    expect(findActiveSkillMention('person@example.com', 18)).toBeNull();
+    expect(skillDisplayName(computerUseSkill)).toBe('Computer Use');
+    expect(skillSourceLabel(computerUseSkill)).toBe('Plugin skill');
+    expect(skillSourceLabel(projectSkill)).toBe('Project skill');
+    expect(isComposerSkill(computerUseSkill)).toBe(false);
+    expect(isComposerSkill(projectSkill)).toBe(true);
+    expect(isComposerSkill(unrelatedPluginSkill)).toBe(false);
+  });
+
+  it('selects plugin and .github skills through keyboard-first @ autocomplete', async () => {
+    const user = userEvent.setup();
+    const submit = vi.fn();
+
+    function SkillMentionHarness() {
+      const [value, setValue] = useState('');
+      const [selectedPlugins, setSelectedPlugins] = useState<CodexPlugin[]>([]);
+      const [selectedSkills, setSelectedSkills] = useState<CodexSkill[]>([]);
+      return (
+        <MessageComposer
+          threadId="thread-skills"
+          workspacePath="/tmp/project"
+          value={value}
+          promptHistory={[]}
+          attachments={[]}
+          plugins={[computerUsePlugin]}
+          selectedPlugins={selectedPlugins}
+          skills={[projectSkill]}
+          selectedSkills={selectedSkills}
+          preferences={preferences}
+          models={[model]}
+          archived={false}
+          running={false}
+          connected
+          recovering={false}
+          submitting={false}
+          commandEnterToSend
+          onChange={setValue}
+          onAttachmentsChange={vi.fn()}
+          onSelectedPluginsChange={setSelectedPlugins}
+          onSelectedSkillsChange={setSelectedSkills}
+          onPreferencesChange={vi.fn()}
+          onPickAttachments={vi.fn()}
+          onDropPaths={vi.fn()}
+          onSubmit={submit}
+          onStop={vi.fn()}
+          onRestore={vi.fn()}
+        />
+      );
+    }
+
+    render(<SkillMentionHarness />);
+    const composer = screen.getByRole('textbox', { name: 'Message Codex' });
+    await user.type(composer, 'Inspect Chrome with @comp');
+    expect(
+      screen.getByRole('listbox', { name: 'Codex plugins and skills' })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Computer Use/ })).toHaveTextContent(
+      'Plugin'
+    );
+    await user.keyboard('{Enter}');
+    expect(screen.getByTitle('computer-use@openai-bundled')).toHaveTextContent(
+      '@Computer Use'
+    );
+    expect(composer).toHaveValue('Inspect Chrome with ');
+
+    await user.type(composer, '@deploy');
+    expect(
+      screen.getByRole('option', { name: /Deployment Verification/ })
+    ).toHaveTextContent('Project skill');
+    await user.keyboard('{Enter}');
+    expect(screen.getByTitle('deployment-verification')).toHaveTextContent(
+      'Deployment Verification'
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+    expect(submit).toHaveBeenCalledWith([
+      { type: 'text', text: 'Inspect Chrome with ' },
+      {
+        type: 'skill',
+        name: 'deployment-verification',
+        path: projectSkill.path
+      },
+      {
+        type: 'plugin',
+        id: 'computer-use@openai-bundled',
+        name: 'Computer Use'
+      }
+    ]);
+  });
+
+  it('keeps unrelated installed plugin packs out of the composer skill picker', async () => {
+    const user = userEvent.setup();
+    renderComposer({
+      value: '',
+      plugins: [computerUsePlugin],
+      skills: [unrelatedPluginSkill, computerUseSkill, projectSkill]
+    });
+    const composer = screen.getByRole('textbox', { name: 'Message Codex' });
+
+    await user.type(composer, '@');
+
+    expect(
+      screen.queryByRole('option', { name: /Artifact Template Analytics/ })
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Computer Use/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole('option', { name: /Deployment Verification/ })
+    ).toBeInTheDocument();
   });
 
   it('maps native physical drag coordinates into the composer CSS bounds', () => {
@@ -320,6 +506,8 @@ describe('Codex message composer', () => {
           value={value}
           promptHistory={['First prompt', 'Most recent prompt']}
           attachments={[]}
+          plugins={[]}
+          selectedPlugins={[]}
           skills={[]}
           selectedSkills={[]}
           preferences={preferences}
@@ -332,6 +520,7 @@ describe('Codex message composer', () => {
           commandEnterToSend
           onChange={setValue}
           onAttachmentsChange={vi.fn()}
+          onSelectedPluginsChange={vi.fn()}
           onSelectedSkillsChange={vi.fn()}
           onPreferencesChange={vi.fn()}
           onPickAttachments={vi.fn()}

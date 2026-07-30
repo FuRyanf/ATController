@@ -20,8 +20,8 @@ use crate::browser::BrowserRuntime;
 
 pub use diagnostics::{CodexDiagnostics, ConnectionState};
 pub use protocol::{
-    CodexDiscoveredProject, CodexEvent, CodexLoginSession, CodexRuntimeCatalog, CodexSkill,
-    CodexThread, CodexThreadPage, CodexThreadSession, CodexTurn, ComposerInput,
+    CodexDiscoveredProject, CodexEvent, CodexLoginSession, CodexPlugin, CodexRuntimeCatalog,
+    CodexSkill, CodexThread, CodexThreadPage, CodexThreadSession, CodexTurn, ComposerInput,
     ServerRequestResponse, ThreadPreferences,
 };
 pub use resume::{CodexResumeCommand, ResumeCommandRequest};
@@ -444,6 +444,21 @@ impl CodexRuntime {
             )
             .await?;
         Ok(protocol::normalize_skills(&result))
+    }
+
+    pub async fn list_plugins(
+        self: &Arc<Self>,
+        workspace_path: String,
+    ) -> Result<Vec<CodexPlugin>> {
+        let workspace_path = process::validate_workspace_path(&workspace_path)?;
+        let result = self
+            .request(
+                "plugin/list",
+                json!({ "cwds": [workspace_path] }),
+                RequestOptions::idempotent(Duration::from_secs(30)),
+            )
+            .await?;
+        Ok(protocol::normalize_plugins(&result))
     }
 
     fn handle_wire_event(&self, wire_event: WireEvent) {

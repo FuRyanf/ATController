@@ -374,6 +374,15 @@ export interface CodexSkill {
   enabled: boolean;
 }
 
+export interface CodexPlugin {
+  id: string;
+  name: string;
+  displayName: string;
+  description: string;
+  marketplace: string;
+  enabled: boolean;
+}
+
 export interface CodexLoginSession {
   loginId: string;
   authorizationUrl: string;
@@ -393,7 +402,8 @@ export type ComposerInput =
       allowOutsideWorkspace?: boolean;
     }
   | { type: 'file'; path: string; name?: string | null; allowOutsideWorkspace?: boolean }
-  | { type: 'skill'; name: string; path: string };
+  | { type: 'skill'; name: string; path: string }
+  | { type: 'plugin'; id: string; name: string };
 
 export interface CodexTokenUsage {
   totalTokens: number;

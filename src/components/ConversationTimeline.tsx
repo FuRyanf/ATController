@@ -3,6 +3,7 @@ import {
   isValidElement,
   memo,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -64,6 +65,44 @@ export function findLocalDevelopmentUrl(text: string): string | null {
     }
   }
   return null;
+}
+
+export function tokenUsagePresentation(usage: CodexTokenUsage): {
+  label: string;
+  title: string;
+} {
+  const cumulativeTokens = Math.max(0, usage.totalTokens);
+  const contextTokens = Math.max(0, usage.lastTotalTokens);
+  const contextWindow =
+    usage.modelContextWindow && usage.modelContextWindow > 0
+      ? usage.modelContextWindow
+      : null;
+
+  if (contextTokens > 0 && contextWindow) {
+    const percentage = Math.min(
+      100,
+      Math.max(0, Math.round((contextTokens / contextWindow) * 100))
+    );
+    return {
+      label: `${contextTokens.toLocaleString()} tokens · ${percentage}% context`,
+      title:
+        `Current context: ${contextTokens.toLocaleString()} of ` +
+        `${contextWindow.toLocaleString()} tokens. ` +
+        `Thread cumulative: ${cumulativeTokens.toLocaleString()} tokens.`
+    };
+  }
+
+  if (contextTokens > 0) {
+    return {
+      label: `${contextTokens.toLocaleString()} tokens in current context`,
+      title: `Thread cumulative: ${cumulativeTokens.toLocaleString()} tokens.`
+    };
+  }
+
+  return {
+    label: `${cumulativeTokens.toLocaleString()} cumulative tokens`,
+    title: 'The runtime has not reported current context usage yet.'
+  };
 }
 
 interface WritableHighlightRegistry {
@@ -187,6 +226,14 @@ function markdownText(node: ReactNode): string {
   return '';
 }
 
+export function normalizeAgentMarkdown(text: string): string {
+  const trimmed = text.trim();
+  const writingBlock = trimmed.match(
+    /^:::writing(?:\{[^}\r\n]*\})?[ \t]*(?:\r?\n)?([\s\S]*?)(?:\r?\n)?[ \t]*:::[ \t]*$/i
+  );
+  return writingBlock ? writingBlock[1].trim() : text;
+}
+
 function MarkdownContent({
   text,
   onCopy
@@ -264,7 +311,7 @@ function MarkdownContent({
         components={components}
         skipHtml
       >
-        {text}
+        {normalizeAgentMarkdown(text)}
       </ReactMarkdown>
     </div>
   );
@@ -1027,7 +1074,7 @@ const TurnBlock = memo(
     previous.approvals.every((approval, index) => approval === next.approvals[index])
 );
 
-export function ConversationTimeline({
+function ConversationTimelineComponent({
   thread,
   approvals,
   usage,
@@ -1044,6 +1091,7 @@ export function ConversationTimeline({
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
+  const followingRef = useRef(true);
   const visibleTurnLimitBeforeFindRef = useRef(INITIAL_VISIBLE_TURNS);
   const [following, setFollowing] = useState(true);
   const [unseenBelow, setUnseenBelow] = useState(false);
@@ -1055,7 +1103,10 @@ export function ConversationTimeline({
   const [findRevision, setFindRevision] = useState(0);
   const latestTurn = thread.turns.length ? thread.turns[thread.turns.length - 1] : undefined;
   const firstVisibleTurnIndex = Math.max(0, thread.turns.length - visibleTurnLimit);
-  const visibleTurns = thread.turns.slice(firstVisibleTurnIndex);
+  const visibleTurns = useMemo(
+    () => thread.turns.slice(firstVisibleTurnIndex),
+    [firstVisibleTurnIndex, thread.turns]
+  );
   const contentSignature = useMemo(
     () =>
       `${thread.turns.length}:${
@@ -1197,6 +1248,52 @@ export function ConversationTimeline({
     }
   }, [contentSignature, following]);
 
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    followingRef.current = true;
+    element.scrollTop = element.scrollHeight;
+    setFollowing(true);
+    setUnseenBelow(false);
+
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      if (!followingRef.current) return;
+      element.scrollTop = element.scrollHeight;
+      secondFrame = window.requestAnimationFrame(() => {
+        if (followingRef.current) {
+          element.scrollTop = element.scrollHeight;
+        }
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [recovering, thread.id]);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    const content = contentRef.current;
+    if (!element || !content || typeof ResizeObserver === 'undefined') return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!followingRef.current) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (followingRef.current) {
+          element.scrollTop = element.scrollHeight;
+          setUnseenBelow(false);
+        }
+      });
+    });
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [thread.id]);
+
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
@@ -1206,14 +1303,30 @@ export function ConversationTimeline({
     setFindMatchCount(0);
     setActiveFindIndex(0);
     visibleTurnLimitBeforeFindRef.current = INITIAL_VISIBLE_TURNS;
-    element.scrollTop = element.scrollHeight;
+    followingRef.current = true;
     setFollowing(true);
     setUnseenBelow(false);
     setVisibleTurnLimit(INITIAL_VISIBLE_TURNS);
   }, [thread.id]);
 
-  const threadApprovals = approvals.filter((approval) => approval.threadId === thread.id);
-  const knownTurnIds = new Set(thread.turns.map((turn) => turn.id));
+  const threadApprovals = useMemo(
+    () => approvals.filter((approval) => approval.threadId === thread.id),
+    [approvals, thread.id]
+  );
+  const approvalsByTurn = useMemo(() => {
+    const grouped = new Map<string, CodexApprovalRequest[]>();
+    for (const approval of threadApprovals) {
+      if (!approval.turnId) continue;
+      const existing = grouped.get(approval.turnId);
+      if (existing) existing.push(approval);
+      else grouped.set(approval.turnId, [approval]);
+    }
+    return grouped;
+  }, [threadApprovals]);
+  const knownTurnIds = useMemo(
+    () => new Set(thread.turns.map((turn) => turn.id)),
+    [thread.turns]
+  );
   const unassociatedApprovals = threadApprovals.filter(
     (approval) => !approval.turnId || !knownTurnIds.has(approval.turnId)
   );
@@ -1222,6 +1335,7 @@ export function ConversationTimeline({
       ? latestTurn.items.filter((item) => item.status === 'inProgress')
       : [];
   const runningItem = runningItems.length ? runningItems[runningItems.length - 1] : undefined;
+  const usagePresentation = usage ? tokenUsagePresentation(usage) : null;
 
   return (
     <div className={`conversation-timeline-shell ${findOpen ? 'find-open' : ''}`}>
@@ -1296,6 +1410,7 @@ export function ConversationTimeline({
         onScroll={(event) => {
           const element = event.currentTarget;
           const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 72;
+          followingRef.current = atBottom;
           setFollowing(atBottom);
           if (atBottom) setUnseenBelow(false);
         }}
@@ -1341,7 +1456,7 @@ export function ConversationTimeline({
                 <TurnBlock
                   key={turn.id}
                   turn={turn}
-                  approvals={threadApprovals.filter((approval) => approval.turnId === turn.id)}
+                  approvals={approvalsByTurn.get(turn.id) ?? []}
                   onRespondToApproval={onRespondToApproval}
                   onRespondToUserInput={onRespondToUserInput}
                   onCopy={onCopy}
@@ -1362,10 +1477,9 @@ export function ConversationTimeline({
               onRespondToUserInput={onRespondToUserInput}
             />
           ))}
-          {usage ? (
-            <div className="token-usage">
-              {usage.totalTokens.toLocaleString()} tokens
-              {usage.modelContextWindow ? ` · ${Math.round((usage.totalTokens / usage.modelContextWindow) * 100)}% context` : ''}
+          {usagePresentation ? (
+            <div className="token-usage" title={usagePresentation.title}>
+              {usagePresentation.label}
             </div>
           ) : null}
         </div>
@@ -1386,6 +1500,7 @@ export function ConversationTimeline({
           className="jump-to-latest"
           onClick={() => {
             const element = scrollRef.current;
+            followingRef.current = true;
             if (element) element.scrollTop = element.scrollHeight;
             setFollowing(true);
             setUnseenBelow(false);
@@ -1398,3 +1513,5 @@ export function ConversationTimeline({
     </div>
   );
 }
+
+export const ConversationTimeline = memo(ConversationTimelineComponent);

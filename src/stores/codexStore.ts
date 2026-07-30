@@ -26,6 +26,14 @@ type Listener = () => void;
 const MAX_EVENTS_PER_FRAME = 2_048;
 const MAX_RENDERED_COMMAND_OUTPUT_CHARACTERS = 1_000_000;
 const OUTPUT_TRUNCATION_MARKER = '[Earlier command output truncated]\n';
+const COALESCIBLE_DELTA_KINDS = new Set([
+  'agentMessageDelta',
+  'commandOutputDelta',
+  'fileChangeOutputDelta',
+  'planDelta',
+  'reasoningDelta',
+  'reasoningSummaryDelta'
+]);
 
 const EMPTY_SNAPSHOT: CodexStoreSnapshot = {
   threads: {},
@@ -163,18 +171,18 @@ function appendItemDelta(turn: CodexTurn, event: CodexEvent): CodexTurn {
 
 function mergeTurn(existing: CodexTurn | undefined, incoming: CodexTurn): CodexTurn {
   if (!existing) {
-    return incoming;
+    return incoming.items.length > 0
+      ? { ...incoming, items: incoming.items.map(boundedItem) }
+      : incoming;
   }
-  let next = { ...existing, ...incoming };
-  if (incoming.items.length === 0) {
-    next.items = existing.items;
-  } else {
-    next = incoming.items.reduce<CodexTurn>(
-      (turn, item) => upsertItem(turn, item),
-      next
-    );
-  }
-  return next;
+  return {
+    ...existing,
+    ...incoming,
+    items:
+      incoming.items.length === 0
+        ? existing.items
+        : incoming.items.map(boundedItem)
+  };
 }
 
 function upsertTurn(thread: CodexThread, incoming: CodexTurn): CodexThread {
@@ -224,13 +232,27 @@ function mergeThread(existing: CodexThread | undefined, incoming: CodexThread): 
   if (!existing) {
     return incoming;
   }
+  if (incoming.turns.length === 0) {
+    return { ...existing, ...incoming, turns: existing.turns };
+  }
+
+  const turns = [...existing.turns];
+  const turnIndexes = new Map(
+    turns.map((turn, index) => [turn.id, index] as const)
+  );
+  for (const incomingTurn of incoming.turns) {
+    const index = turnIndexes.get(incomingTurn.id);
+    if (index == null) {
+      turnIndexes.set(incomingTurn.id, turns.length);
+      turns.push(mergeTurn(undefined, incomingTurn));
+    } else {
+      turns[index] = mergeTurn(turns[index], incomingTurn);
+    }
+  }
   return {
     ...existing,
     ...incoming,
-    turns:
-      incoming.turns.length === 0
-        ? existing.turns
-        : incoming.turns.reduce(upsertTurn, existing).turns
+    turns
   };
 }
 
@@ -251,52 +273,53 @@ export function reduceCodexEvent(
   }
 
   let threads = snapshot.threads;
-  let approvals: Record<string, CodexApprovalRequest> = { ...snapshot.approvals };
-  let usage: Record<string, CodexTokenUsage> = { ...snapshot.usage };
+  let approvals: Readonly<Record<string, CodexApprovalRequest>> =
+    snapshot.approvals;
+  let usage: Readonly<Record<string, CodexTokenUsage>> = snapshot.usage;
   const threadId = event.threadId ?? event.thread?.id ?? null;
 
-  const writeThread = (thread: CodexThread) => {
-    threads = {
-      ...threads,
-      [thread.id]: mergeThread(threads[thread.id], thread)
-    };
-  };
-
-  if (event.thread) {
-    writeThread(event.thread);
-  }
-
   if (threadId) {
-    let thread = threads[threadId] ?? placeholderThread(threadId);
+    const existingThread = threads[threadId];
+    let thread = event.thread
+      ? mergeThread(existingThread, event.thread)
+      : existingThread ?? placeholderThread(threadId);
+    let threadChanged = Boolean(event.thread) || !existingThread;
     if (event.turn) {
       thread = upsertTurn(thread, event.turn);
+      threadChanged = true;
     }
     if (event.turnId && event.item) {
       thread = updateTurn(thread, event.turnId, (turn) => upsertItem(turn, event.item!));
+      threadChanged = true;
     }
     if (event.turnId && event.delta != null) {
       thread = updateTurn(thread, event.turnId, (turn) => appendItemDelta(turn, event));
+      threadChanged = true;
     }
     if (event.kind === 'threadStatusChanged' && event.status) {
       thread = { ...thread, status: event.status };
+      threadChanged = true;
     }
     if (event.kind === 'threadNameUpdated') {
       const name = dataIdentifier(event.data, 'name');
       if (name) {
         thread = { ...thread, title: name };
+        threadChanged = true;
       }
     }
     if (event.kind === 'threadArchived') {
       thread = { ...thread, archived: true };
+      threadChanged = true;
     }
     if (event.kind === 'threadUnarchived') {
       thread = { ...thread, archived: false };
+      threadChanged = true;
     }
     if (event.kind === 'threadDeleted') {
       const next = { ...threads };
       delete next[threadId];
       threads = next;
-    } else {
+    } else if (threadChanged) {
       threads = { ...threads, [threadId]: thread };
     }
   }
@@ -309,9 +332,10 @@ export function reduceCodexEvent(
   }
   if (event.kind === 'approvalResolved') {
     const requestId = dataIdentifier(event.data, 'requestId');
-    if (requestId) {
-      approvals = { ...approvals };
-      delete approvals[requestId];
+    if (requestId && Object.prototype.hasOwnProperty.call(approvals, requestId)) {
+      const nextApprovals = { ...approvals };
+      delete nextApprovals[requestId];
+      approvals = nextApprovals;
     }
   }
   if (threadId && event.tokenUsage) {
@@ -329,6 +353,47 @@ export function reduceCodexEvent(
         ? snapshot.unseenEvents
         : snapshot.unseenEvents + 1
   };
+}
+
+function canCoalesceDelta(previous: CodexEvent, next: CodexEvent): boolean {
+  return (
+    previous.delta != null &&
+    next.delta != null &&
+    COALESCIBLE_DELTA_KINDS.has(previous.kind) &&
+    previous.kind === next.kind &&
+    previous.method === next.method &&
+    previous.threadId === next.threadId &&
+    previous.turnId === next.turnId &&
+    previous.itemId === next.itemId &&
+    !previous.thread &&
+    !previous.turn &&
+    !previous.item &&
+    !previous.approval &&
+    !previous.tokenUsage &&
+    !previous.error &&
+    !next.thread &&
+    !next.turn &&
+    !next.item &&
+    !next.approval &&
+    !next.tokenUsage &&
+    !next.error
+  );
+}
+
+export function coalesceCodexEvents(events: CodexEvent[]): CodexEvent[] {
+  const result: CodexEvent[] = [];
+  for (const event of events) {
+    const previous = result[result.length - 1];
+    if (previous && canCoalesceDelta(previous, event)) {
+      result[result.length - 1] = {
+        ...event,
+        delta: `${previous.delta ?? ''}${event.delta ?? ''}`
+      };
+    } else {
+      result.push(event);
+    }
+  }
+  return result;
 }
 
 export class CodexStore {
@@ -372,8 +437,9 @@ export class CodexStore {
     }
     const events = this.pendingEvents;
     this.pendingEvents = [];
-    const next = events
-      .sort((left, right) => left.sequence - right.sequence)
+    const next = coalesceCodexEvents(
+      events.sort((left, right) => left.sequence - right.sequence)
+    )
       .reduce(reduceCodexEvent, this.snapshot);
     this.publish(next);
   }
@@ -417,12 +483,10 @@ export class CodexStore {
   }
 
   upsertThreads(incoming: CodexThread[]) {
-    let threads = this.snapshot.threads;
+    if (incoming.length === 0) return;
+    const threads = { ...this.snapshot.threads };
     for (const thread of incoming) {
-      threads = {
-        ...threads,
-        [thread.id]: mergeThread(threads[thread.id], thread)
-      };
+      threads[thread.id] = mergeThread(threads[thread.id], thread);
     }
     this.publish({ ...this.snapshot, threads });
   }

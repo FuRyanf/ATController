@@ -326,11 +326,13 @@ Approval Request
 Runtime Process
 ```
 
-An event sequence is assigned by the long-lived Rust runtime and remains monotonic across process restarts. React queues events until the next animation frame, sorts by sequence, and reduces them without rebuilding unrelated threads. A frame is synchronously flushed at 2,048 pending events to keep the frontend queue bounded without dropping output.
+An event sequence is assigned by the long-lived Rust runtime and remains monotonic across process restarts. React queues events until the next animation frame, sorts by sequence, coalesces adjacent deltas for the same item, and reduces them without rebuilding unrelated threads. A frame is synchronously flushed at 2,048 pending events to keep the frontend queue bounded without dropping output.
 
 Item events may arrive before the request response or before the turn payload. The reducer creates placeholders, appends deltas to only the matching item, and merges later authoritative objects. Repeated sequences and repeated item completion payloads are deduplicated.
 
-Completed turns are memoized and older blocks use CSS content visibility. Streaming output updates only the active item. Scroll follow is conditional: output follows when the reader is at the bottom and shows **Jump to latest** when the reader scrolls upward.
+Store slices retain their object identity when an event does not change them, so generic notifications do not wake thread, approval, or usage subscribers. Full-history hydration merges turns in one indexed pass rather than repeatedly cloning growing arrays. The sidebar, header, composer, timeline, and inspector use narrow comparisons so draft typing and streamed transcript changes do not rerender unrelated surfaces.
+
+Completed turns are memoized and older blocks use CSS content visibility. Streaming output updates only the active item. Opening or restoring a thread pins it to the latest turn through deferred layout changes; a content resize continues following only while the reader remains at the bottom. Scrolling upward cancels the pin and shows **Jump to latest** instead of forcing the viewport back down.
 
 Rendered live command output is capped at the latest one million characters per item with an explicit truncation marker. During history normalization, command output, diffs, inline data, and verbose tool details receive tighter per-item bounds before serialization across Tauri. A long conversation initially mounts only its newest 24 turns and reveals earlier pages without moving the reader’s viewport. These constraints keep pathological histories from exhausting the WebView while Codex-owned history and the working tree remain authoritative.
 
@@ -360,6 +362,13 @@ ATController keeps:
 
 The UI never silently treats a fallback as the requested setting.
 
+Reasoning-effort and permission changes are session boundaries. ATController persists
+the requested values, interrupts an active turn through `turn/interrupt`, and then
+rejoins the same canonical thread through `thread/resume`. Reasoning is carried in
+the generated `config.model_reasoning_effort` field; approval and sandbox overrides
+use the generated resume fields. The interrupted prompt is never submitted again
+automatically.
+
 ## Attachments
 
 Structured input conversion validates:
@@ -372,11 +381,19 @@ Structured input conversion validates:
 - explicit `allowOutsideWorkspace` for external paths;
 - selected skill name/path against the runtime `skills/list` result.
 
+The composer combines two authoritative catalogs for `@` autocomplete. Installed,
+enabled plugin packs come from `plugin/list` and are sent as mention inputs with
+canonical `plugin://<plugin-id>` paths. Repository skills from `skills/list` under
+`.github/skills` or `.agents/skills` remain individual structured skill inputs.
+Internal leaf skills from installed plugin packs are not flattened into the picker.
+`skills/changed` invalidates the project-skill catalog without restarting the
+runtime.
+
 Binary files are not expanded into giant text prompts.
 
 ## Structured Markdown
 
-Agent-message Markdown is parsed in React with `react-markdown` and `remark-gfm`. ATController does not enable raw HTML. HTTP(S) links cross the typed URL-opening command, fenced code is rendered in bounded scroll regions with an explicit copy action, and Markdown images are represented as inert attachment labels rather than making remote requests. User prompts remain rendered as authored text.
+Agent-message Markdown is parsed in React with `react-markdown` and `remark-gfm`. ATController does not enable raw HTML. Balanced structured `:::writing{...}` envelopes are removed before rendering while their Markdown body is retained. HTTP(S) links cross the typed URL-opening command, fenced code is rendered in bounded scroll regions with an explicit copy action, and Markdown images are represented as inert attachment labels rather than making remote requests. User prompts remain rendered as authored text.
 
 ## Project Terminal boundary
 
