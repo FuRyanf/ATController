@@ -105,11 +105,12 @@ pub struct BrowserSetupPlan {
     pub existing_configuration: Option<BrowserMcpConfiguration>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum BrowserSessionState {
     Unavailable,
     NotConfigured,
+    #[default]
     Stopped,
     Starting,
     Ready,
@@ -120,23 +121,12 @@ pub enum BrowserSessionState {
     Stopping,
 }
 
-impl Default for BrowserSessionState {
-    fn default() -> Self {
-        Self::Stopped
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum BrowserControlOwner {
+    #[default]
     Codex,
     User,
-}
-
-impl Default for BrowserControlOwner {
-    fn default() -> Self {
-        Self::Codex
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1189,9 +1179,7 @@ fn detect_browser() -> BrowserDependency {
 }
 
 fn playwright_cached_browser() -> Option<String> {
-    let Some(home) = dirs::home_dir() else {
-        return None;
-    };
+    let home = dirs::home_dir()?;
     let cache = home.join("Library/Caches/ms-playwright");
     let Ok(entries) = fs::read_dir(cache) else {
         return None;
