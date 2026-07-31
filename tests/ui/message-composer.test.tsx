@@ -191,6 +191,32 @@ describe('Codex message composer', () => {
     );
   });
 
+  it('opens plugins and project skills from an explicit inline Skills control', async () => {
+    const user = userEvent.setup();
+    const props = renderComposer({
+      plugins: [computerUsePlugin],
+      skills: [projectSkill]
+    });
+
+    const trigger = screen.getByRole('button', { name: 'Skills' });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await user.click(trigger);
+
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    const panel = screen.getByRole('region', { name: 'Skills and plugins' });
+    expect(panel.closest('.composer')).not.toBeNull();
+    expect(screen.getByText('Choose capabilities to include with this turn')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('checkbox', { name: /Computer Use/ }));
+    expect(props.onSelectedPluginsChange).toHaveBeenCalledWith([computerUsePlugin]);
+
+    await user.click(screen.getByRole('checkbox', { name: /Deployment Verification/ }));
+    expect(props.onSelectedSkillsChange).toHaveBeenCalledWith([projectSkill]);
+
+    await user.click(screen.getByRole('button', { name: 'Close skills' }));
+    expect(screen.queryByRole('region', { name: 'Skills and plugins' })).not.toBeInTheDocument();
+  });
+
   it('serializes path attachments and bounded inline images as structured inputs', () => {
     const attachments: ComposerAttachment[] = [
       {

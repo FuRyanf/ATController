@@ -402,6 +402,7 @@ function MessageComposerComponent({
   const [historyDraft, setHistoryDraft] = useState('');
   const [skillMention, setSkillMention] = useState<ActiveSkillMention | null>(null);
   const [skillMentionIndex, setSkillMentionIndex] = useState(0);
+  const [skillsPanelOpen, setSkillsPanelOpen] = useState(false);
   const selectedModel =
     models.find((model) => model.id === preferences.model || model.model === preferences.model) ??
     models.find((model) => model.isDefault) ??
@@ -434,6 +435,7 @@ function MessageComposerComponent({
   const outsideAttachmentCount = attachments.filter(
     (attachment) => attachment.outsideWorkspace
   ).length;
+  const selectedSkillCount = selectedPlugins.length + selectedSkills.length;
   const skillMentionResults = skillMention
     ? composerMentionMatches(
         composerPlugins,
@@ -476,6 +478,7 @@ function MessageComposerComponent({
     setHistoryDraft('');
     setSkillMention(null);
     setSkillMentionIndex(0);
+    setSkillsPanelOpen(false);
   }, [threadId]);
 
   useEffect(() => {
@@ -931,79 +934,106 @@ function MessageComposerComponent({
             )}
           </div>
         ) : null}
+        {skillsPanelOpen && (composerPlugins.length || composerSkills.length) ? (
+          <section
+            id="composer-skills-panel"
+            className="composer-skills-panel"
+            aria-label="Skills and plugins"
+          >
+            <header>
+              <div>
+                <strong>Skills and plugins</strong>
+                <span>Choose capabilities to include with this turn</span>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close skills"
+                onClick={() => setSkillsPanelOpen(false)}
+              >
+                <AppIcon name="close" size={13} />
+              </button>
+            </header>
+            <div className="composer-skills-groups">
+              {composerPlugins.length ? (
+                <section>
+                  <strong>Plugins</strong>
+                  <div>
+                    {composerPlugins.map((plugin) => {
+                      const selected = selectedPlugins.some(
+                        (candidate) => candidate.id === plugin.id
+                      );
+                      return (
+                        <label key={plugin.id}>
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() =>
+                              onSelectedPluginsChange(
+                                selected
+                                  ? selectedPlugins.filter(
+                                      (candidate) => candidate.id !== plugin.id
+                                    )
+                                  : [...selectedPlugins, plugin]
+                              )
+                            }
+                          />
+                          <span>
+                            <strong>
+                              {plugin.displayName || humanizeMentionName(plugin.name)}
+                            </strong>
+                            <small>Plugin · {plugin.description}</small>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+              {composerSkills.length ? (
+                <section>
+                  <strong>Project skills</strong>
+                  <div>
+                    {composerSkills.map((skill) => {
+                      const selected = selectedSkills.some(
+                        (candidate) => candidate.path === skill.path
+                      );
+                      return (
+                        <label key={skill.path}>
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() =>
+                              onSelectedSkillsChange(
+                                selected
+                                  ? selectedSkills.filter(
+                                      (candidate) => candidate.path !== skill.path
+                                    )
+                                  : [...selectedSkills, skill]
+                              )
+                            }
+                          />
+                          <span>
+                            <strong>{skillDisplayName(skill)}</strong>
+                            <small>
+                              {skillSourceLabel(skill)} · {skill.shortDescription || skill.description}
+                            </small>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
         {attachmentError ? <p className="composer-error">{attachmentError}</p> : null}
-        <footer className="composer-footer">
+        <footer className={`composer-footer ${running ? 'running' : ''}`}>
           <div className="composer-tools">
             <button type="button" className="icon-button" aria-label="Attach files" title="Attach files" onClick={onPickAttachments}>
               <AppIcon name="attachment" />
             </button>
-            {composerPlugins.length || composerSkills.length ? (
-              <details className="composer-skills">
-                <summary
-                  className="icon-button"
-                  aria-label="Use a Codex plugin or project skill"
-                  title="Use a Codex plugin or project skill"
-                >
-                  <AppIcon name="code" />
-                </summary>
-                <div className="composer-skills-menu">
-                  {composerPlugins.length ? <strong>Plugins</strong> : null}
-                  {composerPlugins.map((plugin) => {
-                    const selected = selectedPlugins.some(
-                      (candidate) => candidate.id === plugin.id
-                    );
-                    return (
-                      <label key={plugin.id}>
-                        <input
-                          type="checkbox"
-                          checked={selected}
-                          onChange={() =>
-                            onSelectedPluginsChange(
-                              selected
-                                ? selectedPlugins.filter(
-                                    (candidate) => candidate.id !== plugin.id
-                                  )
-                                : [...selectedPlugins, plugin]
-                            )
-                          }
-                        />
-                        <span>
-                          <strong>
-                            {plugin.displayName || humanizeMentionName(plugin.name)}
-                          </strong>
-                          <small>Plugin · {plugin.description}</small>
-                        </span>
-                      </label>
-                    );
-                  })}
-                  {composerSkills.length ? <strong>Project skills</strong> : null}
-                  {composerSkills.map((skill) => {
-                    const selected = selectedSkills.some((candidate) => candidate.path === skill.path);
-                    return (
-                      <label key={skill.path}>
-                        <input
-                          type="checkbox"
-                          checked={selected}
-                          onChange={() =>
-                            onSelectedSkillsChange(
-                              selected
-                                ? selectedSkills.filter((candidate) => candidate.path !== skill.path)
-                                : [...selectedSkills, skill]
-                            )
-                          }
-                        />
-                        <span>
-                          <strong>{skillDisplayName(skill)}</strong>
-                          <small>
-                            {skillSourceLabel(skill)} · {skill.shortDescription || skill.description}
-                          </small>
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </details>
-            ) : null}
             <label className="composer-select model-select">
               <span className="sr-only">Model</span>
               <select
@@ -1080,6 +1110,19 @@ function MessageComposerComponent({
                 <option value="fullAccess">Full Access</option>
               </select>
             </label>
+            {composerPlugins.length || composerSkills.length ? (
+              <button
+                type="button"
+                className={`composer-skills-trigger ${skillsPanelOpen ? 'active' : ''}`}
+                aria-expanded={skillsPanelOpen}
+                aria-controls="composer-skills-panel"
+                onClick={() => setSkillsPanelOpen((open) => !open)}
+              >
+                <AppIcon name="code" size={12} />
+                <span>Skills</span>
+                {selectedSkillCount > 0 ? <em>{selectedSkillCount}</em> : null}
+              </button>
+            ) : null}
             <span className="composer-usage" title="Codex usage">
               5h {formatAllowance(fiveHourLimit)} · Week {formatAllowance(weeklyLimit)}
             </span>

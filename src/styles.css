@@ -3078,6 +3078,7 @@ kbd {
 }
 
 .composer {
+  container-type: inline-size;
   width: min(100%, 790px);
   margin: 0 auto;
   overflow: hidden;
@@ -3297,9 +3298,11 @@ kbd {
 
 .composer-tools {
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
   align-items: center;
   gap: 3px;
+  overflow: hidden;
 }
 
 .composer-tools .icon-button {
@@ -3307,69 +3310,103 @@ kbd {
   height: 27px;
 }
 
-.composer-skills {
-  position: relative;
-}
-
-.composer-skills > summary {
+.composer-skills-panel {
   display: grid;
-  list-style: none;
-  place-items: center;
-}
-
-.composer-skills > summary::-webkit-details-marker {
-  display: none;
-}
-
-.composer-skills-menu {
-  position: absolute;
-  bottom: 34px;
-  left: 0;
-  z-index: 12;
-  display: grid;
-  width: 300px;
-  max-height: 310px;
-  gap: 2px;
+  max-height: 260px;
+  gap: 7px;
+  margin: 3px 7px 5px;
   padding: 7px;
-  overflow-y: auto;
+  overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
-  background: var(--bg-raised);
-  box-shadow: var(--shadow-menu);
+  background: var(--bg-subtle);
 }
 
-.composer-skills-menu > strong {
-  padding: 4px 6px 6px;
-  color: var(--text-tertiary);
-  font-size: 9px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.composer-skills-menu label {
+.composer-skills-panel > header {
   display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 7px;
-  border-radius: 5px;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 0 5px;
 }
 
-.composer-skills-menu label:hover {
-  background: var(--bg-hover);
-}
-
-.composer-skills-menu label > span {
+.composer-skills-panel > header > div {
   display: grid;
   min-width: 0;
   gap: 1px;
 }
 
-.composer-skills-menu label strong {
+.composer-skills-panel > header strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.composer-skills-panel > header span {
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+}
+
+.composer-skills-groups {
+  display: grid;
+  gap: 8px;
+  overflow-y: auto;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.composer-skills-groups > section {
+  display: grid;
+  gap: 4px;
+}
+
+.composer-skills-groups > section > strong {
+  padding: 0 5px;
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.composer-skills-groups > section > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.composer-skills-groups label {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: var(--bg-raised);
+}
+
+.composer-skills-groups label:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.composer-skills-groups label:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+}
+
+.composer-skills-groups label > span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.composer-skills-groups label strong {
   font-size: 10.5px;
   font-weight: 560;
 }
 
-.composer-skills-menu label small {
+.composer-skills-groups label small {
   display: -webkit-box;
   overflow: hidden;
   color: var(--text-tertiary);
@@ -3378,10 +3415,48 @@ kbd {
   -webkit-line-clamp: 2;
 }
 
+.composer-skills-trigger {
+  display: inline-flex;
+  height: 27px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 540;
+}
+
+.composer-skills-trigger:hover,
+.composer-skills-trigger.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.composer-skills-trigger.active {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.composer-skills-trigger em {
+  display: grid;
+  min-width: 16px;
+  height: 16px;
+  place-items: center;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 8.5px;
+  font-style: normal;
+}
+
 .composer-select {
   position: relative;
   display: flex;
   height: 27px;
+  min-width: 0;
   align-items: center;
   border-radius: 5px;
 }
@@ -3392,6 +3467,7 @@ kbd {
 
 .composer-select select {
   height: 27px;
+  min-width: 0;
   max-width: 125px;
   padding: 0 18px 0 6px;
   overflow: hidden;
@@ -3443,8 +3519,27 @@ kbd {
 
 .composer-running-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 4px;
+}
+
+.composer-footer.running .composer-usage {
+  display: none;
+}
+
+@container (max-width: 650px) {
+  .composer-usage {
+    display: none;
+  }
+
+  .composer-tools {
+    gap: 1px;
+  }
+
+  .composer-select.model-select select {
+    max-width: 125px;
+  }
 }
 
 .stop-button {
