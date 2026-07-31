@@ -462,6 +462,11 @@ describe('structured Codex timeline', () => {
       'let errors = materialize(ctc_pipeline_logs);\nerrors | count',
       'Code block'
     );
+
+    await user.click(
+      screen.getByRole('button', { name: 'Copy response as Markdown' })
+    );
+    expect(onCopy).toHaveBeenLastCalledWith(agent.text, 'Markdown response');
   });
 
   it('unwraps balanced structured writing envelopes before rendering Markdown', () => {

@@ -9,6 +9,7 @@ import {
   isComposerSkill,
   MessageComposer,
   pathsFromDataTransfer,
+  pathsWithoutInlineImages,
   physicalPointInsideRect,
   skillDisplayName,
   skillSourceLabel,
@@ -219,6 +220,27 @@ describe('Codex message composer', () => {
     ]);
   });
 
+  it('keeps outside-project sharing visible without a blocking confirmation', () => {
+    renderComposer({
+      attachments: [
+        {
+          id: 'external-image',
+          name: 'screenshot.png',
+          kind: 'image',
+          path: '/Users/test/Desktop/screenshot.png',
+          outsideWorkspace: true
+        }
+      ]
+    });
+
+    expect(screen.getByText('Outside project')).toBeInTheDocument();
+    expect(
+      screen.getByRole('note')
+    ).toHaveTextContent(
+      'This outside-project attachment will be shared with Codex when you send this turn.'
+    );
+  });
+
   it('serializes selected runtime skills with the official structured input shape', () => {
     expect(
       attachmentsToInputs('', [], [
@@ -405,6 +427,73 @@ describe('Codex message composer', () => {
     expect(pathsFromDataTransfer(transfer)).toEqual([
       '/tmp/project/file with spaces.txt'
     ]);
+  });
+
+  it('removes only the matching inline images from a mixed native drop', () => {
+    expect(
+      pathsWithoutInlineImages(
+        [
+          '/Users/test/Desktop/screenshot.png',
+          '/tmp/project/notes.txt',
+          '/tmp/project/screenshot.png'
+        ],
+        ['screenshot.png']
+      )
+    ).toEqual(['/tmp/project/notes.txt', '/tmp/project/screenshot.png']);
+  });
+
+  it('uses WebKit bytes for dropped images instead of reopening the protected path', async () => {
+    (globalThis as typeof globalThis & { isTauri?: boolean }).isTauri = true;
+    const onAttachmentsChange = vi.fn();
+    const onDropPaths = vi.fn(async () => undefined);
+    renderComposer({ onAttachmentsChange, onDropPaths });
+    await waitFor(() => expect(nativeDrop.handler).not.toBeNull());
+
+    const image = new File(['image bytes'], 'screenshot.png', { type: 'image/png' });
+    Object.defineProperty(image, 'path', {
+      configurable: true,
+      value: '/Users/test/Desktop/screenshot.png'
+    });
+    const dataTransfer = {
+      files: [image],
+      getData: () => ''
+    } as unknown as DataTransfer;
+    const dropTarget = screen
+      .getByRole('textbox', { name: 'Message Codex' })
+      .closest('.composer-wrap');
+    expect(dropTarget).not.toBeNull();
+
+    act(() => {
+      nativeDrop.handler?.({
+        payload: {
+          type: 'enter',
+          paths: ['/Users/test/Desktop/screenshot.png'],
+          position: { x: 0, y: 0 }
+        }
+      });
+      nativeDrop.handler?.({
+        payload: {
+          type: 'drop',
+          paths: ['/Users/test/Desktop/screenshot.png'],
+          position: { x: 0, y: 0 }
+        }
+      });
+    });
+    fireEvent.drop(dropTarget!, { dataTransfer });
+
+    await waitFor(() => expect(onAttachmentsChange).toHaveBeenCalledOnce());
+    expect(onAttachmentsChange.mock.calls[0][0]).toEqual([
+      expect.objectContaining({
+        name: 'screenshot.png',
+        kind: 'image',
+        dataUrl: expect.stringMatching(/^data:image\/png;base64,/),
+        outsideWorkspace: true
+      })
+    ]);
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
+    });
+    expect(onDropPaths).not.toHaveBeenCalled();
   });
 
   it('accepts file paths from the native Tauri drop event', async () => {

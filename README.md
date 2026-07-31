@@ -215,7 +215,13 @@ Chrome, and Computer Use. Project skills discovered through `skills/list` under
 their canonical `plugin://` mention identity; project skills use structured skill
 inputs.
 
-Inline images are limited to 10 MB. Files outside the active project are visibly marked, and the file picker requires confirmation before sharing them. Large ordinary files are passed by path instead of being converted into prompt text.
+Inline images are limited to 10 MB. Files outside the active project are visibly
+marked in the composer, with a persistent explanation that they will be shared
+when the turn is sent; ATController does not interrupt the attachment flow with
+a second confirmation dialog. Finder-dropped and pasted PNG, JPEG, GIF, and WebP
+images are read through the explicit WebKit drop or paste gesture and sent inline
+instead of reopening their protected-folder path. Large ordinary files are
+passed by path instead of being converted into prompt text.
 
 ## Git and changes
 
@@ -385,7 +391,7 @@ The real contract and end-to-end tests use a temporary Git repository, skip clea
 Build the local native application:
 
 ```bash
-yarn tauri build --bundles app,dmg
+yarn build:app:local
 ```
 
 Create the exact local release filenames:
@@ -400,6 +406,19 @@ Artifacts are written to:
 src-tauri/target/release-assets/ATController.dmg
 src-tauri/target/release-assets/ATController.app.zip
 ```
+
+Both local commands apply the fixed `com.furyanf.atcontroller` signing
+identifier. When a persistent macOS code-signing identity is available, use:
+
+```bash
+ATCONTROLLER_LOCAL_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)" yarn build:app:local
+```
+
+That identity lets macOS retain protected-folder decisions across rebuilds.
+Without one, the script uses an ad-hoc signature and explicitly warns that
+macOS may ask again after the executable changes. A first request to access a
+Desktop, Documents, or Downloads file remains an intentional macOS privacy
+decision; ATController does not bypass it.
 
 Version fields stay synchronized across `package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`. See [docs/releasing.md](docs/releasing.md) for signing, notarization, and GitHub Release details.
 

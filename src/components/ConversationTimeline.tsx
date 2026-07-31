@@ -952,11 +952,30 @@ function TimelineItem({
     case 'userMessage':
       return <UserMessage item={item} />;
     case 'agentMessage':
-      return (
-        <article className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`} data-item-id={item.id}>
-          <MarkdownContent text={item.text || '…'} onCopy={onCopy} />
-        </article>
-      );
+      {
+        const markdown = item.text ? normalizeAgentMarkdown(item.text) : '';
+        return (
+          <article
+            className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`}
+            data-item-id={item.id}
+          >
+            <MarkdownContent text={item.text || '…'} onCopy={onCopy} />
+            {item.status !== 'inProgress' && markdown.trim() ? (
+              <div className="timeline-agent-message-actions" data-thread-find-ignore>
+                <button
+                  type="button"
+                  aria-label="Copy response as Markdown"
+                  title="Copy response as Markdown"
+                  onClick={() => onCopy(markdown, 'Markdown response')}
+                >
+                  <AppIcon name="copy" size={12} />
+                  <span>Copy Markdown</span>
+                </button>
+              </div>
+            ) : null}
+          </article>
+        );
+      }
     case 'reasoning':
       return <ReasoningItem item={item} />;
     case 'plan':

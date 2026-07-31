@@ -268,6 +268,21 @@ export function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
   return [...new Set(paths.filter((path) => path.startsWith('/')))];
 }
 
+export function pathsWithoutInlineImages(paths: string[], imageNames: string[]): string[] {
+  const remainingNames = new Map<string, number>();
+  for (const name of imageNames) {
+    remainingNames.set(name, (remainingNames.get(name) ?? 0) + 1);
+  }
+  return paths.filter((path) => {
+    const name = path.split('/').pop() ?? path;
+    const remaining = remainingNames.get(name) ?? 0;
+    if (remaining === 0) return true;
+    if (remaining === 1) remainingNames.delete(name);
+    else remainingNames.set(name, remaining - 1);
+    return false;
+  });
+}
+
 async function imageAttachment(file: File, workspacePath: string): Promise<ComposerAttachment> {
   if (!SUPPORTED_IMAGE_TYPES.has(file.type)) {
     throw new Error('Images must be PNG, JPEG, GIF, or WebP.');
@@ -276,15 +291,6 @@ async function imageAttachment(file: File, workspacePath: string): Promise<Compo
     throw new Error('Images are limited to 10 MB.');
   }
   const path = filePath(file);
-  if (path) {
-    return {
-      id: crypto.randomUUID(),
-      name: file.name,
-      kind: 'image',
-      path,
-      outsideWorkspace: !pathInsideWorkspace(path, workspacePath)
-    };
-  }
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () =>
@@ -297,7 +303,7 @@ async function imageAttachment(file: File, workspacePath: string): Promise<Compo
     name: file.name || 'Pasted image',
     kind: 'image',
     dataUrl,
-    outsideWorkspace: false
+    outsideWorkspace: path ? !pathInsideWorkspace(path, workspacePath) : false
   };
 }
 
@@ -384,6 +390,11 @@ function MessageComposerComponent({
   const dropTargetRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
   const nativeFileDragRef = useRef(false);
+  const pendingInlineImageDropRef = useRef<{
+    names: string[];
+    expiresAt: number;
+  } | null>(null);
+  const nativeDropTimerRef = useRef<number | null>(null);
   const pendingSelectionRef = useRef<number | null>(null);
   const [dragging, setDragging] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -420,6 +431,9 @@ function MessageComposerComponent({
         selectedSkills.length ||
         selectedPlugins.length
     );
+  const outsideAttachmentCount = attachments.filter(
+    (attachment) => attachment.outsideWorkspace
+  ).length;
   const skillMentionResults = skillMention
     ? composerMentionMatches(
         composerPlugins,
@@ -506,16 +520,34 @@ function MessageComposerComponent({
         nativeFileDragRef.current = false;
         setDropActive(false);
         if (!acceptDrop || payload.paths.length === 0) return;
-        void (async () => {
-          try {
-            setAttachmentError(null);
-            await onDropPaths(payload.paths);
-          } catch (error) {
-            if (!disposed) {
-              setAttachmentError(error instanceof Error ? error.message : String(error));
+        const droppedPaths = [...payload.paths];
+        if (nativeDropTimerRef.current != null) {
+          window.clearTimeout(nativeDropTimerRef.current);
+        }
+        // WebKit can read an explicitly dropped image without asking the
+        // native process to traverse a protected macOS folder. Give the DOM
+        // drop event one frame to claim those images, then pass any remaining
+        // paths through the native path flow.
+        nativeDropTimerRef.current = window.setTimeout(() => {
+          nativeDropTimerRef.current = null;
+          const pending = pendingInlineImageDropRef.current;
+          pendingInlineImageDropRef.current = null;
+          const paths =
+            pending && pending.expiresAt >= Date.now()
+              ? pathsWithoutInlineImages(droppedPaths, pending.names)
+              : droppedPaths;
+          if (paths.length === 0) return;
+          void (async () => {
+            try {
+              setAttachmentError(null);
+              await onDropPaths(paths);
+            } catch (error) {
+              if (!disposed) {
+                setAttachmentError(error instanceof Error ? error.message : String(error));
+              }
             }
-          }
-        })();
+          })();
+        }, 80);
       })
       .then((unlisten) => {
         if (disposed) unlisten();
@@ -525,6 +557,10 @@ function MessageComposerComponent({
     return () => {
       disposed = true;
       nativeFileDragRef.current = false;
+      if (nativeDropTimerRef.current != null) {
+        window.clearTimeout(nativeDropTimerRef.current);
+        nativeDropTimerRef.current = null;
+      }
       stop?.();
     };
   }, [archived, onDropPaths]);
@@ -681,7 +717,20 @@ function MessageComposerComponent({
   const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDropActive(false);
-    const paths = pathsFromDataTransfer(event.dataTransfer);
+    const files = Array.from(event.dataTransfer.files);
+    const inlineImages = files.filter((file) => SUPPORTED_IMAGE_TYPES.has(file.type));
+    if (isTauri() && inlineImages.length > 0) {
+      const names = inlineImages.map((file) => file.name);
+      pendingInlineImageDropRef.current = {
+        names,
+        expiresAt: Date.now() + 1_500
+      };
+      await addFiles(inlineImages);
+    }
+    const paths = pathsWithoutInlineImages(
+      pathsFromDataTransfer(event.dataTransfer),
+      isTauri() ? inlineImages.map((file) => file.name) : []
+    );
     if (paths.length) {
       await onDropPaths(paths);
       return;
@@ -690,7 +739,7 @@ function MessageComposerComponent({
     // objects intentionally omit them, so wait for the native event instead
     // of displaying a misleading local-path error.
     if (isTauri()) return;
-    await addFiles(Array.from(event.dataTransfer.files));
+    await addFiles(files);
   };
 
   if (archived) {
@@ -784,6 +833,15 @@ function MessageComposerComponent({
               </div>
             ))}
           </div>
+        ) : null}
+        {outsideAttachmentCount > 0 ? (
+          <p className="composer-external-attachment-note" role="note">
+            <AppIcon name="info" size={12} />
+            {outsideAttachmentCount === 1
+              ? 'This outside-project attachment'
+              : `These ${outsideAttachmentCount} outside-project attachments`}{' '}
+            will be shared with Codex when you send this turn.
+          </p>
         ) : null}
         <textarea
           ref={textareaRef}

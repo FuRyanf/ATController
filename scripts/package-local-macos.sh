@@ -10,7 +10,7 @@ if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
   exit 1
 fi
 
-yarn run tauri -- build --bundles app -- --locked
+bash "$project_root/scripts/build-local-macos-app.sh"
 
 application="$project_root/src-tauri/target/release/bundle/macos/ATController.app"
 executable="$application/Contents/MacOS/atcontroller"
@@ -18,20 +18,6 @@ artifact_directory="$project_root/src-tauri/target/release-assets"
 
 test -d "$application"
 test "$(lipo -archs "$executable")" = "arm64"
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$application/Contents/Info.plist")" = "com.furyanf.atcontroller"
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$application/Contents/Info.plist")" = "ATController"
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$application/Contents/Info.plist")" = "ATController"
-
-# Tauri's unsigned local bundle only carries a linker signature. Apply a
-# resource-sealed ad-hoc signature so the copied app can be verified locally.
-codesign \
-  --force \
-  --deep \
-  --sign - \
-  --identifier com.furyanf.atcontroller \
-  --timestamp=none \
-  "$application"
-codesign --verify --deep --strict --verbose=2 "$application"
 
 temporary_root="$(mktemp -d /tmp/atcontroller-local-package.XXXXXX)"
 case "$temporary_root" in

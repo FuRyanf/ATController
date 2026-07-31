@@ -2367,7 +2367,7 @@ export default function App() {
     }
   }, [showToast]);
 
-  const attachPaths = useCallback(async (paths: string[]) => {
+  const attachPaths = useCallback((paths: string[]) => {
     if (!selectedWorkspace || !selectedThreadId) return;
     const uniquePaths = Array.from(
       new Set(paths.filter((path) => typeof path === 'string' && path.startsWith('/')))
@@ -2376,14 +2376,6 @@ export default function App() {
     const added = uniquePaths.map((path) =>
       attachmentFromPath(path, selectedWorkspace.path)
     );
-    const outsideCount = added.filter((attachment) => attachment.outsideWorkspace).length;
-    if (outsideCount) {
-      const approved = await confirm(
-        `${outsideCount === 1 ? 'This file is' : 'Some files are'} outside ${selectedWorkspace.name}. Share with Codex for this turn?`,
-        { title: 'Share external attachment', kind: 'warning' }
-      );
-      if (!approved) return;
-    }
     setAttachmentsByThread((current) => ({
       ...current,
       [selectedThreadId]: [
@@ -2405,7 +2397,7 @@ export default function App() {
       title: 'Attach files to this Codex turn'
     });
     const paths = typeof selected === 'string' ? [selected] : selected ?? [];
-    await attachPaths(paths);
+    attachPaths(paths);
   }, [attachPaths]);
 
   const renameThread = useCallback(

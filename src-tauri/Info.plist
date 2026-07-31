@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>ATController accesses Desktop files only when you open a project there or attach a file to a Codex turn.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>ATController accesses Documents files only when you open a project there or attach a file to a Codex turn.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>ATController accesses Downloads files only when you open a project there or attach a file to a Codex turn.</string>
+</dict>
+</plist>

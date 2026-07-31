@@ -15,6 +15,7 @@
     "tauri": "tauri",
     "codex:generate-protocol": "node scripts/generate-codex-protocol.mjs",
     "codex:check-protocol": "node scripts/generate-codex-protocol.mjs --check",
+    "build:app:local": "bash scripts/build-local-macos-app.sh",
     "package:local": "bash scripts/package-local-macos.sh",
     "icons": "yarn generate:icons",
     "generate:icons": "bash scripts/generate-icons.sh",

@@ -35,7 +35,20 @@ When the configured login shell is not zsh, ATController reports an explicit com
 
 ## Unsigned local builds
 
-Local and branch builds use an ad-hoc or development signature. Gatekeeper may require an explicit first-open action. Tagged production releases require Developer ID signing, notarization, and stapling before publication.
+Local and branch builds use an ad-hoc or development signature. Gatekeeper may
+require an explicit first-open action.
+
+macOS protects Desktop, Documents, and Downloads independently. ATController
+asks for those files only when a project or explicitly attached file requires
+them. A signed build normally retains the user's choice. An ad-hoc signature's
+code requirement changes when the executable is rebuilt, so macOS may ask again
+after each local native build. Use a persistent identity with
+`ATCONTROLLER_LOCAL_SIGNING_IDENTITY` and `yarn build:app:local` when permission
+persistence is important. ATController does not request Full Disk Access or
+bypass macOS privacy controls.
+
+Tagged production releases require Developer ID signing, notarization, and
+stapling before publication.
 
 ## Runtime-generated model availability
 

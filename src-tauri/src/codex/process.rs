@@ -343,7 +343,7 @@ pub fn validate_attachment_path(
     }
     if !canonical.starts_with(workspace) && !allow_outside_workspace {
         return Err(anyhow!(
-            "This attachment is outside the active workspace. Confirm external file sharing first."
+            "This attachment is outside the active workspace and was not explicitly attached for this turn."
         ));
     }
     Ok(canonical.to_string_lossy().to_string())
