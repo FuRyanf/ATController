@@ -3312,7 +3312,9 @@ kbd {
 
 .composer-skills-panel {
   display: grid;
-  max-height: 260px;
+  height: min(260px, 42vh);
+  min-height: 180px;
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 7px;
   margin: 3px 7px 5px;
   padding: 7px;
@@ -3350,10 +3352,88 @@ kbd {
 
 .composer-skills-groups {
   display: grid;
+  min-height: 0;
+  align-content: start;
   gap: 8px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   scrollbar-color: var(--border-strong) transparent;
   scrollbar-width: thin;
+}
+
+.composer-skills-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+}
+
+.composer-skills-search {
+  display: flex;
+  min-width: 140px;
+  height: 28px;
+  flex: 1 1 220px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text-tertiary);
+}
+
+.composer-skills-search:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.composer-skills-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 10px;
+}
+
+.composer-skills-search input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.composer-skills-filter {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+}
+
+.composer-skills-filter button {
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+  font-weight: 560;
+  white-space: nowrap;
+}
+
+.composer-skills-filter button:hover {
+  color: var(--text-secondary);
+}
+
+.composer-skills-filter button[aria-pressed="true"] {
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--text-primary);
 }
 
 .composer-skills-groups > section {
@@ -3373,6 +3453,14 @@ kbd {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 3px;
+}
+
+.composer-skills-empty {
+  margin: 0;
+  padding: 18px 8px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-align: center;
 }
 
 .composer-skills-groups label {
@@ -3539,6 +3627,23 @@ kbd {
 
   .composer-select.model-select select {
     max-width: 125px;
+  }
+
+  .composer-skills-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .composer-skills-search {
+    flex-basis: 100%;
+  }
+
+  .composer-skills-filter {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .composer-skills-groups > section > div {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

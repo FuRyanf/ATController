@@ -205,7 +205,13 @@ describe('Codex message composer', () => {
     expect(trigger).toHaveAttribute('aria-expanded', 'true');
     const panel = screen.getByRole('region', { name: 'Skills and plugins' });
     expect(panel.closest('.composer')).not.toBeNull();
-    expect(screen.getByText('Choose capabilities to include with this turn')).toBeInTheDocument();
+    expect(screen.getByText(/Available for this project/)).toBeInTheDocument();
+    expect(
+      screen.getByRole('searchbox', { name: 'Search skills and plugins' })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText('Available skills and plugins')
+    ).toHaveAttribute('tabindex', '0');
 
     await user.click(screen.getByRole('checkbox', { name: /Computer Use/ }));
     expect(props.onSelectedPluginsChange).toHaveBeenCalledWith([computerUsePlugin]);
@@ -215,6 +221,98 @@ describe('Codex message composer', () => {
 
     await user.click(screen.getByRole('button', { name: 'Close skills' }));
     expect(screen.queryByRole('region', { name: 'Skills and plugins' })).not.toBeInTheDocument();
+  });
+
+  it('searches and filters plugins versus project-local skills', async () => {
+    const user = userEvent.setup();
+    renderComposer({
+      value: '',
+      plugins: [computerUsePlugin],
+      skills: [projectSkill]
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Skills' }));
+    const search = screen.getByRole('searchbox', {
+      name: 'Search skills and plugins'
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Project' }));
+    expect(
+      screen.queryByRole('checkbox', { name: /Computer Use/ })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('checkbox', { name: /Deployment Verification/ })
+    ).toBeInTheDocument();
+
+    await user.type(search, 'missing capability');
+    expect(screen.getByText('No skills or plugins match this search.')).toBeInTheDocument();
+    await user.clear(search);
+    await user.click(screen.getByRole('button', { name: 'Plugins' }));
+    expect(
+      screen.getByRole('checkbox', { name: /Computer Use/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('checkbox', { name: /Deployment Verification/ })
+    ).not.toBeInTheDocument();
+  });
+
+  it('can restrict @ suggestions to capabilities checked for the current turn', async () => {
+    const user = userEvent.setup();
+
+    function CapabilityFilterHarness() {
+      const [value, setValue] = useState('');
+      const [selectedPlugins, setSelectedPlugins] = useState<CodexPlugin[]>([]);
+      const [selectedSkills, setSelectedSkills] = useState<CodexSkill[]>([]);
+      return (
+        <MessageComposer
+          threadId="thread-filtered-skills"
+          workspacePath="/tmp/project"
+          value={value}
+          promptHistory={[]}
+          attachments={[]}
+          plugins={[computerUsePlugin]}
+          selectedPlugins={selectedPlugins}
+          skills={[projectSkill]}
+          selectedSkills={selectedSkills}
+          preferences={preferences}
+          models={[model]}
+          archived={false}
+          running={false}
+          connected
+          recovering={false}
+          submitting={false}
+          commandEnterToSend
+          onChange={setValue}
+          onAttachmentsChange={vi.fn()}
+          onSelectedPluginsChange={setSelectedPlugins}
+          onSelectedSkillsChange={setSelectedSkills}
+          onPreferencesChange={vi.fn()}
+          onPickAttachments={vi.fn()}
+          onDropPaths={vi.fn()}
+          onSubmit={vi.fn()}
+          onStop={vi.fn()}
+          onRestore={vi.fn()}
+        />
+      );
+    }
+
+    render(<CapabilityFilterHarness />);
+    await user.click(screen.getByRole('button', { name: 'Skills' }));
+    await user.click(screen.getByRole('checkbox', { name: /Computer Use/ }));
+    await user.click(screen.getByRole('button', { name: 'Selected 1' }));
+    expect(
+      screen.queryByRole('checkbox', { name: /Deployment Verification/ })
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Close skills' }));
+
+    const composer = screen.getByRole('textbox', { name: 'Message Codex' });
+    await user.type(composer, '@');
+    expect(screen.getByRole('option', { name: /Computer Use/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('option', { name: /Deployment Verification/ })
+    ).not.toBeInTheDocument();
+    await user.keyboard('{Enter}');
+    expect(screen.getAllByTitle('computer-use@openai-bundled')).toHaveLength(1);
   });
 
   it('serializes path attachments and bounded inline images as structured inputs', () => {

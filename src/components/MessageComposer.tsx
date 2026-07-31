@@ -1,6 +1,7 @@
 import {
   memo,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ClipboardEvent,
@@ -77,9 +78,12 @@ interface ComposerMentionOption {
   displayName: string;
   description: string;
   sourceLabel: 'Plugin' | 'Project skill';
+  selected: boolean;
   plugin?: CodexPlugin;
   skill?: CodexSkill;
 }
+
+type CapabilityView = 'all' | 'plugins' | 'project' | 'selected';
 
 const MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
@@ -114,6 +118,18 @@ function humanizeMentionName(name: string): string {
     .join(' ');
 }
 
+function capabilitySearchMatches(
+  query: string,
+  values: Array<string | null | undefined>
+): boolean {
+  return (
+    !query ||
+    values.some((candidate) =>
+      (candidate ?? '').toLocaleLowerCase().includes(query)
+    )
+  );
+}
+
 export function skillDisplayName(skill: CodexSkill): string {
   return humanizeMentionName(skill.name);
 }
@@ -146,6 +162,7 @@ function composerMentionMatches(
   skills: CodexSkill[],
   selectedPlugins: CodexPlugin[],
   selectedSkills: CodexSkill[],
+  view: CapabilityView,
   query: string
 ): ComposerMentionOption[] {
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -153,24 +170,37 @@ function composerMentionMatches(
   const selectedSkillPaths = new Set(selectedSkills.map((skill) => skill.path));
   const options: ComposerMentionOption[] = [
     ...plugins
-      .filter((plugin) => plugin.enabled && !selectedPluginIds.has(plugin.id))
+      .filter((plugin) => plugin.enabled)
+      .filter(
+        (plugin) =>
+          view === 'all' ||
+          view === 'plugins' ||
+          (view === 'selected' && selectedPluginIds.has(plugin.id))
+      )
       .map((plugin) => ({
         key: `plugin:${plugin.id}`,
         kind: 'plugin' as const,
         displayName: plugin.displayName || humanizeMentionName(plugin.name),
         description: plugin.description,
         sourceLabel: 'Plugin' as const,
+        selected: selectedPluginIds.has(plugin.id),
         plugin
       })),
     ...skills
       .filter(isComposerSkill)
-      .filter((skill) => !selectedSkillPaths.has(skill.path))
+      .filter(
+        (skill) =>
+          view === 'all' ||
+          view === 'project' ||
+          (view === 'selected' && selectedSkillPaths.has(skill.path))
+      )
       .map((skill) => ({
         key: `skill:${skill.path}`,
         kind: 'skill' as const,
         displayName: skillDisplayName(skill),
         description: skill.shortDescription || skill.description,
         sourceLabel: 'Project skill' as const,
+        selected: selectedSkillPaths.has(skill.path),
         skill
       }))
   ];
@@ -209,6 +239,7 @@ function composerMentionMatches(
     .sort(
       (left, right) =>
         matchRank(left) - matchRank(right) ||
+        Number(right.selected) - Number(left.selected) ||
         (left.kind === right.kind ? 0 : left.kind === 'plugin' ? -1 : 1) ||
         left.displayName.localeCompare(right.displayName)
     )
@@ -403,14 +434,72 @@ function MessageComposerComponent({
   const [skillMention, setSkillMention] = useState<ActiveSkillMention | null>(null);
   const [skillMentionIndex, setSkillMentionIndex] = useState(0);
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false);
+  const [skillsPanelQuery, setSkillsPanelQuery] = useState('');
+  const [capabilityView, setCapabilityView] = useState<CapabilityView>('all');
   const selectedModel =
     models.find((model) => model.id === preferences.model || model.model === preferences.model) ??
     models.find((model) => model.isDefault) ??
     models[0];
   const efforts = selectedModel?.reasoningEfforts ?? [];
   const serviceTiers = selectedModel?.serviceTiers ?? [];
-  const composerSkills = skills.filter(isComposerSkill);
-  const composerPlugins = plugins.filter((plugin) => plugin.enabled);
+  const composerSkills = useMemo(() => skills.filter(isComposerSkill), [skills]);
+  const composerPlugins = useMemo(
+    () => plugins.filter((plugin) => plugin.enabled),
+    [plugins]
+  );
+  const selectedPluginIds = useMemo(
+    () => new Set(selectedPlugins.map((plugin) => plugin.id)),
+    [selectedPlugins]
+  );
+  const selectedSkillPaths = useMemo(
+    () => new Set(selectedSkills.map((skill) => skill.path)),
+    [selectedSkills]
+  );
+  const normalizedSkillsPanelQuery = skillsPanelQuery.trim().toLocaleLowerCase();
+  const visiblePanelPlugins = useMemo(
+    () =>
+      composerPlugins.filter(
+        (plugin) =>
+          (capabilityView === 'all' ||
+            capabilityView === 'plugins' ||
+            (capabilityView === 'selected' && selectedPluginIds.has(plugin.id))) &&
+          capabilitySearchMatches(normalizedSkillsPanelQuery, [
+            plugin.displayName,
+            plugin.name,
+            plugin.id,
+            plugin.description,
+            plugin.marketplace
+          ])
+      ),
+    [
+      capabilityView,
+      composerPlugins,
+      normalizedSkillsPanelQuery,
+      selectedPluginIds
+    ]
+  );
+  const visiblePanelSkills = useMemo(
+    () =>
+      composerSkills.filter(
+        (skill) =>
+          (capabilityView === 'all' ||
+            capabilityView === 'project' ||
+            (capabilityView === 'selected' && selectedSkillPaths.has(skill.path))) &&
+          capabilitySearchMatches(normalizedSkillsPanelQuery, [
+            skillDisplayName(skill),
+            skill.name,
+            skill.path,
+            skill.shortDescription,
+            skill.description
+          ])
+      ),
+    [
+      capabilityView,
+      composerSkills,
+      normalizedSkillsPanelQuery,
+      selectedSkillPaths
+    ]
+  );
   const effectiveTier = serviceTiers.find(
     (tier) => tier.id === effectiveServiceTier
   );
@@ -436,15 +525,28 @@ function MessageComposerComponent({
     (attachment) => attachment.outsideWorkspace
   ).length;
   const selectedSkillCount = selectedPlugins.length + selectedSkills.length;
-  const skillMentionResults = skillMention
-    ? composerMentionMatches(
-        composerPlugins,
-        composerSkills,
-        selectedPlugins,
-        selectedSkills,
-        skillMention.query
-      )
-    : [];
+  const skillMentionQuery = skillMention?.query;
+  const skillMentionResults = useMemo(
+    () =>
+      skillMentionQuery == null
+        ? []
+        : composerMentionMatches(
+            composerPlugins,
+            composerSkills,
+            selectedPlugins,
+            selectedSkills,
+            capabilityView,
+            skillMentionQuery
+          ),
+    [
+      capabilityView,
+      composerPlugins,
+      composerSkills,
+      selectedPlugins,
+      selectedSkills,
+      skillMentionQuery
+    ]
+  );
   const activeSkillMentionIndex = Math.min(
     skillMentionIndex,
     Math.max(0, skillMentionResults.length - 1)
@@ -479,6 +581,8 @@ function MessageComposerComponent({
     setSkillMention(null);
     setSkillMentionIndex(0);
     setSkillsPanelOpen(false);
+    setSkillsPanelQuery('');
+    setCapabilityView('all');
   }, [threadId]);
 
   useEffect(() => {
@@ -616,9 +720,13 @@ function MessageComposerComponent({
     pendingSelectionRef.current = nextCursor;
     onChange(nextValue);
     if (option.plugin) {
-      onSelectedPluginsChange([...selectedPlugins, option.plugin]);
+      if (!selectedPluginIds.has(option.plugin.id)) {
+        onSelectedPluginsChange([...selectedPlugins, option.plugin]);
+      }
     } else if (option.skill) {
-      onSelectedSkillsChange([...selectedSkills, option.skill]);
+      if (!selectedSkillPaths.has(option.skill.path)) {
+        onSelectedSkillsChange([...selectedSkills, option.skill]);
+      }
     }
     setSkillMention(null);
     setSkillMentionIndex(0);
@@ -924,6 +1032,7 @@ function MessageComposerComponent({
                     <strong>{option.displayName}</strong>
                     <small>
                       <em>{option.sourceLabel}</em>
+                      {option.selected ? <em>Selected</em> : null}
                       {option.description}
                     </small>
                   </span>
@@ -943,7 +1052,7 @@ function MessageComposerComponent({
             <header>
               <div>
                 <strong>Skills and plugins</strong>
-                <span>Choose capabilities to include with this turn</span>
+                <span>Available for this project · this filter also applies to @</span>
               </div>
               <button
                 type="button"
@@ -954,15 +1063,51 @@ function MessageComposerComponent({
                 <AppIcon name="close" size={13} />
               </button>
             </header>
-            <div className="composer-skills-groups">
-              {composerPlugins.length ? (
+            <div className="composer-skills-toolbar">
+              <label className="composer-skills-search">
+                <AppIcon name="search" size={12} />
+                <span className="sr-only">Search skills and plugins</span>
+                <input
+                  type="search"
+                  value={skillsPanelQuery}
+                  placeholder="Search skills and plugins"
+                  onChange={(event) => setSkillsPanelQuery(event.target.value)}
+                />
+              </label>
+              <div className="composer-skills-filter" role="group" aria-label="Skill source filter">
+                {([
+                  ['all', 'All'],
+                  ['plugins', 'Plugins'],
+                  ['project', 'Project'],
+                  ['selected', `Selected ${selectedSkillCount}`]
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={capabilityView === value}
+                    title={
+                      value === 'project'
+                        ? 'Skills discovered from this project, including .github/skills and .agents/skills'
+                        : undefined
+                    }
+                    onClick={() => setCapabilityView(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div
+              className="composer-skills-groups"
+              tabIndex={0}
+              aria-label="Available skills and plugins"
+            >
+              {visiblePanelPlugins.length ? (
                 <section>
                   <strong>Plugins</strong>
                   <div>
-                    {composerPlugins.map((plugin) => {
-                      const selected = selectedPlugins.some(
-                        (candidate) => candidate.id === plugin.id
-                      );
+                    {visiblePanelPlugins.map((plugin) => {
+                      const selected = selectedPluginIds.has(plugin.id);
                       return (
                         <label key={plugin.id}>
                           <input
@@ -990,14 +1135,12 @@ function MessageComposerComponent({
                   </div>
                 </section>
               ) : null}
-              {composerSkills.length ? (
+              {visiblePanelSkills.length ? (
                 <section>
-                  <strong>Project skills</strong>
+                  <strong>Project skills · .github / .agents</strong>
                   <div>
-                    {composerSkills.map((skill) => {
-                      const selected = selectedSkills.some(
-                        (candidate) => candidate.path === skill.path
-                      );
+                    {visiblePanelSkills.map((skill) => {
+                      const selected = selectedSkillPaths.has(skill.path);
                       return (
                         <label key={skill.path}>
                           <input
@@ -1024,6 +1167,13 @@ function MessageComposerComponent({
                     })}
                   </div>
                 </section>
+              ) : null}
+              {!visiblePanelPlugins.length && !visiblePanelSkills.length ? (
+                <p className="composer-skills-empty">
+                  {capabilityView === 'selected' && selectedSkillCount === 0
+                    ? 'No capabilities selected for this turn.'
+                    : 'No skills or plugins match this search.'}
+                </p>
               ) : null}
             </div>
           </section>
