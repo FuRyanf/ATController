@@ -54,5 +54,8 @@
     "vite": "8.1.5",
     "vitest": "4.1.10"
   },
+  "resolutions": {
+    "nanoid": "3.3.18"
+  },
   "packageManager": "yarn@1.22.22"
 }
