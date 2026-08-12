@@ -23,8 +23,11 @@ export interface CodexStoreSnapshot {
 }
 
 type Listener = () => void;
-const MAX_EVENTS_PER_FRAME = 2_048;
-const MAX_RENDERED_COMMAND_OUTPUT_CHARACTERS = 1_000_000;
+// Keep each reducer pass comfortably below a frame budget. A large history can
+// release thousands of buffered notifications at once; reducing all of them in
+// one callback makes WebKit stop servicing pointer and paint events.
+const MAX_EVENTS_PER_FRAME = 128;
+const MAX_RENDERED_COMMAND_OUTPUT_CHARACTERS = 128_000;
 const OUTPUT_TRUNCATION_MARKER = '[Earlier command output truncated]\n';
 const COALESCIBLE_DELTA_KINDS = new Set([
   'agentMessageDelta',
@@ -182,6 +185,29 @@ function mergeTurn(existing: CodexTurn | undefined, incoming: CodexTurn): CodexT
       incoming.items.length === 0
         ? existing.items
         : incoming.items.map(boundedItem)
+  };
+}
+
+function mergeTurnStartResponse(
+  existing: CodexTurn | undefined,
+  incoming: CodexTurn
+): CodexTurn {
+  if (!existing) {
+    return mergeTurn(undefined, incoming);
+  }
+  const existingById = new Map(existing.items.map((item) => [item.id, item]));
+  const responseItemIds = new Set(incoming.items.map((item) => item.id));
+  return {
+    ...existing,
+    ...incoming,
+    items: [
+      ...incoming.items.map((item) =>
+        existingById.has(item.id)
+          ? mergeItem(item, existingById.get(item.id)!)
+          : boundedItem(item)
+      ),
+      ...existing.items.filter((item) => !responseItemIds.has(item.id))
+    ]
   };
 }
 
@@ -420,28 +446,39 @@ export class CodexStore {
   }
 
   queueEvent(event: CodexEvent) {
-    this.pendingEvents.push(event);
-    if (this.pendingEvents.length >= MAX_EVENTS_PER_FRAME) {
+    const previous = this.pendingEvents[this.pendingEvents.length - 1];
+    if (previous && canCoalesceDelta(previous, event)) {
+      this.pendingEvents[this.pendingEvents.length - 1] = {
+        ...event,
+        delta: `${previous.delta ?? ''}${event.delta ?? ''}`
+      };
+    } else {
+      this.pendingEvents.push(event);
+    }
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush() {
+    if (this.frame != null) return;
+    this.frame = requestFrame(() => {
+      this.frame = null;
       this.flushEvents();
-      return;
-    }
-    if (this.frame == null) {
-      this.frame = requestFrame(() => this.flushEvents());
-    }
+    });
   }
 
   flushEvents() {
-    this.frame = null;
     if (this.pendingEvents.length === 0) {
       return;
     }
-    const events = this.pendingEvents;
-    this.pendingEvents = [];
+    const events = this.pendingEvents.splice(0, MAX_EVENTS_PER_FRAME);
     const next = coalesceCodexEvents(
       events.sort((left, right) => left.sequence - right.sequence)
     )
       .reduce(reduceCodexEvent, this.snapshot);
     this.publish(next);
+    if (this.pendingEvents.length > 0) {
+      this.scheduleFlush();
+    }
   }
 
   setDiagnostics(diagnostics: CodexDiagnostics) {
@@ -491,6 +528,19 @@ export class CodexStore {
     this.publish({ ...this.snapshot, threads });
   }
 
+  mergeTurnStartResponse(threadId: string, turn: CodexTurn) {
+    const thread = this.snapshot.threads[threadId] ?? placeholderThread(threadId);
+    const existing = thread.turns.find((candidate) => candidate.id === turn.id);
+    const merged = mergeTurnStartResponse(existing, turn);
+    this.publish({
+      ...this.snapshot,
+      threads: {
+        ...this.snapshot.threads,
+        [threadId]: upsertTurn(thread, merged)
+      }
+    });
+  }
+
   replaceWorkspaceThreads(workspacePath: string, archived: boolean, incoming: CodexThread[]) {
     const incomingIds = new Set(incoming.map((thread) => thread.id));
     const threads = Object.fromEntries(
@@ -517,6 +567,42 @@ export class CodexStore {
         [session.thread.id]: session
       }
     });
+  }
+
+  clearSession(threadId: string, discardHistory = false) {
+    const hasSession = Object.prototype.hasOwnProperty.call(
+      this.snapshot.sessions,
+      threadId
+    );
+    const thread = this.snapshot.threads[threadId];
+    if (!hasSession && (!discardHistory || !thread?.turns.length)) return;
+    const sessions = { ...this.snapshot.sessions };
+    delete sessions[threadId];
+    const threads =
+      discardHistory && thread?.turns.length
+        ? {
+            ...this.snapshot.threads,
+            [threadId]: { ...thread, turns: [] }
+          }
+        : this.snapshot.threads;
+    this.publish({ ...this.snapshot, sessions, threads });
+  }
+
+  clearSessions(discardHistory = false) {
+    const hasSessions = Object.keys(this.snapshot.sessions).length > 0;
+    const hasHistory =
+      discardHistory &&
+      Object.values(this.snapshot.threads).some((thread) => thread.turns.length > 0);
+    if (!hasSessions && !hasHistory) return;
+    const threads = discardHistory
+      ? Object.fromEntries(
+          Object.entries(this.snapshot.threads).map(([threadId, thread]) => [
+            threadId,
+            thread.turns.length ? { ...thread, turns: [] } : thread
+          ])
+        )
+      : this.snapshot.threads;
+    this.publish({ ...this.snapshot, sessions: {}, threads });
   }
 
   dismissApproval(requestId: string | number) {

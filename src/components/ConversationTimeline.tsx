@@ -2,6 +2,7 @@ import {
   Children,
   isValidElement,
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -18,6 +19,7 @@ import type {
   CodexApprovalRequest,
   CodexFileChange,
   CodexItem,
+  PendingUserSubmission,
   CodexThread,
   CodexTokenUsage,
   CodexTurn
@@ -27,6 +29,7 @@ import { AppIcon } from './AppIcon';
 interface ConversationTimelineProps {
   thread: CodexThread;
   approvals: CodexApprovalRequest[];
+  pendingSubmissions?: PendingUserSubmission[];
   usage?: CodexTokenUsage;
   recovering?: boolean;
   onRespondToApproval: (
@@ -234,33 +237,84 @@ export function normalizeAgentMarkdown(text: string): string {
   return writingBlock ? writingBlock[1].trim() : text;
 }
 
+export type MarkdownLinkTarget =
+  | { kind: 'external'; url: string }
+  | { kind: 'projectFile'; path: string }
+  | { kind: 'unsupported' };
+
+export function classifyMarkdownLink(href?: string): MarkdownLinkTarget {
+  if (!href) return { kind: 'unsupported' };
+  if (/^https?:\/\//i.test(href)) {
+    try {
+      const url = new URL(href);
+      return url.protocol === 'http:' || url.protocol === 'https:'
+        ? { kind: 'external', url: url.toString() }
+        : { kind: 'unsupported' };
+    } catch {
+      return { kind: 'unsupported' };
+    }
+  }
+  if (/^file:/i.test(href)) {
+    try {
+      const url = new URL(href);
+      if (url.protocol !== 'file:' || (url.hostname && url.hostname !== 'localhost')) {
+        return { kind: 'unsupported' };
+      }
+      return { kind: 'projectFile', path: decodeURIComponent(url.pathname) };
+    } catch {
+      return { kind: 'unsupported' };
+    }
+  }
+  if (
+    href.startsWith('#') ||
+    href.startsWith('//') ||
+    /^[a-z][a-z0-9+.-]*:/i.test(href)
+  ) {
+    return { kind: 'unsupported' };
+  }
+  const path = href.split(/[?#]/, 1)[0];
+  if (!path) return { kind: 'unsupported' };
+  try {
+    return { kind: 'projectFile', path: decodeURIComponent(path) };
+  } catch {
+    return { kind: 'unsupported' };
+  }
+}
+
 function MarkdownContent({
   text,
-  onCopy
+  onCopy,
+  onOpenFile
 }: {
   text: string;
   onCopy: ConversationTimelineProps['onCopy'];
+  onOpenFile: ConversationTimelineProps['onOpenFile'];
 }) {
   const components = useMemo<Components>(
     () => ({
       a({ children, href, node: _node, ...props }) {
-        const external = Boolean(href && /^https?:\/\//i.test(href));
+        const target = classifyMarkdownLink(href);
+        const clickable = target.kind !== 'unsupported';
         return (
           <a
             {...props}
-            href={external ? href : undefined}
-            rel={external ? 'noreferrer' : undefined}
+            href={target.kind === 'external' ? target.url : clickable ? '#' : undefined}
+            rel={target.kind === 'external' ? 'noreferrer' : undefined}
+            aria-disabled={!clickable || undefined}
             title={
-              external
-                ? props.title
-                : href
-                  ? `${href} (link type not opened by ATController)`
-                  : props.title
+              props.title ??
+              (target.kind === 'projectFile'
+                ? `${target.path} · Click or Command-click to open`
+                : target.kind === 'unsupported' && href
+                  ? `${href} (unsupported link type)`
+                  : undefined)
             }
             onClick={(event) => {
               event.preventDefault();
-              if (external && href) {
-                void api.openExternalUrl(href).catch(() => undefined);
+              if (target.kind === 'external') {
+                void api.openExternalUrl(target.url).catch(() => undefined);
+              } else if (target.kind === 'projectFile') {
+                onOpenFile(target.path);
               }
             }}
           >
@@ -301,7 +355,7 @@ function MarkdownContent({
         );
       }
     }),
-    [onCopy]
+    [onCopy, onOpenFile]
   );
 
   return (
@@ -342,6 +396,56 @@ function UserMessage({ item }: { item: CodexItem }) {
           ))}
         </div>
       ) : null}
+    </article>
+  );
+}
+
+function PendingUserMessage({
+  submission
+}: {
+  submission: PendingUserSubmission;
+}) {
+  const statusLabel =
+    submission.status === 'failed'
+      ? 'Delivery not confirmed'
+      : submission.status === 'accepted'
+        ? submission.mode === 'steer'
+          ? 'Steer queued'
+          : 'Sent to Codex'
+        : submission.mode === 'steer'
+          ? 'Queueing steer…'
+          : 'Sending to Codex…';
+  return (
+    <article
+      className={`timeline-user-message pending-submission ${submission.status}`}
+      data-client-message-id={submission.clientId}
+    >
+      {submission.text ? <TextContent text={submission.text} /> : null}
+      {submission.resources.length ? (
+        <div className="timeline-message-attachments">
+          {submission.resources.map((resource, index) => (
+            <span key={`${resource.kind}-${resource.label}-${index}`}>
+              <AppIcon
+                name={
+                  resource.kind === 'image' || resource.kind === 'file'
+                    ? 'attachment'
+                    : 'code'
+                }
+              />
+              {resource.label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <footer
+        className="pending-submission-status"
+        role="status"
+        aria-live="polite"
+        title={submission.error || undefined}
+      >
+        <span aria-hidden="true" />
+        {statusLabel}
+      </footer>
     </article>
   );
 }
@@ -931,15 +1035,7 @@ function GenericItem({ item }: { item: CodexItem }) {
   );
 }
 
-function TimelineItem({
-  item,
-  onCopy,
-  onOpenFile,
-  onRevealPath,
-  onRevertFile,
-  onOpenTerminal,
-  onOpenBrowser
-}: Pick<
+type TimelineItemProps = Pick<
   ConversationTimelineProps,
   | 'onCopy'
   | 'onOpenFile'
@@ -947,7 +1043,17 @@ function TimelineItem({
   | 'onRevertFile'
   | 'onOpenTerminal'
   | 'onOpenBrowser'
-> & { item: CodexItem }) {
+> & { item: CodexItem };
+
+function TimelineItemComponent({
+  item,
+  onCopy,
+  onOpenFile,
+  onRevealPath,
+  onRevertFile,
+  onOpenTerminal,
+  onOpenBrowser
+}: TimelineItemProps) {
   switch (item.kind) {
     case 'userMessage':
       return <UserMessage item={item} />;
@@ -959,7 +1065,11 @@ function TimelineItem({
             className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`}
             data-item-id={item.id}
           >
-            <MarkdownContent text={item.text || '…'} onCopy={onCopy} />
+            <MarkdownContent
+              text={item.text || '…'}
+              onCopy={onCopy}
+              onOpenFile={onOpenFile}
+            />
             {item.status !== 'inProgress' && markdown.trim() ? (
               <div className="timeline-agent-message-actions" data-thread-find-ignore>
                 <button
@@ -1017,6 +1127,18 @@ function TimelineItem({
       );
   }
 }
+
+const TimelineItem = memo(
+  TimelineItemComponent,
+  (previous, next) =>
+    previous.item === next.item &&
+    previous.onCopy === next.onCopy &&
+    previous.onOpenFile === next.onOpenFile &&
+    previous.onRevealPath === next.onRevealPath &&
+    previous.onRevertFile === next.onRevertFile &&
+    previous.onOpenTerminal === next.onOpenTerminal &&
+    previous.onOpenBrowser === next.onOpenBrowser
+);
 
 function TurnBlockComponent({
   turn,
@@ -1096,6 +1218,7 @@ const TurnBlock = memo(
 function ConversationTimelineComponent({
   thread,
   approvals,
+  pendingSubmissions = [],
   usage,
   recovering = false,
   onRespondToApproval,
@@ -1111,8 +1234,8 @@ function ConversationTimelineComponent({
   const contentRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const followingRef = useRef(true);
+  const scrollFrameRef = useRef<number | null>(null);
   const visibleTurnLimitBeforeFindRef = useRef(INITIAL_VISIBLE_TURNS);
-  const [following, setFollowing] = useState(true);
   const [unseenBelow, setUnseenBelow] = useState(false);
   const [visibleTurnLimit, setVisibleTurnLimit] = useState(INITIAL_VISIBLE_TURNS);
   const [findOpen, setFindOpen] = useState(false);
@@ -1126,20 +1249,21 @@ function ConversationTimelineComponent({
     () => thread.turns.slice(firstVisibleTurnIndex),
     [firstVisibleTurnIndex, thread.turns]
   );
-  const contentSignature = useMemo(
-    () =>
-      `${thread.turns.length}:${
-        latestTurn?.items.reduce(
-          (total, item) =>
-            total +
-            (item.text?.length ?? 0) +
-            (item.output?.length ?? 0) +
-            item.changes.length,
-          latestTurn.items.length
-        ) ?? 0
-      }`,
-    [latestTurn, thread.turns.length]
-  );
+  const scheduleFollowScroll = useCallback(() => {
+    if (!followingRef.current || scrollFrameRef.current != null) return;
+    // The sentinel also keeps synchronous requestAnimationFrame test doubles
+    // from leaving a stale frame id behind.
+    scrollFrameRef.current = -1;
+    const frame = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const element = scrollRef.current;
+      if (!element || !followingRef.current) return;
+      const bottom = element.scrollHeight;
+      if (element.scrollTop !== bottom) element.scrollTop = bottom;
+      setUnseenBelow((current) => (current ? false : current));
+    });
+    if (scrollFrameRef.current != null) scrollFrameRef.current = frame;
+  }, []);
 
   const closeFind = () => {
     clearThreadFindHighlights(contentRef.current);
@@ -1249,7 +1373,6 @@ function ConversationTimelineComponent({
     return () => clearThreadFindHighlights(root);
   }, [
     activeFindIndex,
-    contentSignature,
     findOpen,
     findQuery,
     findRevision,
@@ -1257,74 +1380,54 @@ function ConversationTimelineComponent({
   ]);
 
   useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
-    if (following) {
-      element.scrollTop = element.scrollHeight;
-      setUnseenBelow(false);
+    if (followingRef.current) {
+      scheduleFollowScroll();
     } else {
-      setUnseenBelow(true);
+      setUnseenBelow((current) => (current ? current : true));
     }
-  }, [contentSignature, following]);
+  }, [latestTurn, pendingSubmissions, scheduleFollowScroll]);
 
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
+    if (scrollFrameRef.current != null && scrollFrameRef.current >= 0) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+    }
+    scrollFrameRef.current = null;
     followingRef.current = true;
     element.scrollTop = element.scrollHeight;
-    setFollowing(true);
     setUnseenBelow(false);
-
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      if (!followingRef.current) return;
-      element.scrollTop = element.scrollHeight;
-      secondFrame = window.requestAnimationFrame(() => {
-        if (followingRef.current) {
-          element.scrollTop = element.scrollHeight;
-        }
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      window.cancelAnimationFrame(secondFrame);
-    };
-  }, [recovering, thread.id]);
+    scheduleFollowScroll();
+  }, [recovering, scheduleFollowScroll, thread.id]);
 
   useEffect(() => {
     const element = scrollRef.current;
     const content = contentRef.current;
     if (!element || !content || typeof ResizeObserver === 'undefined') return;
-    let frame = 0;
     const observer = new ResizeObserver(() => {
-      if (!followingRef.current) return;
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        if (followingRef.current) {
-          element.scrollTop = element.scrollHeight;
-          setUnseenBelow(false);
-        }
-      });
+      scheduleFollowScroll();
     });
     observer.observe(content);
-    return () => {
-      observer.disconnect();
-      window.cancelAnimationFrame(frame);
-    };
-  }, [thread.id]);
+    return () => observer.disconnect();
+  }, [scheduleFollowScroll, thread.id]);
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current != null && scrollFrameRef.current >= 0) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+      scrollFrameRef.current = null;
+    },
+    []
+  );
 
   useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
     clearThreadFindHighlights(contentRef.current);
     setFindOpen(false);
     setFindQuery('');
     setFindMatchCount(0);
     setActiveFindIndex(0);
     visibleTurnLimitBeforeFindRef.current = INITIAL_VISIBLE_TURNS;
-    followingRef.current = true;
-    setFollowing(true);
-    setUnseenBelow(false);
     setVisibleTurnLimit(INITIAL_VISIBLE_TURNS);
   }, [thread.id]);
 
@@ -1430,18 +1533,19 @@ function ConversationTimelineComponent({
           const element = event.currentTarget;
           const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 72;
           followingRef.current = atBottom;
-          setFollowing(atBottom);
-          if (atBottom) setUnseenBelow(false);
+          if (atBottom) {
+            setUnseenBelow((current) => (current ? false : current));
+          }
         }}
       >
         <div ref={contentRef} className="conversation-column">
-          {thread.turns.length === 0 && recovering ? (
+          {thread.turns.length === 0 && pendingSubmissions.length === 0 && recovering ? (
             <div className="timeline-empty timeline-recovering" role="status">
               <span className="timeline-history-spinner" aria-hidden="true" />
               <h2>Loading thread history</h2>
               <p>Reading this conversation from the local Codex runtime…</p>
             </div>
-          ) : thread.turns.length === 0 ? (
+          ) : thread.turns.length === 0 && pendingSubmissions.length === 0 ? (
             <div className="timeline-empty">
               <span className="empty-kicker">Ready</span>
               <h2>Start with a task</h2>
@@ -1488,6 +1592,12 @@ function ConversationTimelineComponent({
               ))}
             </>
           )}
+          {pendingSubmissions.map((submission) => (
+            <PendingUserMessage
+              key={submission.clientId}
+              submission={submission}
+            />
+          ))}
           {unassociatedApprovals.map((approval) => (
             <ApprovalCard
               key={String(approval.requestId)}
@@ -1518,11 +1628,9 @@ function ConversationTimelineComponent({
           type="button"
           className="jump-to-latest"
           onClick={() => {
-            const element = scrollRef.current;
             followingRef.current = true;
-            if (element) element.scrollTop = element.scrollHeight;
-            setFollowing(true);
             setUnseenBelow(false);
+            scheduleFollowScroll();
           }}
         >
           <AppIcon name="arrowDown" />

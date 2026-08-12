@@ -45,6 +45,15 @@ import {
 } from './lib/appearance';
 import { serviceTierDisplayName } from './lib/codexLabels';
 import {
+  applyInterfaceScale,
+  formatInterfaceScale,
+  interfaceScaleShortcut,
+  nextInterfaceScale,
+  persistInterfaceScale,
+  readStoredInterfaceScale,
+  type InterfaceScaleAction
+} from './lib/interfaceScale';
+import {
   bootstrapCodexRuntime,
   readStableRuntimeDiagnostics
 } from './lib/runtimeBootstrap';
@@ -52,6 +61,16 @@ import {
   reinstantiateCodexThreadSession,
   requiresSessionReinstantiation
 } from './lib/sessionReconfiguration';
+import {
+  acceptPendingSubmission,
+  createPendingSubmission,
+  removePendingSubmission,
+  reconcilePendingSubmissions,
+  reconcileTurnStartResponse,
+  updatePendingSubmissionStatus,
+  type PendingSubmissionsByThread
+} from './lib/pendingSubmissions';
+import { idleSessionsToRelease } from './lib/sessionRetention';
 import {
   codexStore,
   useCodexStore,
@@ -102,6 +121,7 @@ const SELECTED_THREAD_KEY = 'atcontroller:selected-codex-thread-v2';
 const SIDEBAR_WIDTH_KEY = 'atcontroller:sidebar-width-v2';
 const INSPECTOR_OPEN_KEY = 'atcontroller:inspector-open-v2';
 const PROJECT_SORT_KEY = 'atcontroller:project-sort-v1';
+const FOCUS_REFRESH_INTERVAL_MS = 30_000;
 
 const selectCodexThreads = (snapshot: CodexStoreSnapshot) => snapshot.threads;
 const selectCodexSessions = (snapshot: CodexStoreSnapshot) => snapshot.sessions;
@@ -206,6 +226,7 @@ function createUiMetadata(
     threadId: thread.id,
     workspaceId: workspace.id,
     fallbackTitle: thread.title || 'New thread',
+    sortOrder: null,
     pinned: false,
     unread: false,
     archived: thread.archived,
@@ -297,6 +318,7 @@ export default function App() {
   const [loadingWorkspaceIds, setLoadingWorkspaceIds] = useState<Set<string>>(new Set());
   const [metadata, setMetadata] = useState<Record<string, CodexThreadUiMetadata>>({});
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [interfaceScale, setInterfaceScale] = useState(readStoredInterfaceScale);
   const [catalog, setCatalog] = useState<CodexRuntimeCatalog | null>(null);
   const [dataRoot, setDataRoot] = useState('');
   const [filter, setFilter] = useState('');
@@ -313,6 +335,8 @@ export default function App() {
   const [runtimePlugins, setRuntimePlugins] = useState<CodexPlugin[]>([]);
   const [skillsByThread, setSkillsByThread] = useState<Record<string, CodexSkill[]>>({});
   const [pluginsByThread, setPluginsByThread] = useState<Record<string, CodexPlugin[]>>({});
+  const [pendingSubmissionsByThread, setPendingSubmissionsByThread] =
+    useState<PendingSubmissionsByThread>({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [projectContextMenu, setProjectContextMenu] =
     useState<ProjectContextMenuState | null>(null);
@@ -463,6 +487,9 @@ export default function App() {
   const currentAttachments = selectedThreadId ? attachmentsByThread[selectedThreadId] ?? [] : [];
   const currentSkills = selectedThreadId ? skillsByThread[selectedThreadId] ?? [] : [];
   const currentPlugins = selectedThreadId ? pluginsByThread[selectedThreadId] ?? [] : [];
+  const currentPendingSubmissions = selectedThreadId
+    ? pendingSubmissionsByThread[selectedThreadId] ?? []
+    : [];
   const unreadCount = useMemo(
     () => Object.values(metadata).filter((item) => item.unread).length,
     [metadata]
@@ -473,13 +500,36 @@ export default function App() {
   const selectedThreadIdRef = useRef<string | null>(selectedThreadId);
   const metadataRef = useRef(metadata);
   const settingsRef = useRef(settings);
+  const interfaceScaleRef = useRef(interfaceScale);
   const connectionStateRef = useRef(codex.diagnostics?.connectionState ?? 'stopped');
+  const runtimeProcessIdRef = useRef<number | null>(
+    codex.diagnostics?.processId ?? null
+  );
   const runtimeEventRevision = useRef(0);
   const gitRefreshTimer = useRef<number | null>(null);
   const threadRefreshSequence = useRef<Record<string, number>>({});
+  const threadRefreshStartedAt = useRef<Record<string, number>>({});
   const sessionReconfigurationSequence = useRef<Record<string, number>>({});
   const sessionReconfigurationQueue = useRef<Record<string, Promise<void>>>({});
+  const threadOpenOperations = useRef<Record<string, Promise<void>>>({});
+  const sessionLastUsedAt = useRef<Record<string, number>>({});
+  const sessionRetentionQueue = useRef<Promise<void>>(Promise.resolve());
+  const pendingSubmissionsRef = useRef<PendingSubmissionsByThread>({});
   const restoredWorkspace = useRef<string | null>(null);
+
+  const updatePendingSubmissions = useCallback(
+    (
+      update: (
+        current: PendingSubmissionsByThread
+      ) => PendingSubmissionsByThread
+    ) => {
+      const next = update(pendingSubmissionsRef.current);
+      if (next === pendingSubmissionsRef.current) return;
+      pendingSubmissionsRef.current = next;
+      setPendingSubmissionsByThread(next);
+    },
+    []
+  );
 
   useEffect(() => {
     selectedWorkspaceRef.current = selectedWorkspace;
@@ -517,12 +567,26 @@ export default function App() {
     }, 3_500);
   }, []);
 
+  const updateInterfaceScale = useCallback(
+    (action: InterfaceScaleAction) => {
+      const next = nextInterfaceScale(interfaceScaleRef.current, action);
+      persistInterfaceScale(next);
+      interfaceScaleRef.current = next;
+      setInterfaceScale(next);
+      void applyInterfaceScale(next).catch((error) => {
+        showToast(`Could not change text size: ${String(error)}`, 'error');
+      });
+    },
+    [showToast]
+  );
+
   const removeThreadFromUi = useCallback((threadId: string) => {
     sessionReconfigurationSequence.current[threadId] =
       (sessionReconfigurationSequence.current[threadId] ?? 0) + 1;
     setReconfiguringThreadId((current) =>
       current === threadId ? null : current
     );
+    delete sessionLastUsedAt.current[threadId];
     codexStore.removeThread(threadId);
     setThreadIdsByWorkspace((current) =>
       Object.fromEntries(
@@ -551,13 +615,19 @@ export default function App() {
       delete next[threadId];
       return next;
     });
+    updatePendingSubmissions((current) => {
+      if (!current[threadId]) return current;
+      const next = { ...current };
+      delete next[threadId];
+      return next;
+    });
     if (selectedThreadIdRef.current === threadId) {
       selectedThreadIdRef.current = null;
       setSelectedThreadId(null);
       setThreadError(null);
       window.localStorage.removeItem(SELECTED_THREAD_KEY);
     }
-  }, []);
+  }, [updatePendingSubmissions]);
 
   const copyText = useCallback(
     async (value: string, label: string) => {
@@ -675,8 +745,52 @@ export default function App() {
     [persistMetadata]
   );
 
+  const retainCodexSession = useCallback((threadId: string) => {
+    sessionLastUsedAt.current[threadId] = Date.now();
+    sessionRetentionQueue.current = sessionRetentionQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const snapshot = codexStore.getSnapshot();
+        const runningThreadIds = new Set(
+          Object.values(snapshot.threads)
+            .filter((thread) => Boolean(lastRunningTurn(thread)))
+            .map((thread) => thread.id)
+        );
+        const release = idleSessionsToRelease({
+          sessionThreadIds: Object.keys(snapshot.sessions),
+          activeThreadId: snapshot.activeThreadId,
+          runningThreadIds,
+          lastUsedAt: sessionLastUsedAt.current
+        });
+        for (const candidate of release) {
+          const current = codexStore.getSnapshot();
+          if (
+            current.activeThreadId === candidate ||
+            lastRunningTurn(current.threads[candidate])
+          ) {
+            continue;
+          }
+          try {
+            await api.unsubscribeCodexThread(candidate);
+            const after = codexStore.getSnapshot();
+            if (
+              after.activeThreadId !== candidate &&
+              !lastRunningTurn(after.threads[candidate])
+            ) {
+              codexStore.clearSession(candidate, true);
+              delete sessionLastUsedAt.current[candidate];
+            }
+          } catch {
+            // Retention is opportunistic. A failed unsubscribe must not affect
+            // the selected conversation or surface as a user-facing error.
+          }
+        }
+      });
+  }, []);
+
   const refreshThreads = useCallback(
     async (workspace: Workspace, searchTerm?: string) => {
+      threadRefreshStartedAt.current[workspace.id] = Date.now();
       const refreshSequence = (threadRefreshSequence.current[workspace.id] ?? 0) + 1;
       threadRefreshSequence.current[workspace.id] = refreshSequence;
       setLoadingWorkspaceIds((current) => {
@@ -817,6 +931,11 @@ export default function App() {
 
   const openThread = useCallback(
     async (threadId: string, workspaceOverride?: Workspace) => {
+      const inFlight = threadOpenOperations.current[threadId];
+      if (inFlight) {
+        await inFlight;
+        return;
+      }
       const existing = codexStore.getSnapshot().threads[threadId];
       const workspace =
         workspaceOverride ?? findWorkspaceForThread(threadId, existing);
@@ -856,6 +975,11 @@ export default function App() {
         metadataRef.current[threadId],
         settingsRef.current
       );
+      let settleOpen!: () => void;
+      const openOperation = new Promise<void>((resolve) => {
+        settleOpen = resolve;
+      });
+      threadOpenOperations.current[threadId] = openOperation;
       try {
         const snapshot = codexStore.getSnapshot();
         let hydrated = snapshot.threads[threadId] ?? existing;
@@ -880,6 +1004,7 @@ export default function App() {
         if (!hydrated) {
           throw new Error('Codex returned no thread history');
         }
+        retainCodexSession(threadId);
         const ui = await ensureMetadata(workspace, hydrated, preferences);
         if (ui.unread || !ui.lastViewedAt) {
           void persistMetadata({
@@ -898,10 +1023,20 @@ export default function App() {
         if (existing) codexStore.upsertThreads([existing]);
         setThreadError(`Unable to resume this Codex thread: ${String(error)}`);
       } finally {
+        if (threadOpenOperations.current[threadId] === openOperation) {
+          delete threadOpenOperations.current[threadId];
+        }
+        settleOpen();
         setRecoveringThread(false);
       }
     },
-    [applyWorkspace, ensureMetadata, findWorkspaceForThread, persistMetadata]
+    [
+      applyWorkspace,
+      ensureMetadata,
+      findWorkspaceForThread,
+      persistMetadata,
+      retainCodexSession
+    ]
   );
 
   const createThread = useCallback(async (workspaceOverride?: Workspace) => {
@@ -941,6 +1076,7 @@ export default function App() {
       setSelectedThreadId(session.thread.id);
       selectedThreadIdRef.current = session.thread.id;
       codexStore.setActiveThread(session.thread.id);
+      retainCodexSession(session.thread.id);
       window.localStorage.setItem(
         SELECTED_THREAD_KEY,
         JSON.stringify({ workspaceId: workspace.id, threadId: session.thread.id })
@@ -951,7 +1087,7 @@ export default function App() {
     } finally {
       setRecoveringThread(false);
     }
-  }, [applyWorkspace, ensureMetadata, showToast]);
+  }, [applyWorkspace, ensureMetadata, retainCodexSession, showToast]);
 
   const selectProject = useCallback(
     (workspaceId: string) => {
@@ -993,7 +1129,17 @@ export default function App() {
   const applyRuntimeDiagnostics = useCallback(
     (diagnostics: Parameters<typeof codexStore.setDiagnostics>[0], refreshCatalog = true) => {
       const previous = connectionStateRef.current;
+      const previousProcessId = runtimeProcessIdRef.current;
+      const nextProcessId = diagnostics.processId ?? null;
       connectionStateRef.current = diagnostics.connectionState;
+      runtimeProcessIdRef.current = nextProcessId;
+      if (
+        (previousProcessId != null && previousProcessId !== nextProcessId) ||
+        ['stopped', 'restarting', 'failed'].includes(diagnostics.connectionState)
+      ) {
+        codexStore.clearSessions();
+        sessionLastUsedAt.current = {};
+      }
       codexStore.setDiagnostics(diagnostics);
       if (diagnostics.connectionState !== 'ready') return;
 
@@ -1146,11 +1292,23 @@ export default function App() {
     let disposed = false;
     const unlisten: Array<() => void> = [];
     void apiModule.onCodexEvent((event: CodexEvent) => {
+      if (event.threadId) {
+        sessionLastUsedAt.current[event.threadId] = Date.now();
+      }
       const threadWasDeleted = event.kind === 'threadDeleted' && Boolean(event.threadId);
       if (threadWasDeleted) {
         removeThreadFromUi(event.threadId!);
       }
       codexStore.queueEvent(event);
+      if (event.kind === 'turnCompleted' && event.threadId) {
+        const completedThreadId = event.threadId;
+        window.requestAnimationFrame(() =>
+          retainCodexSession(completedThreadId)
+        );
+      }
+      updatePendingSubmissions((current) =>
+        reconcilePendingSubmissions(current, event)
+      );
       const eventThread =
         event.thread ??
         (event.threadId ? codexStore.getSnapshot().threads[event.threadId] : undefined);
@@ -1159,12 +1317,14 @@ export default function App() {
           ? findWorkspaceForThread(event.threadId ?? eventThread!.id, eventThread)
           : undefined;
       if (!threadWasDeleted && eventThread && eventWorkspace) {
-        setThreadIdsByWorkspace((current) => ({
-          ...current,
-          [eventWorkspace.id]: current[eventWorkspace.id]?.includes(eventThread.id)
-            ? current[eventWorkspace.id]
-            : [eventThread.id, ...(current[eventWorkspace.id] ?? [])]
-        }));
+        setThreadIdsByWorkspace((current) => {
+          const known = current[eventWorkspace.id] ?? [];
+          if (known.includes(eventThread.id)) return current;
+          return {
+            ...current,
+            [eventWorkspace.id]: [eventThread.id, ...known]
+          };
+        });
       }
       if (
         event.kind === 'turnCompleted' &&
@@ -1254,14 +1414,18 @@ export default function App() {
     reconcileRuntimeDiagnostics,
     removeThreadFromUi,
     refreshProjectGit,
+    retainCodexSession,
     scheduleGitRefresh,
-    updateMetadata
+    updateMetadata,
+    updatePendingSubmissions
   ]);
 
   useEffect(() => {
     const refreshVisibleProject = () => {
       const workspace = selectedWorkspaceRef.current;
       if (!workspace) return;
+      const lastRefresh = threadRefreshStartedAt.current[workspace.id] ?? 0;
+      if (Date.now() - lastRefresh < FOCUS_REFRESH_INTERVAL_MS) return;
       void refreshThreads(workspace);
       void refreshGit(workspace);
     };
@@ -1439,6 +1603,7 @@ export default function App() {
               return;
             }
             codexStore.setSession(session);
+            retainCodexSession(threadId);
             if (selectedThreadIdRef.current === threadId) {
               setThreadError(null);
             }
@@ -1473,59 +1638,197 @@ export default function App() {
         });
       sessionReconfigurationQueue.current[threadId] = operation;
     },
-    [persistMetadata, selectedThread, selectedWorkspace, showToast]
+    [
+      persistMetadata,
+      retainCodexSession,
+      selectedThread,
+      selectedWorkspace,
+      showToast
+    ]
   );
 
   const submitInputs = useCallback(
     async (inputs: ComposerInput[]) => {
       if (!selectedThread || !selectedWorkspace) return;
+      const threadId = selectedThread.id;
+      const clientUserMessageId = crypto.randomUUID();
+      const mode = selectedRunningTurn ? 'steer' : 'turn';
+      const pending = createPendingSubmission(
+        threadId,
+        clientUserMessageId,
+        mode,
+        inputs
+      );
+      if (selectedRunningTurn) pending.turnId = selectedRunningTurn.id;
+      const submittedAttachments = currentAttachments;
+      const submittedSkills = currentSkills;
+      const submittedPlugins = currentPlugins;
+      const originalMetadata =
+        metadataRef.current[threadId] ??
+        createUiMetadata(selectedWorkspace, selectedThread, selectedPreferences);
+      const optimisticMetadata = {
+        ...originalMetadata,
+        draft: '',
+        unread: false,
+        updatedAt: nowIso()
+      };
+
       setSubmitting(true);
       setThreadError(null);
-      const text = inputs.find((input): input is Extract<ComposerInput, { type: 'text' }> => input.type === 'text')?.text;
+      updatePendingSubmissions((current) => ({
+        ...current,
+        [threadId]: [
+          ...(current[threadId] ?? []).filter(
+            (submission) => submission.status !== 'failed'
+          ),
+          pending
+        ]
+      }));
+      metadataRef.current = {
+        ...metadataRef.current,
+        [threadId]: optimisticMetadata
+      };
+      setMetadata((current) => ({
+        ...current,
+        [threadId]: optimisticMetadata
+      }));
+      setAttachmentsByThread((current) => ({ ...current, [threadId]: [] }));
+      setSkillsByThread((current) => ({ ...current, [threadId]: [] }));
+      setPluginsByThread((current) => ({ ...current, [threadId]: [] }));
+
+      const text = inputs.find(
+        (input): input is Extract<ComposerInput, { type: 'text' }> =>
+          input.type === 'text'
+      )?.text;
       try {
         if (selectedRunningTurn) {
           await api.steerCodexTurn(
             selectedWorkspace.path,
-            selectedThread.id,
+            threadId,
             selectedRunningTurn.id,
+            clientUserMessageId,
             inputs
           );
+          updatePendingSubmissions((current) =>
+            acceptPendingSubmission(
+              current,
+              threadId,
+              clientUserMessageId,
+              selectedRunningTurn.id
+            )
+          );
         } else {
-          await api.startCodexTurn(
+          const turn = await api.startCodexTurn(
             selectedWorkspace.path,
-            selectedThread.id,
+            threadId,
+            clientUserMessageId,
             inputs,
             selectedPreferences
           );
+          codexStore.mergeTurnStartResponse(threadId, turn);
+          updatePendingSubmissions((current) =>
+            reconcileTurnStartResponse(
+              current,
+              threadId,
+              clientUserMessageId,
+              turn
+            )
+          );
         }
-        const current =
-          metadataRef.current[selectedThread.id] ??
-          createUiMetadata(selectedWorkspace, selectedThread, selectedPreferences);
+        const current = metadataRef.current[threadId] ?? optimisticMetadata;
         const history = text?.trim()
           ? [...current.promptHistory.filter((prompt) => prompt !== text.trim()), text.trim()].slice(-50)
           : current.promptHistory;
-        await persistMetadata({
+        const savedMetadata = {
           ...current,
-          draft: '',
           promptHistory: history,
           unread: false,
           updatedAt: nowIso()
-        });
-        setAttachmentsByThread((all) => ({ ...all, [selectedThread.id]: [] }));
-        setSkillsByThread((all) => ({ ...all, [selectedThread.id]: [] }));
-        setPluginsByThread((all) => ({ ...all, [selectedThread.id]: [] }));
+        };
+        metadataRef.current = {
+          ...metadataRef.current,
+          [threadId]: savedMetadata
+        };
+        await persistMetadata(savedMetadata);
       } catch (error) {
-        setThreadError(`Codex could not start this turn: ${String(error)}`);
+        const message = String(error);
+        updatePendingSubmissions((current) =>
+          updatePendingSubmissionStatus(
+            current,
+            threadId,
+            clientUserMessageId,
+            'failed',
+            message
+          )
+        );
+        const latestMetadata = metadataRef.current[threadId] ?? optimisticMetadata;
+        const restoredDraft = latestMetadata.draft
+          ? originalMetadata.draft
+            ? `${originalMetadata.draft}\n\n${latestMetadata.draft}`
+            : latestMetadata.draft
+          : originalMetadata.draft;
+        const restoredMetadata = {
+          ...latestMetadata,
+          draft: restoredDraft,
+          updatedAt: nowIso()
+        };
+        metadataRef.current = {
+          ...metadataRef.current,
+          [threadId]: restoredMetadata
+        };
+        await persistMetadata(restoredMetadata);
+        setAttachmentsByThread((current) => {
+          const currentItems = current[threadId] ?? [];
+          const currentIds = new Set(currentItems.map((item) => item.id));
+          return {
+            ...current,
+            [threadId]: [
+              ...submittedAttachments.filter((item) => !currentIds.has(item.id)),
+              ...currentItems
+            ]
+          };
+        });
+        setSkillsByThread((current) => {
+          const currentItems = current[threadId] ?? [];
+          const currentPaths = new Set(currentItems.map((item) => item.path));
+          return {
+            ...current,
+            [threadId]: [
+              ...submittedSkills.filter((item) => !currentPaths.has(item.path)),
+              ...currentItems
+            ]
+          };
+        });
+        setPluginsByThread((current) => {
+          const currentItems = current[threadId] ?? [];
+          const currentIds = new Set(currentItems.map((item) => item.id));
+          return {
+            ...current,
+            [threadId]: [
+              ...submittedPlugins.filter((item) => !currentIds.has(item.id)),
+              ...currentItems
+            ]
+          };
+        });
+        setThreadError(
+          mode === 'steer'
+            ? `Codex could not queue this steer: ${message}`
+            : `Codex could not start this turn: ${message}`
+        );
       } finally {
         setSubmitting(false);
       }
     },
     [
+      currentAttachments,
+      currentPlugins,
+      currentSkills,
       persistMetadata,
       selectedPreferences,
       selectedRunningTurn,
       selectedThread,
-      selectedWorkspace
+      selectedWorkspace,
+      updatePendingSubmissions
     ]
   );
 
@@ -1920,10 +2223,19 @@ export default function App() {
     openProjectTerminal();
   }, [openProjectTerminal, projectTerminalOpen]);
 
-  const openTimelineFile = useCallback((path: string) => {
-    const workspace = selectedWorkspaceRef.current;
-    if (workspace) void api.openProjectFile(workspace.path, path);
-  }, []);
+  const openTimelineFile = useCallback(
+    (path: string) => {
+      const workspace = selectedWorkspaceRef.current;
+      if (!workspace) {
+        showToast('Select a project before opening this file', 'error');
+        return;
+      }
+      void api.openProjectFile(workspace.path, path).catch((error) =>
+        showToast(`Could not open linked file: ${String(error)}`, 'error')
+      );
+    },
+    [showToast]
+  );
 
   const revealTimelinePath = useCallback((path: string) => {
     const workspace = selectedWorkspaceRef.current;
@@ -2493,6 +2805,8 @@ export default function App() {
           case 'restartRuntime':
             setControlBusy(true);
             await api.restartCodexRuntime();
+            codexStore.clearSessions(true);
+            sessionLastUsedAt.current = {};
             setCatalog(await api.getCodexCatalog());
             await openThread(thread.id);
             showToast('Codex runtime restarted', 'success');
@@ -2599,6 +2913,8 @@ export default function App() {
     setControlBusy(true);
     try {
       const diagnostics = await api.restartCodexRuntime();
+      codexStore.clearSessions(true);
+      sessionLastUsedAt.current = {};
       codexStore.setDiagnostics(diagnostics);
       setCatalog(await api.getCodexCatalog());
       if (selectedThreadIdRef.current) await openThread(selectedThreadIdRef.current);
@@ -2716,6 +3032,33 @@ export default function App() {
         icon: 'send',
         disabled: !selectedThread,
         run: () => window.dispatchEvent(new Event('atcontroller:focus-composer'))
+      },
+      {
+        id: 'increase-interface-scale',
+        label: 'Increase Text Size',
+        description: `Text and interface · ${formatInterfaceScale(interfaceScale)}`,
+        shortcut: '⌘+',
+        icon: 'add',
+        disabled: interfaceScale >= 1.6,
+        run: () => updateInterfaceScale('increase')
+      },
+      {
+        id: 'decrease-interface-scale',
+        label: 'Decrease Text Size',
+        description: `Text and interface · ${formatInterfaceScale(interfaceScale)}`,
+        shortcut: '⌘−',
+        icon: 'close',
+        disabled: interfaceScale <= 0.8,
+        run: () => updateInterfaceScale('decrease')
+      },
+      {
+        id: 'reset-interface-scale',
+        label: 'Reset Text Size',
+        description: `Return to 100% from ${formatInterfaceScale(interfaceScale)}`,
+        shortcut: '⌘0',
+        icon: 'refresh',
+        disabled: interfaceScale === 1,
+        run: () => updateInterfaceScale('reset')
       },
       {
         id: 'find-thread',
@@ -2912,6 +3255,7 @@ export default function App() {
     browserDiagnostics?.configuration.configured,
     catalog,
     handleProjectsMenuAction,
+    interfaceScale,
     metadata,
     openCloneDialog,
     openThread,
@@ -2928,12 +3272,19 @@ export default function App() {
     selectedBrowserSession,
     selectedWorkspace,
     toggleProjectTerminal,
+    updateInterfaceScale,
     updatePreferences,
     workspaces
   ]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
+      const scaleAction = interfaceScaleShortcut(event);
+      if (scaleAction) {
+        event.preventDefault();
+        updateInterfaceScale(scaleAction);
+        return;
+      }
       if (!event.metaKey) return;
       const key = event.key.toLocaleLowerCase();
       if (key === 'n' && !event.shiftKey) {
@@ -2996,25 +3347,46 @@ export default function App() {
     selectedThread,
     toggleProjectTerminal,
     stopTurn,
+    updateInterfaceScale,
   ]);
 
   const beginSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
     const startX = event.clientX;
     const startWidth = sidebarWidth;
+    let currentWidth = startWidth;
+    let frame: number | null = null;
+    let finished = false;
     const move = (moveEvent: PointerEvent) => {
-      setSidebarWidth(Math.min(420, Math.max(236, startWidth + moveEvent.clientX - startX)));
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      setSidebarWidth((width) => {
-        window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
-        return width;
+      currentWidth = Math.min(
+        420,
+        Math.max(236, startWidth + moveEvent.clientX - startX)
+      );
+      if (frame != null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        setSidebarWidth(currentWidth);
       });
     };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      window.removeEventListener('blur', finish);
+      target.removeEventListener('lostpointercapture', finish);
+      if (frame != null) window.cancelAnimationFrame(frame);
+      frame = null;
+      setSidebarWidth(currentWidth);
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(currentWidth));
+    };
     window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+    window.addEventListener('blur', finish);
+    target.addEventListener('lostpointercapture', finish);
   };
 
   if (loading) {
@@ -3046,6 +3418,8 @@ export default function App() {
         filter={filter}
         sortMode={projectSortMode}
         connectionState={codex.diagnostics?.connectionState ?? 'stopped'}
+        fiveHourLimit={catalog?.account.fiveHourLimit}
+        weeklyLimit={catalog?.account.weeklyLimit}
         collapsed={sidebarCollapsed}
         onSelectWorkspace={selectProject}
         onToggleWorkspace={toggleProject}
@@ -3067,7 +3441,13 @@ export default function App() {
         onOpenProjectMenu={(workspaceId, x, y) =>
           setProjectContextMenu({ workspaceId, x, y })
         }
-        onReorderWorkspaces={(workspaceIds) => void reorderProjects(workspaceIds)}
+        onReorderWorkspaces={(workspaceIds) => {
+          if (projectSortMode !== 'custom') {
+            setProjectSortMode('custom');
+            window.localStorage.setItem(PROJECT_SORT_KEY, 'custom');
+          }
+          void reorderProjects(workspaceIds);
+        }}
         onLocateWorkspace={(workspaceId) => void locateProject(workspaceId)}
         onRemoveWorkspace={(workspaceId) => void removeProject(workspaceId)}
         onCopyWorkspacePath={(workspaceId) => void copyProjectPath(workspaceId)}
@@ -3182,6 +3562,7 @@ export default function App() {
                   <ConversationTimeline
                     thread={selectedThread}
                     approvals={selectedApprovals}
+                    pendingSubmissions={currentPendingSubmissions}
                     usage={codex.usage[selectedThread.id]}
                     recovering={selectedThreadRecovering}
                     onRespondToApproval={respondToApproval}
@@ -3209,8 +3590,6 @@ export default function App() {
                     selectedSession?.settings.effectiveServiceTier
                   }
                   models={catalog?.models ?? []}
-                  fiveHourLimit={catalog?.account.fiveHourLimit}
-                  weeklyLimit={catalog?.account.weeklyLimit}
                   archived={selectedThread.archived}
                   running={Boolean(selectedRunningTurn)}
                   connected={connected}

@@ -183,6 +183,14 @@ fn save_codex_thread_ui_metadata(
 }
 
 #[tauri::command]
+fn set_codex_thread_order(
+    workspace_id: String,
+    thread_ids: Vec<String>,
+) -> Result<Vec<CodexThreadUiMetadata>, String> {
+    storage::set_codex_thread_order(&workspace_id, thread_ids).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn codex_get_diagnostics(state: State<'_, AppState>) -> CodexDiagnostics {
     state.codex.diagnostics()
 }
@@ -322,6 +330,19 @@ async fn codex_resume_thread(
 }
 
 #[tauri::command]
+async fn codex_unsubscribe_thread(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<String, String> {
+    state
+        .codex
+        .clone()
+        .unsubscribe_thread(thread_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn codex_fork_thread(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -389,13 +410,20 @@ async fn codex_start_turn(
     state: State<'_, AppState>,
     workspace_path: String,
     thread_id: String,
+    client_user_message_id: String,
     inputs: Vec<ComposerInput>,
     preferences: ThreadPreferences,
 ) -> Result<CodexTurn, String> {
     state
         .codex
         .clone()
-        .start_turn(workspace_path, thread_id, inputs, preferences)
+        .start_turn(
+            workspace_path,
+            thread_id,
+            client_user_message_id,
+            inputs,
+            preferences,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -406,12 +434,19 @@ async fn codex_steer_turn(
     workspace_path: String,
     thread_id: String,
     turn_id: String,
+    client_user_message_id: String,
     inputs: Vec<ComposerInput>,
 ) -> Result<(), String> {
     state
         .codex
         .clone()
-        .steer_turn(workspace_path, thread_id, turn_id, inputs)
+        .steer_turn(
+            workspace_path,
+            thread_id,
+            turn_id,
+            client_user_message_id,
+            inputs,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -961,6 +996,7 @@ fn main() {
             codex_read_thread,
             codex_start_thread,
             codex_resume_thread,
+            codex_unsubscribe_thread,
             codex_fork_thread,
             codex_rename_thread,
             codex_archive_thread,
@@ -978,6 +1014,7 @@ fn main() {
             list_codex_thread_ui_metadata,
             get_codex_thread_ui_metadata,
             save_codex_thread_ui_metadata,
+            set_codex_thread_order,
             list_workspaces,
             add_workspace,
             set_workspace_order,

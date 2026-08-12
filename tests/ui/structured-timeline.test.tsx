@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  classifyMarkdownLink,
   ConversationTimeline,
   findLocalDevelopmentUrl,
   normalizeAgentMarkdown,
@@ -108,6 +109,55 @@ function structuredThread(): CodexThread {
 }
 
 describe('structured Codex timeline', () => {
+  it('classifies only safe web URLs and project file links', () => {
+    expect(classifyMarkdownLink('https://example.com/docs?a=1')).toEqual({
+      kind: 'external',
+      url: 'https://example.com/docs?a=1'
+    });
+    expect(classifyMarkdownLink('/tmp/project/design%20notes.md#summary')).toEqual({
+      kind: 'projectFile',
+      path: '/tmp/project/design notes.md'
+    });
+    expect(classifyMarkdownLink('docs/conclusion.md')).toEqual({
+      kind: 'projectFile',
+      path: 'docs/conclusion.md'
+    });
+    expect(classifyMarkdownLink('javascript:alert(1)')).toEqual({
+      kind: 'unsupported'
+    });
+  });
+
+  it('opens an absolute Markdown file link on Command-click', () => {
+    const thread = structuredThread();
+    const agent = thread.turns[0].items.find(
+      (item) => item.kind === 'agentMessage'
+    )!;
+    agent.text =
+      'See [Current Master Control](/tmp/project/experiments/control/conclusion.md).';
+    const onOpenFile = vi.fn();
+    render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={vi.fn()}
+        onOpenFile={onOpenFile}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+      />
+    );
+
+    fireEvent.click(
+      screen.getByRole('link', { name: 'Current Master Control' }),
+      { metaKey: true }
+    );
+    expect(onOpenFile).toHaveBeenCalledWith(
+      '/tmp/project/experiments/control/conclusion.md'
+    );
+  });
+
   it('uses the current context rather than cumulative thread tokens for context percentage', () => {
     expect(
       tokenUsagePresentation({
@@ -146,6 +196,63 @@ describe('structured Codex timeline', () => {
     );
     expect(screen.getByRole('status')).toHaveTextContent('Loading thread history');
     expect(screen.queryByText('Start with a task')).not.toBeInTheDocument();
+  });
+
+  it('renders an optimistic user bubble and its delivery state immediately', () => {
+    const thread = structuredThread();
+    thread.turns = [];
+    const callbacks = {
+      onRespondToApproval: vi.fn(),
+      onRespondToUserInput: vi.fn(),
+      onCopy: vi.fn(),
+      onOpenFile: vi.fn(),
+      onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(),
+      onOpenTerminal: vi.fn()
+    };
+    const { rerender } = render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        pendingSubmissions={[
+          {
+            clientId: 'client-1',
+            threadId: 'thread-1',
+            mode: 'turn',
+            status: 'sending',
+            text: 'Check the current implementation',
+            resources: [{ kind: 'file', label: 'notes.md' }],
+            submittedAt: 1
+          }
+        ]}
+        {...callbacks}
+      />
+    );
+
+    expect(screen.getByText('Check the current implementation')).toBeInTheDocument();
+    expect(screen.getByText('notes.md')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Sending to Codex…');
+    expect(screen.queryByText('Start with a task')).not.toBeInTheDocument();
+
+    rerender(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        pendingSubmissions={[
+          {
+            clientId: 'client-1',
+            threadId: 'thread-1',
+            mode: 'steer',
+            status: 'accepted',
+            text: 'Check the current implementation',
+            resources: [],
+            submittedAt: 1
+          }
+        ]}
+        {...callbacks}
+      />
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('Steer queued');
   });
 
   it('renders recent history first and progressively reveals long conversations', async () => {

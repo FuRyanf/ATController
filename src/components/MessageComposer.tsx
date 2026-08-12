@@ -15,13 +15,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type {
   CodexModel,
   CodexPlugin,
-  CodexRateLimitWindowV2,
   CodexSkill,
   ComposerInput,
   PermissionMode,
   ThreadPreferences
 } from '../types';
 import { serviceTierDisplayName } from '../lib/codexLabels';
+import { INTERFACE_SCALE_CHANGED_EVENT } from '../lib/interfaceScale';
 import { AppIcon } from './AppIcon';
 
 export interface ComposerAttachment {
@@ -46,8 +46,6 @@ interface MessageComposerProps {
   preferences: ThreadPreferences;
   effectiveServiceTier?: string | null;
   models: CodexModel[];
-  fiveHourLimit?: CodexRateLimitWindowV2 | null;
-  weeklyLimit?: CodexRateLimitWindowV2 | null;
   archived: boolean;
   running: boolean;
   connected: boolean;
@@ -338,11 +336,6 @@ async function imageAttachment(file: File, workspacePath: string): Promise<Compo
   };
 }
 
-function formatAllowance(window?: CodexRateLimitWindowV2 | null): string {
-  if (!window) return '—';
-  return `${Math.max(0, Math.round(100 - window.usedPercent))}% left`;
-}
-
 export function attachmentsToInputs(
   text: string,
   attachments: ComposerAttachment[],
@@ -398,8 +391,6 @@ function MessageComposerComponent({
   preferences,
   effectiveServiceTier,
   models,
-  fiveHourLimit,
-  weeklyLimit,
   archived,
   running,
   connected,
@@ -559,15 +550,24 @@ function MessageComposerComponent({
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
-    textarea.style.height = '0px';
-    textarea.style.height = `${Math.min(240, Math.max(44, textarea.scrollHeight))}px`;
+    const resize = () => {
+      textarea.style.height = '0px';
+      textarea.style.height = `${Math.min(240, Math.max(44, textarea.scrollHeight))}px`;
+    };
+    resize();
     if (pendingSelectionRef.current != null) {
       const cursor = pendingSelectionRef.current;
       pendingSelectionRef.current = null;
       textarea.focus();
       textarea.setSelectionRange(cursor, cursor);
     }
-  }, [value]);
+    window.addEventListener('resize', resize);
+    window.addEventListener(INTERFACE_SCALE_CHANGED_EVENT, resize);
+    return () => {
+      window.removeEventListener('resize', resize);
+      window.removeEventListener(INTERFACE_SCALE_CHANGED_EVENT, resize);
+    };
+  }, [threadId, value]);
 
   useEffect(() => {
     const focus = () => textareaRef.current?.focus();
@@ -1273,25 +1273,36 @@ function MessageComposerComponent({
                 {selectedSkillCount > 0 ? <em>{selectedSkillCount}</em> : null}
               </button>
             ) : null}
-            <span className="composer-usage" title="Codex usage">
-              5h {formatAllowance(fiveHourLimit)} · Week {formatAllowance(weeklyLimit)}
-            </span>
           </div>
-          {running ? (
-            <div className="composer-running-actions">
-              <button type="button" className="stop-button" onClick={onStop}>
-                <AppIcon name="stop" size={13} />
-                Stop
+          <div className="composer-footer-actions">
+            {running ? (
+              <div className="composer-running-actions">
+                <button type="button" className="stop-button" onClick={onStop}>
+                  <AppIcon name="stop" size={13} />
+                  Stop
+                </button>
+                <button
+                  type="button"
+                  className="send-button"
+                  aria-label={submitting ? 'Queueing steer' : 'Steer active turn'}
+                  disabled={!canSubmit}
+                  onClick={submit}
+                >
+                  {submitting ? <span className="button-spinner" /> : <AppIcon name="send" />}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="send-button"
+                aria-label={submitting ? 'Sending message' : 'Send message'}
+                disabled={!canSubmit}
+                onClick={submit}
+              >
+                {submitting ? <span className="button-spinner" /> : <AppIcon name="send" />}
               </button>
-              <button type="button" className="send-button" aria-label="Steer active turn" disabled={!canSubmit} onClick={submit}>
-                <AppIcon name="send" />
-              </button>
-            </div>
-          ) : (
-            <button type="button" className="send-button" aria-label="Send message" disabled={!canSubmit} onClick={submit}>
-              {submitting ? <span className="button-spinner" /> : <AppIcon name="send" />}
-            </button>
-          )}
+            )}
+          </div>
         </footer>
       </div>
       {preferences.permissionMode === 'fullAccess' ? (
@@ -1333,8 +1344,6 @@ function messageComposerPropsEqual(
     previous.preferences.serviceTier === next.preferences.serviceTier &&
     previous.effectiveServiceTier === next.effectiveServiceTier &&
     previous.models === next.models &&
-    previous.fiveHourLimit === next.fiveHourLimit &&
-    previous.weeklyLimit === next.weeklyLimit &&
     previous.archived === next.archived &&
     previous.running === next.running &&
     previous.connected === next.connected &&

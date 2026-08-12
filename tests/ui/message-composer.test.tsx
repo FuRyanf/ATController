@@ -152,14 +152,11 @@ describe('Codex message composer', () => {
     expect(props.onSubmit).toHaveBeenCalledWith([{ type: 'text', text: 'Run the tests' }]);
   });
 
-  it('shows runtime-derived model, Ultra reasoning, Full Access, and usage', async () => {
+  it('shows runtime-derived model, Ultra reasoning, and Full Access', async () => {
     const user = userEvent.setup();
-    const props = renderComposer({
-      fiveHourLimit: { usedPercent: 25, windowDurationMins: 300 },
-      weeklyLimit: { usedPercent: 60, windowDurationMins: 10_080 }
-    });
+    const props = renderComposer();
 
-    expect(screen.getByText(/5h 75% left · Week 40% left/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Usage$/)).not.toBeInTheDocument();
     expect(screen.getByText(/Full Access — Codex may read/)).toBeInTheDocument();
 
     const effort = screen.getByRole('combobox', { name: 'Reasoning effort' });
@@ -688,6 +685,29 @@ describe('Codex message composer', () => {
     expect(props.onStop).toHaveBeenCalledOnce();
     await user.click(screen.getByRole('button', { name: 'Steer active turn' }));
     expect(props.onSubmit).toHaveBeenCalled();
+  });
+
+  it('makes an in-flight steer visibly distinct while Codex acknowledges it', () => {
+    renderComposer({ running: true, submitting: true });
+    expect(screen.getByRole('button', { name: 'Queueing steer' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Steer active turn' })).not.toBeInTheDocument();
+  });
+
+  it('remeasures the draft after interface scaling without exposing scrollbars', () => {
+    renderComposer();
+    const composer = screen.getByRole('textbox', {
+      name: 'Message Codex'
+    }) as HTMLTextAreaElement;
+    Object.defineProperty(composer, 'scrollHeight', {
+      configurable: true,
+      value: 128
+    });
+
+    act(() => {
+      window.dispatchEvent(new Event('atcontroller:interface-scale-changed'));
+    });
+
+    expect(composer.style.height).toBe('128px');
   });
 
   it('keeps archived threads readable and requires an explicit restore before continuing', async () => {

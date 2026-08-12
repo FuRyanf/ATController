@@ -314,23 +314,43 @@ export function ProjectTerminalShelf({
 
   const beginResize = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
     const startY = event.clientY;
     const startHeight = height;
+    let currentHeight = startHeight;
+    let frame: number | null = null;
+    let finished = false;
     const move = (moveEvent: globalThis.PointerEvent) => {
       const maximum = Math.max(MIN_HEIGHT, Math.floor(window.innerHeight * 0.68));
-      setHeight(Math.min(maximum, Math.max(MIN_HEIGHT, startHeight + startY - moveEvent.clientY)));
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      setHeight((current) => {
-        window.localStorage.setItem(TERMINAL_HEIGHT_KEY, String(current));
-        return current;
+      currentHeight = Math.min(
+        maximum,
+        Math.max(MIN_HEIGHT, startHeight + startY - moveEvent.clientY)
+      );
+      if (frame != null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        setHeight(currentHeight);
       });
     };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      window.removeEventListener('blur', finish);
+      target.removeEventListener('lostpointercapture', finish);
+      if (frame != null) window.cancelAnimationFrame(frame);
+      frame = null;
+      setHeight(currentHeight);
+      window.localStorage.setItem(TERMINAL_HEIGHT_KEY, String(currentHeight));
+    };
     window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+    window.addEventListener('blur', finish);
+    target.addEventListener('lostpointercapture', finish);
   };
 
   const terminate = async () => {

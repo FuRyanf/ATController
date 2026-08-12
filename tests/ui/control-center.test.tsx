@@ -50,8 +50,16 @@ const catalog: CodexRuntimeCatalog = {
     authenticationMode: 'chatgpt',
     planType: 'pro',
     requiresOpenaiAuth: true,
-    fiveHourLimit: { usedPercent: 20, windowDurationMins: 300 },
-    weeklyLimit: { usedPercent: 55, windowDurationMins: 10_080 }
+    fiveHourLimit: {
+      usedPercent: 20,
+      windowDurationMins: 300,
+      resetsAt: 1_786_048_200
+    },
+    weeklyLimit: {
+      usedPercent: 55,
+      windowDurationMins: 10_080,
+      resetsAt: 1_786_566_600
+    }
   },
   permissionProfiles: []
 };
@@ -156,6 +164,19 @@ function props() {
 }
 
 describe('ATController control center', () => {
+  it('opens Settings with prominent usage and exact reset times', () => {
+    render(<ControlCenterDialog {...props()} />);
+
+    expect(screen.getByRole('button', { name: 'Settings' })).toHaveClass('active');
+    expect(screen.getByText('Codex usage')).toBeInTheDocument();
+    expect(screen.getByText('80% left')).toBeInTheDocument();
+    expect(screen.getByText('45% left')).toBeInTheDocument();
+    expect(screen.getAllByText(/^Resets /)).toHaveLength(2);
+    expect(
+      screen.getByRole('progressbar', { name: '5-hour limit remaining' })
+    ).toHaveAttribute('aria-valuenow', '80');
+  });
+
   it('edits appearance, permissions, and composer behavior as one settings update', async () => {
     const user = userEvent.setup();
     const control = props();

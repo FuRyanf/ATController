@@ -11,6 +11,11 @@ import type {
   Settings
 } from '../types';
 import { serviceTierDisplayName } from '../lib/codexLabels';
+import {
+  formatUsageRemaining,
+  formatUsageReset,
+  usageRemainingPercent
+} from '../lib/usage';
 import { AppIcon } from './AppIcon';
 
 type ControlCenterTab = 'settings' | 'diagnostics' | 'browser';
@@ -39,11 +44,6 @@ interface ControlCenterDialogProps {
   onRunBrowserSelfTest: () => void;
   onCopyBrowserDiagnostics: () => void;
   onOpenBrowserCache: () => void;
-}
-
-function usageRemaining(usedPercent?: number): string {
-  if (usedPercent == null) return 'Unavailable';
-  return `${Math.max(0, Math.round(100 - usedPercent))}% remaining`;
 }
 
 function permissionLabel(permission: PermissionMode): string {
@@ -152,6 +152,50 @@ export function ControlCenterDialog({
         <div className="control-center-content">
           {tab === 'settings' ? (
             <div className="settings-grid">
+              <section className="usage-settings">
+                <header>
+                  <div>
+                    <h3>Codex usage</h3>
+                    <p>Current allowance reported by your Codex account.</p>
+                  </div>
+                  <span className="usage-plan">
+                    {catalog?.account.planType ?? 'Plan unavailable'}
+                  </span>
+                </header>
+                <div className="usage-windows">
+                  {[
+                    {
+                      label: '5-hour limit',
+                      window: catalog?.account.fiveHourLimit
+                    },
+                    {
+                      label: 'Weekly limit',
+                      window: catalog?.account.weeklyLimit
+                    }
+                  ].map(({ label, window }) => {
+                    const remaining = usageRemainingPercent(window);
+                    return (
+                      <div className="usage-window" key={label}>
+                        <div className="usage-window-heading">
+                          <span>{label}</span>
+                          <strong>{formatUsageRemaining(window)}</strong>
+                        </div>
+                        <div
+                          className={`usage-meter ${remaining != null && remaining <= 20 ? 'low' : ''}`}
+                          role="progressbar"
+                          aria-label={`${label} remaining`}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={remaining ?? undefined}
+                        >
+                          <span style={{ width: `${remaining ?? 0}%` }} />
+                        </div>
+                        <small>{formatUsageReset(window)}</small>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
               <section>
                 <h3>Appearance</h3>
                 <p>Follow macOS or choose an explicit theme.</p>
@@ -304,12 +348,6 @@ export function ControlCenterDialog({
                     onChange={(event) => setDraft({ ...draft, codexCliPath: event.target.value || null })}
                   />
                 </label>
-              </section>
-              <section className="usage-settings">
-                <h3>Usage</h3>
-                <div><span>5 hour</span><strong>{usageRemaining(catalog?.account.fiveHourLimit?.usedPercent)}</strong></div>
-                <div><span>Weekly</span><strong>{usageRemaining(catalog?.account.weeklyLimit?.usedPercent)}</strong></div>
-                <div><span>Plan</span><strong>{catalog?.account.planType ?? 'Not supplied'}</strong></div>
               </section>
             </div>
           ) : tab === 'diagnostics' ? (

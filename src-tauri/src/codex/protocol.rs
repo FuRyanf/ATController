@@ -8,9 +8,13 @@ use serde_json::{json, Value};
 
 use super::process;
 
-const MAX_HISTORY_TEXT_CHARS: usize = 1_000_000;
-const MAX_HISTORY_COMMAND_OUTPUT_CHARS: usize = 512_000;
-const MAX_HISTORY_DIFF_CHARS: usize = 1_000_000;
+// Large app-server histories can contain many megabytes of repeated command
+// output and diffs. Keep enough tail context for diagnosis and copying without
+// transferring pathological payloads into WebKit's layout and accessibility
+// trees, where they can multiply into hundreds of megabytes.
+const MAX_HISTORY_TEXT_CHARS: usize = 256_000;
+const MAX_HISTORY_COMMAND_OUTPUT_CHARS: usize = 128_000;
+const MAX_HISTORY_DIFF_CHARS: usize = 256_000;
 const MAX_HISTORY_JSON_CHARS: usize = 16_000;
 const HISTORY_TRUNCATION_MARKER: &str = "\n[Earlier content truncated by ATController]\n";
 
@@ -201,6 +205,7 @@ pub struct BrowserActivity {
 #[serde(rename_all = "camelCase")]
 pub struct CodexItem {
     pub id: String,
+    pub client_id: Option<String>,
     pub kind: String,
     pub status: Option<String>,
     pub phase: Option<String>,
@@ -678,6 +683,7 @@ pub fn normalize_item(value: &Value) -> Result<CodexItem> {
     let id = optional_string(value, "id").unwrap_or_else(|| format!("unknown-{kind}"));
     let mut item = CodexItem {
         id,
+        client_id: optional_string(value, "clientId"),
         kind: kind.clone(),
         status: value.get("status").map(value_label),
         phase: value
@@ -1944,6 +1950,19 @@ mod tests {
     }
 
     #[test]
+    fn preserves_client_user_message_ids_for_optimistic_reconciliation() {
+        let item = normalize_item(&json!({
+            "type": "userMessage",
+            "id": "item-user-1",
+            "clientId": "atcontroller-message-1",
+            "content": [{"type": "text", "text": "Run the tests", "text_elements": []}]
+        }))
+        .expect("user message should normalize");
+        assert_eq!(item.client_id.as_deref(), Some("atcontroller-message-1"));
+        assert_eq!(item.content[0].text.as_deref(), Some("Run the tests"));
+    }
+
+    #[test]
     fn bounds_verbose_history_payloads_before_the_tauri_boundary() {
         let command = normalize_item(&json!({
             "type": "commandExecution",
@@ -1954,7 +1973,7 @@ mod tests {
         let output = command
             .output
             .expect("command output should remain available");
-        assert!(output.len() < 520_000);
+        assert!(output.len() < 136_000);
         assert!(output.contains("Earlier content truncated"));
 
         let tool = normalize_item(&json!({

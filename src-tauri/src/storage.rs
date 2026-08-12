@@ -1135,6 +1135,67 @@ pub fn save_codex_thread_ui_metadata(
     Ok(metadata)
 }
 
+pub fn set_codex_thread_order(
+    workspace_id: &str,
+    thread_ids: Vec<String>,
+) -> Result<Vec<CodexThreadUiMetadata>> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?.to_string();
+    if thread_ids.len() > 10_000 {
+        return Err(anyhow!("Thread order contains too many entries"));
+    }
+    let mut seen = HashSet::with_capacity(thread_ids.len());
+    let thread_ids = thread_ids
+        .into_iter()
+        .map(|thread_id| {
+            let thread_id = validate_storage_segment(&thread_id, "thread id")?.to_string();
+            if !seen.insert(thread_id.clone()) {
+                return Err(anyhow!("Thread order contains duplicate identifiers"));
+            }
+            Ok(thread_id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !load_workspaces()?
+        .iter()
+        .any(|workspace| workspace.id == workspace_id)
+    {
+        return Err(anyhow!("Workspace not found"));
+    }
+
+    let root = ensure_base_dirs()?;
+    let _guard = codex_thread_ui_lock()
+        .lock()
+        .map_err(|_| anyhow!("Codex thread UI metadata lock poisoned"))?;
+    let mut store = read_codex_thread_ui_store_at(&root)?;
+    for thread_id in &thread_ids {
+        if let Some(existing) = store.threads.get(thread_id) {
+            if existing.workspace_id != workspace_id {
+                return Err(anyhow!("Codex thread belongs to a different workspace"));
+            }
+        }
+    }
+
+    for metadata in store
+        .threads
+        .values_mut()
+        .filter(|metadata| metadata.workspace_id == workspace_id)
+    {
+        metadata.sort_order = None;
+    }
+    let now = Utc::now();
+    let mut ordered = Vec::with_capacity(thread_ids.len());
+    for (index, thread_id) in thread_ids.into_iter().enumerate() {
+        let metadata = store
+            .threads
+            .entry(thread_id.clone())
+            .or_insert_with(|| CodexThreadUiMetadata::new(thread_id, workspace_id.clone()));
+        metadata.sort_order = Some(index as i64);
+        metadata.updated_at = now;
+        ordered.push(metadata.clone());
+    }
+    write_codex_thread_ui_store_at(&root, &store)?;
+    Ok(ordered)
+}
+
 pub fn ensure_codex_thread_ui_metadata(
     workspace_path: &str,
     thread_id: &str,
@@ -1421,6 +1482,43 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].thread_id, "thread-1");
         assert!(listed[0].pinned);
+    }
+
+    #[test]
+    fn thread_order_is_persisted_atomically_within_one_workspace() {
+        let storage = TestStorage::new();
+        let project = storage.root.join("Ordered Project");
+        let other_project = storage.root.join("Other Project");
+        fs::create_dir_all(&project).expect("project");
+        fs::create_dir_all(&other_project).expect("other project");
+        let workspace = add_workspace(project.to_str().unwrap()).expect("workspace");
+        let other_workspace =
+            add_workspace(other_project.to_str().unwrap()).expect("other workspace");
+        get_codex_thread_ui_metadata(&workspace.id, "thread-one").expect("first metadata");
+        get_codex_thread_ui_metadata(&workspace.id, "thread-two").expect("second metadata");
+        get_codex_thread_ui_metadata(&other_workspace.id, "other-thread").expect("other metadata");
+
+        let ordered = set_codex_thread_order(
+            &workspace.id,
+            vec!["thread-two".to_string(), "thread-one".to_string()],
+        )
+        .expect("set thread order");
+        assert_eq!(ordered[0].thread_id, "thread-two");
+        assert_eq!(ordered[0].sort_order, Some(0));
+        assert_eq!(ordered[1].thread_id, "thread-one");
+        assert_eq!(ordered[1].sort_order, Some(1));
+
+        let cross_workspace = set_codex_thread_order(
+            &workspace.id,
+            vec!["thread-one".to_string(), "other-thread".to_string()],
+        )
+        .expect_err("cross-project moves must be rejected");
+        assert!(cross_workspace
+            .to_string()
+            .contains("belongs to a different workspace"));
+        let unchanged =
+            get_codex_thread_ui_metadata(&workspace.id, "thread-two").expect("unchanged metadata");
+        assert_eq!(unchanged.sort_order, Some(0));
     }
 
     #[test]

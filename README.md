@@ -253,6 +253,9 @@ App-server file events update the timeline immediately; Git refreshes reconcile 
 | Toggle sidebar | Command Shift S |
 | Toggle inspector | Command Shift I |
 | Toggle Project Terminal | Command J |
+| Increase text and interface size | Command + |
+| Decrease text and interface size | Command - |
+| Reset text and interface size | Command 0 |
 | Send | Return |
 | New line | Shift Return |
 | Optional alternate send | Command Return |

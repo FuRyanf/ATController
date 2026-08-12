@@ -33,7 +33,12 @@ const secondWorkspace: Workspace = {
 
 function thread(
   id: string,
-  options: { archived?: boolean; workspacePath?: string; title?: string } = {}
+  options: {
+    archived?: boolean;
+    workspacePath?: string;
+    title?: string;
+    updatedAt?: number;
+  } = {}
 ): CodexThread {
   return {
     id,
@@ -43,7 +48,7 @@ function thread(
     cwd: options.workspacePath ?? workspace.path,
     modelProvider: 'openai',
     createdAt: 1,
-    updatedAt: options.archived ? 1 : 2,
+    updatedAt: options.updatedAt ?? (options.archived ? 1 : 2),
     status: 'idle',
     source: 'appServer',
     cliVersion: '0.144.0',
@@ -93,6 +98,8 @@ function sidebarProps(overrides: Record<string, unknown> = {}) {
     filter: '',
     sortMode: 'custom' as const,
     connectionState: 'ready' as const,
+    fiveHourLimit: { usedPercent: 25, resetsAt: 1_786_048_200 },
+    weeklyLimit: { usedPercent: 60, resetsAt: 1_786_566_600 },
     collapsed: false,
     onSelectWorkspace: vi.fn(),
     onToggleWorkspace: vi.fn(),
@@ -115,6 +122,20 @@ function sidebarProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Codex project shelf sidebar', () => {
+  it('keeps usage visible on the Settings entry and opens Settings', async () => {
+    const properties = sidebarProps();
+    render(<CodexSidebar {...properties} />);
+
+    const settings = screen.getByRole('button', {
+      name: 'Settings and Codex usage'
+    });
+    expect(settings).toHaveTextContent('5h 75%');
+    expect(settings).toHaveTextContent('W 40%');
+    expect(settings).toHaveAttribute('title', expect.stringContaining('Resets'));
+    await userEvent.click(settings);
+    expect(properties.onOpenSettings).toHaveBeenCalledOnce();
+  });
+
   it('ignores transcript-only changes when comparing sidebar thread state', () => {
     const before = {
       ...thread('active'),
@@ -243,7 +264,7 @@ describe('Codex project shelf sidebar', () => {
     expect(screen.queryByRole('treeitem', { name: /^Project/ })).not.toBeInTheDocument();
   });
 
-  it('persists custom drag ordering through the reorder callback', () => {
+  it('reorders projects with explicit up and down arrow buttons', async () => {
     const onReorderWorkspaces = vi.fn();
     const onSelectWorkspace = vi.fn();
     render(
@@ -251,57 +272,74 @@ describe('Codex project shelf sidebar', () => {
         {...sidebarProps({ onReorderWorkspaces, onSelectWorkspace })}
       />
     );
-    const source = screen.getByText('Project').closest<HTMLElement>('.project-shelf-header');
-    const target = screen.getByText('Utilities').closest<HTMLElement>('.project-shelf-header');
-    source!.getBoundingClientRect = () => ({
-      top: 0,
-      bottom: 40,
-      left: 0,
-      right: 100,
-      width: 100,
-      height: 40,
-      x: 0,
-      y: 0,
-      toJSON: () => ({})
-    });
-    target!.getBoundingClientRect = () => ({
-      top: 50,
-      bottom: 90,
-      left: 0,
-      right: 100,
-      width: 100,
-      height: 40,
-      x: 0,
-      y: 50,
-      toJSON: () => ({})
-    });
-
-    fireEvent.pointerDown(source!, {
-      button: 0,
-      pointerId: 1,
-      clientX: 12,
-      clientY: 12
-    });
-    fireEvent.pointerMove(source!, {
-      pointerId: 1,
-      clientX: 12,
-      clientY: 99
-    });
-    expect(target!.closest('.project-shelf')).toHaveClass('drop-after');
-    fireEvent.pointerUp(source!, {
-      pointerId: 1,
-      clientX: 12,
-      clientY: 99
-    });
+    expect(
+      screen.getByRole('button', { name: 'Move Project up' })
+    ).toBeDisabled();
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Move Project down' })
+    );
     expect(onReorderWorkspaces).toHaveBeenCalledWith([
       secondWorkspace.id,
       workspace.id
     ]);
+    expect(screen.queryByLabelText('Reorder Project')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('treeitem', { name: /Project/ }));
-    expect(onSelectWorkspace).not.toHaveBeenCalled();
+    expect(onSelectWorkspace).toHaveBeenCalledWith(workspace.id);
   });
 
-  it('keeps normal project clicks intact when the pointer does not cross the drag threshold', () => {
+  it('sorts thread rows by latest activity and ignores legacy custom order', () => {
+    const onSelectThread = vi.fn();
+    const { container } = render(
+      <CodexSidebar
+        {...sidebarProps({
+          selectedThreadId: 'second',
+          threadsByWorkspace: {
+            [workspace.id]: [
+              thread('first', { title: 'First thread', updatedAt: 10 }),
+              thread('second', { title: 'Second thread', updatedAt: 20 })
+            ],
+            [secondWorkspace.id]: []
+          },
+          metadata: {
+            first: { ...metadata('first'), sortOrder: 0 },
+            second: { ...metadata('second'), sortOrder: 99 }
+          },
+          onSelectThread
+        })}
+      />
+    );
+    const rows = [
+      ...container.querySelectorAll<HTMLElement>('[data-thread-id]')
+    ];
+    expect(rows.map((row) => row.dataset.threadId)).toEqual([
+      'second',
+      'first'
+    ]);
+    expect(container.querySelector('[data-thread-drag-row]')).toBeNull();
+
+    const source = screen.getByRole('treeitem', { name: /Second thread/ });
+    expect(source).not.toHaveAttribute('aria-grabbed');
+    fireEvent.pointerDown(source, {
+      button: 0,
+      pointerId: 7,
+      clientX: 12,
+      clientY: 12
+    });
+    fireEvent.pointerMove(source, {
+      pointerId: 7,
+      clientX: 12,
+      clientY: 88
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 12,
+      clientY: 88
+    });
+    fireEvent.click(source);
+    expect(onSelectThread).toHaveBeenCalledWith(workspace.id, 'second');
+  });
+
+  it('keeps project rows as immediate click targets without a drag state', () => {
     const onSelectWorkspace = vi.fn();
     const onReorderWorkspaces = vi.fn();
     render(
@@ -310,26 +348,10 @@ describe('Codex project shelf sidebar', () => {
       />
     );
     const project = screen.getByRole('treeitem', { name: /Project/ });
-    const header = project.closest<HTMLElement>('.project-shelf-header');
-    fireEvent.pointerDown(header!, {
-      button: 0,
-      pointerId: 2,
-      clientX: 12,
-      clientY: 12
-    });
-    fireEvent.pointerMove(header!, {
-      pointerId: 2,
-      clientX: 14,
-      clientY: 14
-    });
-    fireEvent.pointerUp(header!, {
-      pointerId: 2,
-      clientX: 14,
-      clientY: 14
-    });
     fireEvent.click(project);
     expect(onSelectWorkspace).toHaveBeenCalledWith(workspace.id);
     expect(onReorderWorkspaces).not.toHaveBeenCalled();
+    expect(project).not.toHaveAttribute('aria-grabbed');
   });
 
   it('uses tree keyboard navigation and accessible context menu shortcuts', () => {

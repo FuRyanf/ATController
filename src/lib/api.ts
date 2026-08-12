@@ -120,6 +120,8 @@ export const api = {
       threadId,
       preferences
     }),
+  unsubscribeCodexThread: (threadId: string) =>
+    invoke<string>('codex_unsubscribe_thread', { threadId }),
   forkCodexThread: (
     workspacePath: string,
     threadId: string,
@@ -143,12 +145,14 @@ export const api = {
   startCodexTurn: (
     workspacePath: string,
     threadId: string,
+    clientUserMessageId: string,
     inputs: ComposerInput[],
     preferences: ThreadPreferences
   ) =>
     invoke<CodexTurn>('codex_start_turn', {
       workspacePath,
       threadId,
+      clientUserMessageId,
       inputs,
       preferences
     }),
@@ -156,12 +160,14 @@ export const api = {
     workspacePath: string,
     threadId: string,
     turnId: string,
+    clientUserMessageId: string,
     inputs: ComposerInput[]
   ) =>
     invoke<void>('codex_steer_turn', {
       workspacePath,
       threadId,
       turnId,
+      clientUserMessageId,
       inputs
     }),
   interruptCodexTurn: (threadId: string, turnId: string) =>
@@ -182,6 +188,11 @@ export const api = {
     invoke<CodexThreadUiMetadata>('get_codex_thread_ui_metadata', { workspaceId, threadId }),
   saveCodexThreadUiMetadata: (metadata: CodexThreadUiMetadata) =>
     invoke<CodexThreadUiMetadata>('save_codex_thread_ui_metadata', { metadata }),
+  setCodexThreadOrder: (workspaceId: string, threadIds: string[]) =>
+    invoke<CodexThreadUiMetadata[]>('set_codex_thread_order', {
+      workspaceId,
+      threadIds
+    }),
   listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
   updateWorkspace: (workspaceId: string, update: WorkspaceUpdate) =>
