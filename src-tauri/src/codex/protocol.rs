@@ -1748,12 +1748,31 @@ fn normalize_rate_limits(
 ) -> (Option<CodexRateLimitWindow>, Option<CodexRateLimitWindow>) {
     const FIVE_HOURS: i64 = 300;
     const WEEK: i64 = 10_080;
-    let snapshots = result
-        .get("rateLimitsByLimitId")
-        .and_then(Value::as_object)
-        .map(|limits| limits.values().collect::<Vec<_>>())
-        .filter(|limits| !limits.is_empty())
-        .unwrap_or_else(|| result.get("rateLimits").into_iter().collect());
+
+    // Newer runtimes report independent model and reserve buckets alongside
+    // the general Codex allowance. Those buckets can use the same 5-hour or
+    // weekly durations, so selecting solely by duration can display an unused
+    // model bucket as 100% remaining. Restrict the aggregate UI to the known
+    // general Codex buckets and retain the legacy single-snapshot fallback.
+    let mut snapshots = Vec::new();
+    if let Some(limits) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
+        for limit_id in ["codex", "burst"] {
+            if let Some(snapshot) = limits.get(limit_id) {
+                snapshots.push(snapshot);
+            }
+        }
+        for snapshot in limits.values() {
+            let limit_id = snapshot.get("limitId").and_then(Value::as_str);
+            if matches!(limit_id, Some("codex" | "burst"))
+                && !snapshots.iter().any(|known| std::ptr::eq(*known, snapshot))
+            {
+                snapshots.push(snapshot);
+            }
+        }
+    }
+    if snapshots.is_empty() {
+        snapshots.extend(result.get("rateLimits"));
+    }
     let windows = snapshots
         .into_iter()
         .flat_map(|snapshot| [snapshot.get("primary"), snapshot.get("secondary")])
@@ -2149,6 +2168,34 @@ mod tests {
         }));
         assert_eq!(five_hour.unwrap().used_percent, 12.5);
         assert_eq!(weekly.unwrap().used_percent, 33.0);
+    }
+
+    #[test]
+    fn rate_limit_windows_ignore_model_specific_and_reserve_buckets() {
+        let (five_hour, weekly) = normalize_rate_limits(&json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": { "usedPercent": 1.0, "windowDurationMins": 10080 }
+            },
+            "rateLimitsByLimitId": {
+                "base_model_inference": {
+                    "limitId": "base_model_inference",
+                    "primary": { "usedPercent": 0.0, "windowDurationMins": 10080 }
+                },
+                "codex": {
+                    "limitId": "codex",
+                    "primary": { "usedPercent": 1.0, "windowDurationMins": 10080 }
+                },
+                "codex_bengalfox": {
+                    "limitId": "codex_bengalfox",
+                    "primary": { "usedPercent": 0.0, "windowDurationMins": 300 },
+                    "secondary": { "usedPercent": 0.0, "windowDurationMins": 10080 }
+                }
+            }
+        }));
+
+        assert!(five_hour.is_none());
+        assert_eq!(weekly.unwrap().used_percent, 1.0);
     }
 
     #[test]
