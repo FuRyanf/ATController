@@ -181,10 +181,13 @@ fn get_codex_thread_ui_metadata(
 }
 
 #[tauri::command]
-fn save_codex_thread_ui_metadata(
+async fn save_codex_thread_ui_metadata(
     metadata: CodexThreadUiMetadata,
 ) -> Result<CodexThreadUiMetadata, String> {
-    storage::save_codex_thread_ui_metadata(metadata).map_err(|error| error.to_string())
+    spawn_blocking_command("Thread metadata save", move || {
+        storage::save_codex_thread_ui_metadata(metadata).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]

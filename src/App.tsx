@@ -635,9 +635,13 @@ export default function App() {
   );
   const runtimeEventRevision = useRef(0);
   const gitRefreshTimer = useRef<number | null>(null);
+  const gitInfoRefreshSequence = useRef<Record<string, number>>({});
+  const gitDetailRefreshSequence = useRef<Record<string, number>>({});
   const focusRefreshTimer = useRef<number | null>(null);
   const projectGitRefreshTimers = useRef<Record<string, number>>({});
   const draftPersistenceTimers = useRef<Record<string, number>>({});
+  const metadataPersistenceSequence = useRef<Record<string, number>>({});
+  const metadataPersistenceQueue = useRef<Record<string, Promise<void>>>({});
   const threadRefreshSequence = useRef<Record<string, number>>({});
   const threadRefreshStartedAt = useRef<Record<string, number>>({});
   const sessionReconfigurationSequence = useRef<Record<string, number>>({});
@@ -718,6 +722,9 @@ export default function App() {
       current === threadId ? null : current
     );
     delete sessionLastUsedAt.current[threadId];
+    metadataPersistenceSequence.current[threadId] =
+      (metadataPersistenceSequence.current[threadId] ?? 0) + 1;
+    delete metadataPersistenceQueue.current[threadId];
     const draftTimer = draftPersistenceTimers.current[threadId];
     if (draftTimer != null) window.clearTimeout(draftTimer);
     delete draftPersistenceTimers.current[threadId];
@@ -810,12 +817,17 @@ export default function App() {
       setGitBranches([]);
       return;
     }
-    try {
-      const [info, status, branches] = await Promise.all([
-        api.getGitInfo(target.path),
-        api.gitWorkspaceStatus(target.path),
-        api.gitListBranches(target.path)
-      ]);
+    const infoSequence = (gitInfoRefreshSequence.current[target.id] ?? 0) + 1;
+    gitInfoRefreshSequence.current[target.id] = infoSequence;
+    const detailSequence = (gitDetailRefreshSequence.current[target.id] ?? 0) + 1;
+    gitDetailRefreshSequence.current[target.id] = detailSequence;
+    const [infoResult, statusResult, branchesResult] = await Promise.allSettled([
+      api.getGitInfo(target.path),
+      api.gitWorkspaceStatus(target.path),
+      api.gitListBranches(target.path)
+    ]);
+    if (gitInfoRefreshSequence.current[target.id] === infoSequence) {
+      const info = infoResult.status === 'fulfilled' ? infoResult.value : null;
       setGitInfoByWorkspace((current) =>
         gitInfoEqual(current[target.id], info)
           ? current
@@ -823,49 +835,67 @@ export default function App() {
       );
       if (selectedWorkspaceRef.current?.id === target.id) {
         setGitInfo((current) => (gitInfoEqual(current, info) ? current : info));
-        setGitStatus((current) =>
-          gitStatusEqual(current, status) ? current : status
-        );
-        setGitBranches((current) =>
-          gitBranchesEqual(current, branches) ? current : branches
-        );
       }
-    } catch {
-      setGitInfoByWorkspace((current) =>
-        current[target.id] === null
-          ? current
-          : { ...current, [target.id]: null }
-      );
-      if (selectedWorkspaceRef.current?.id === target.id) {
-        setGitInfo(null);
+    }
+    if (
+      gitDetailRefreshSequence.current[target.id] === detailSequence &&
+      selectedWorkspaceRef.current?.id === target.id
+    ) {
+      if (statusResult.status === 'fulfilled') {
+        setGitStatus((current) =>
+          gitStatusEqual(current, statusResult.value) ? current : statusResult.value
+        );
+      } else {
         setGitStatus(null);
+      }
+      if (branchesResult.status === 'fulfilled') {
+        setGitBranches((current) =>
+          gitBranchesEqual(current, branchesResult.value)
+            ? current
+            : branchesResult.value
+        );
+      } else {
         setGitBranches([]);
       }
     }
   }, []);
 
   const refreshProjectGit = useCallback(async (workspace: Workspace) => {
+    const requestSequence =
+      (gitInfoRefreshSequence.current[workspace.id] ?? 0) + 1;
+    gitInfoRefreshSequence.current[workspace.id] = requestSequence;
     if (!workspace.isAvailable) {
       setGitInfoByWorkspace((current) =>
         current[workspace.id] === null
           ? current
           : { ...current, [workspace.id]: null }
       );
+      if (selectedWorkspaceRef.current?.id === workspace.id) {
+        setGitInfo(null);
+      }
       return;
     }
     try {
       const info = await api.getGitInfo(workspace.path);
+      if (gitInfoRefreshSequence.current[workspace.id] !== requestSequence) return;
       setGitInfoByWorkspace((current) =>
         gitInfoEqual(current[workspace.id], info)
           ? current
           : { ...current, [workspace.id]: info }
       );
+      if (selectedWorkspaceRef.current?.id === workspace.id) {
+        setGitInfo((current) => (gitInfoEqual(current, info) ? current : info));
+      }
     } catch {
+      if (gitInfoRefreshSequence.current[workspace.id] !== requestSequence) return;
       setGitInfoByWorkspace((current) =>
         current[workspace.id] === null
           ? current
           : { ...current, [workspace.id]: null }
       );
+      if (selectedWorkspaceRef.current?.id === workspace.id) {
+        setGitInfo(null);
+      }
     }
   }, []);
 
@@ -891,6 +921,9 @@ export default function App() {
 
   const persistMetadata = useCallback(
     async (next: CodexThreadUiMetadata) => {
+      const persistenceSequence =
+        (metadataPersistenceSequence.current[next.threadId] ?? 0) + 1;
+      metadataPersistenceSequence.current[next.threadId] = persistenceSequence;
       const publish = (value: CodexThreadUiMetadata) => {
         const existing = metadataRef.current[value.threadId];
         if (!existing || !threadUiMetadataEqual(existing, value)) {
@@ -912,16 +945,37 @@ export default function App() {
           ? next
           : { ...next, draft: liveDraft };
       publish(candidate);
-      try {
-        const saved = await api.saveCodexThreadUiMetadata(candidate);
-        const latestDraft = threadDraftStore.get(saved.threadId);
-        const synchronized =
-          latestDraft == null || latestDraft === saved.draft
-            ? saved
-            : { ...saved, draft: latestDraft };
-        publish(synchronized);
-      } catch (error) {
-        showToast(`Could not save thread UI state: ${String(error)}`, 'error');
+      const previous = metadataPersistenceQueue.current[next.threadId];
+      const operation = (previous ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(async () => {
+          try {
+            const saved = await api.saveCodexThreadUiMetadata(candidate);
+            if (
+              metadataPersistenceSequence.current[saved.threadId] !==
+              persistenceSequence
+            ) {
+              return;
+            }
+            const latestDraft = threadDraftStore.get(saved.threadId);
+            const synchronized =
+              latestDraft == null || latestDraft === saved.draft
+                ? saved
+                : { ...saved, draft: latestDraft };
+            publish(synchronized);
+          } catch (error) {
+            if (
+              metadataPersistenceSequence.current[next.threadId] ===
+              persistenceSequence
+            ) {
+              showToast(`Could not save thread UI state: ${String(error)}`, 'error');
+            }
+          }
+        });
+      metadataPersistenceQueue.current[next.threadId] = operation;
+      await operation;
+      if (metadataPersistenceQueue.current[next.threadId] === operation) {
+        delete metadataPersistenceQueue.current[next.threadId];
       }
     },
     [showToast]
@@ -1121,11 +1175,8 @@ export default function App() {
           [thread.id]: synchronized
         };
         setMetadata((current) => ({ ...current, [thread.id]: synchronized }));
-        try {
-          return await api.saveCodexThreadUiMetadata(synchronized);
-        } catch {
-          return synchronized;
-        }
+        await persistMetadata(synchronized);
+        return metadataRef.current[thread.id] ?? synchronized;
       }
       if (existing) {
         const reassociated = {
@@ -1138,28 +1189,16 @@ export default function App() {
           [thread.id]: reassociated
         };
         setMetadata((current) => ({ ...current, [thread.id]: reassociated }));
-        try {
-          const saved = await api.saveCodexThreadUiMetadata(reassociated);
-          metadataRef.current = { ...metadataRef.current, [thread.id]: saved };
-          setMetadata((current) => ({ ...current, [thread.id]: saved }));
-          return saved;
-        } catch {
-          return reassociated;
-        }
+        await persistMetadata(reassociated);
+        return metadataRef.current[thread.id] ?? reassociated;
       }
       const created = createUiMetadata(workspace, thread, preferences);
       metadataRef.current = { ...metadataRef.current, [thread.id]: created };
       setMetadata((current) => ({ ...current, [thread.id]: created }));
-      try {
-        const saved = await api.saveCodexThreadUiMetadata(created);
-        metadataRef.current = { ...metadataRef.current, [thread.id]: saved };
-        setMetadata((current) => ({ ...current, [thread.id]: saved }));
-        return saved;
-      } catch {
-        return created;
-      }
+      await persistMetadata(created);
+      return metadataRef.current[thread.id] ?? created;
     },
-    []
+    [persistMetadata]
   );
 
   const openThread = useCallback(
@@ -1639,7 +1678,11 @@ export default function App() {
         if (workspace) {
           void api
             .listCodexRuntimeSkills(workspace.path, true)
-            .then((skills) => setRuntimeSkills(skills.filter((skill) => skill.enabled)))
+            .then((skills) => {
+              if (selectedWorkspaceRef.current?.id === workspace.id) {
+                setRuntimeSkills(skills.filter((skill) => skill.enabled));
+              }
+            })
             .catch(() => undefined);
         }
       }
@@ -1748,18 +1791,36 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedWorkspace) return;
+    let cancelled = false;
     window.localStorage.setItem(SELECTED_WORKSPACE_KEY, selectedWorkspace.id);
     restoredWorkspace.current = null;
     void refreshGit(selectedWorkspace);
+    setRuntimeSkills([]);
+    setRuntimePlugins([]);
     void api
       .listCodexRuntimeSkills(selectedWorkspace.path, true)
-      .then((skills) => setRuntimeSkills(skills.filter((skill) => skill.enabled)))
-      .catch(() => setRuntimeSkills([]));
+      .then((skills) => {
+        if (!cancelled) {
+          setRuntimeSkills(skills.filter((skill) => skill.enabled));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setRuntimeSkills([]);
+      });
     void api
       .listCodexRuntimePlugins(selectedWorkspace.path)
-      .then((plugins) => setRuntimePlugins(plugins.filter((plugin) => plugin.enabled)))
-      .catch(() => setRuntimePlugins([]));
-  }, [connected, refreshGit, refreshThreads, selectedWorkspace?.id]);
+      .then((plugins) => {
+        if (!cancelled) {
+          setRuntimePlugins(plugins.filter((plugin) => plugin.enabled));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setRuntimePlugins([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connected, refreshGit, selectedWorkspace?.id, selectedWorkspace?.path]);
 
   useEffect(() => {
     if (

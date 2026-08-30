@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -197,6 +197,45 @@ describe('structured session inspector', () => {
     expect(control.onRevealFile).toHaveBeenCalledWith('src/main.ts');
     expect(control.onRevertFile).toHaveBeenCalledWith('src/main.ts');
     expect(control.onCopyPatch).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a stale diff response after another file is expanded', async () => {
+    const user = userEvent.setup();
+    let resolveMain!: (value: string) => void;
+    let resolveOther!: (value: string) => void;
+    const control = props();
+    control.gitStatus = {
+      ...gitStatus,
+      uncommittedFiles: 2,
+      files: [
+        ...gitStatus.files,
+        {
+          path: 'src/other.ts',
+          status: 'modified',
+          staged: false,
+          insertions: 1,
+          deletions: 0,
+          binary: false
+        }
+      ]
+    };
+    control.onLoadDiff = vi.fn(
+      (path: string) =>
+        new Promise<string>((resolve) => {
+          if (path === 'src/main.ts') resolveMain = resolve;
+          else resolveOther = resolve;
+        })
+    );
+    render(<InspectorPanel {...control} />);
+
+    await user.click(screen.getByText('main.ts'));
+    await user.click(screen.getByText('other.ts'));
+    await act(async () => resolveOther('other-current-diff'));
+    expect(await screen.findByText('other-current-diff')).toBeInTheDocument();
+
+    await act(async () => resolveMain('main-stale-diff'));
+    expect(screen.getByText('other-current-diff')).toBeInTheDocument();
+    expect(screen.queryByText('main-stale-diff')).not.toBeInTheDocument();
   });
 
   it('summarizes command history, canonical thread details, and runtime recovery', async () => {
