@@ -483,6 +483,65 @@ describe('structured Codex timeline', () => {
     expect(revertFile).toHaveBeenCalledWith('/tmp/project/hello.txt');
   });
 
+  it('paces live Markdown presentation and reveals the completed response immediately', () => {
+    vi.useFakeTimers();
+    try {
+      const base = structuredThread();
+      const withAgentText = (
+        text: string,
+        status: 'inProgress' | 'completed'
+      ): CodexThread => ({
+        ...base,
+        turns: base.turns.map((turn) => ({
+          ...turn,
+          status,
+          items: turn.items.map((item) =>
+            item.kind === 'agentMessage' ? { ...item, status, text } : item
+          )
+        }))
+      });
+      const props = {
+        approvals: [],
+        onRespondToApproval: vi.fn(),
+        onRespondToUserInput: vi.fn(),
+        onCopy: vi.fn(),
+        onOpenFile: vi.fn(),
+        onRevealPath: vi.fn(),
+        onRevertFile: vi.fn(),
+        onOpenTerminal: vi.fn()
+      };
+      const { rerender } = render(
+        <ConversationTimeline
+          {...props}
+          thread={withAgentText('First streamed fragment', 'inProgress')}
+        />
+      );
+
+      rerender(
+        <ConversationTimeline
+          {...props}
+          thread={withAgentText('Second streamed fragment', 'inProgress')}
+        />
+      );
+      expect(screen.getByText('First streamed fragment')).toBeInTheDocument();
+      expect(screen.queryByText('Second streamed fragment')).toBeNull();
+
+      act(() => vi.advanceTimersByTime(48));
+      expect(screen.getByText('Second streamed fragment')).toBeInTheDocument();
+
+      rerender(
+        <ConversationTimeline
+          {...props}
+          thread={withAgentText('Final response', 'completed')}
+        />
+      );
+      expect(screen.getByText('Final response')).toBeInTheDocument();
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('offers local development-server URLs to the isolated browser', async () => {
     expect(
       findLocalDevelopmentUrl(

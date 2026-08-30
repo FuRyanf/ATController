@@ -1,11 +1,14 @@
 import {
   lazy,
+  memo,
   Suspense,
   useCallback,
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent
 } from 'react';
@@ -19,9 +22,7 @@ import {
   type ProjectAddAction,
   type ProjectsMenuAction
 } from './components/CodexSidebar';
-import { CloneRepositoryDialog } from './components/CloneRepositoryDialog';
-import { CommandPalette, type PaletteAction } from './components/CommandPalette';
-import { ManageProjectsDialog } from './components/ManageProjectsDialog';
+import type { PaletteAction } from './components/CommandPalette';
 import {
   MessageComposer,
   type ComposerAttachment
@@ -30,8 +31,6 @@ import {
   ProjectContextMenu,
   type ProjectMenuAction
 } from './components/ProjectContextMenu';
-import { ProjectIconDialog } from './components/ProjectIconDialog';
-import { ProjectImportDialog } from './components/ProjectImportDialog';
 import {
   ThreadContextMenu,
   type ThreadMenuAction
@@ -43,7 +42,16 @@ import {
   normalizeAppearanceMode,
   persistAppearanceMode
 } from './lib/appearance';
-import { serviceTierDisplayName } from './lib/codexLabels';
+import {
+  isNormalServiceTierId,
+  NORMAL_SERVICE_TIER_ID,
+  serviceTierDisplayName
+} from './lib/codexLabels';
+import {
+  gitBranchesEqual,
+  gitInfoEqual,
+  gitStatusEqual
+} from './lib/gitState';
 import {
   applyInterfaceScale,
   formatInterfaceScale,
@@ -70,12 +78,21 @@ import {
   updatePendingSubmissionStatus,
   type PendingSubmissionsByThread
 } from './lib/pendingSubmissions';
-import { idleSessionsToRelease } from './lib/sessionRetention';
+import {
+  currentRunningTurn as lastRunningTurn,
+  idleSessionsToRelease,
+  isThreadRunning,
+  shouldSweepSessionRetention
+} from './lib/sessionRetention';
 import {
   codexStore,
   useCodexStore,
   type CodexStoreSnapshot
 } from './stores/codexStore';
+import {
+  threadDraftStore,
+  useThreadDraft
+} from './stores/threadDraftStore';
 import type {
   BrowserAction,
   BrowserDiagnostics,
@@ -111,10 +128,25 @@ const ConversationTimeline = lazy(async () => ({
   default: (await import('./components/ConversationTimeline')).ConversationTimeline
 }));
 const InspectorPanel = lazy(async () => ({
-  default: (await import('./components/InspectorPanel')).InspectorPanel
+  default: memo((await import('./components/InspectorPanel')).InspectorPanel)
 }));
 const ProjectTerminalShelf = lazy(async () => ({
   default: (await import('./components/ProjectTerminalShelf')).ProjectTerminalShelf
+}));
+const CloneRepositoryDialog = lazy(async () => ({
+  default: (await import('./components/CloneRepositoryDialog')).CloneRepositoryDialog
+}));
+const CommandPalette = lazy(async () => ({
+  default: (await import('./components/CommandPalette')).CommandPalette
+}));
+const ManageProjectsDialog = lazy(async () => ({
+  default: (await import('./components/ManageProjectsDialog')).ManageProjectsDialog
+}));
+const ProjectIconDialog = lazy(async () => ({
+  default: (await import('./components/ProjectIconDialog')).ProjectIconDialog
+}));
+const ProjectImportDialog = lazy(async () => ({
+  default: (await import('./components/ProjectImportDialog')).ProjectImportDialog
 }));
 const SELECTED_WORKSPACE_KEY = 'atcontroller:selected-workspace-v2';
 const SELECTED_THREAD_KEY = 'atcontroller:selected-codex-thread-v2';
@@ -123,10 +155,10 @@ const INSPECTOR_OPEN_KEY = 'atcontroller:inspector-open-v2';
 const PROJECT_SORT_KEY = 'atcontroller:project-sort-v1';
 const FOCUS_REFRESH_INTERVAL_MS = 30_000;
 
-const selectCodexThreads = (snapshot: CodexStoreSnapshot) => snapshot.threads;
+const selectCodexNavigationThreads = (snapshot: CodexStoreSnapshot) =>
+  snapshot.navigationThreads;
 const selectCodexSessions = (snapshot: CodexStoreSnapshot) => snapshot.sessions;
 const selectCodexApprovals = (snapshot: CodexStoreSnapshot) => snapshot.approvals;
-const selectCodexUsage = (snapshot: CodexStoreSnapshot) => snapshot.usage;
 const selectCodexDiagnostics = (snapshot: CodexStoreSnapshot) =>
   snapshot.diagnostics;
 
@@ -161,6 +193,39 @@ interface ProjectRenameState {
 interface ProjectTerminalTarget {
   workspaceId: string;
   cwd: string;
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+  return (
+    left === right ||
+    (left.length === right.length &&
+      left.every((value, index) => value === right[index]))
+  );
+}
+
+function threadUiMetadataEqual(
+  left: CodexThreadUiMetadata,
+  right: CodexThreadUiMetadata
+): boolean {
+  return (
+    left === right ||
+    (left.threadId === right.threadId &&
+      left.workspaceId === right.workspaceId &&
+      left.fallbackTitle === right.fallbackTitle &&
+      left.sortOrder === right.sortOrder &&
+      left.pinned === right.pinned &&
+      left.unread === right.unread &&
+      left.archived === right.archived &&
+      left.draft === right.draft &&
+      stringArraysEqual(left.promptHistory, right.promptHistory) &&
+      left.permissionMode === right.permissionMode &&
+      left.requestedModel === right.requestedModel &&
+      left.requestedReasoningEffort === right.requestedReasoningEffort &&
+      left.requestedServiceTier === right.requestedServiceTier &&
+      left.lastViewedAt === right.lastViewedAt &&
+      left.createdAt === right.createdAt &&
+      left.updatedAt === right.updatedAt)
+  );
 }
 
 function nowIso(): string {
@@ -252,14 +317,6 @@ function workspaceMatchesThread(
   return Boolean(thread.cwd) && clean(thread.cwd) === clean(workspace.path);
 }
 
-function lastRunningTurn(thread?: CodexThread) {
-  if (!thread) return undefined;
-  for (let index = thread.turns.length - 1; index >= 0; index -= 1) {
-    if (thread.turns[index].status === 'inProgress') return thread.turns[index];
-  }
-  return undefined;
-}
-
 function attachmentFromPath(path: string, workspacePath: string): ComposerAttachment {
   const extension = path.split('.').pop()?.toLocaleLowerCase() ?? '';
   const kind = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'heif'].includes(extension)
@@ -296,17 +353,88 @@ function EmptyWorkspace({
   );
 }
 
+type ConnectedTimelineProps = Omit<
+  ComponentProps<typeof ConversationTimeline>,
+  'thread' | 'usage'
+> & { threadId: string };
+
+function ConnectedConversationTimeline({
+  threadId,
+  ...props
+}: ConnectedTimelineProps) {
+  const selectThread = useCallback(
+    (snapshot: CodexStoreSnapshot) => snapshot.threads[threadId],
+    [threadId]
+  );
+  const selectUsage = useCallback(
+    (snapshot: CodexStoreSnapshot) => snapshot.usage[threadId],
+    [threadId]
+  );
+  const thread = useCodexStore(selectThread);
+  const usage = useCodexStore(selectUsage);
+  if (!thread) return null;
+  return <ConversationTimeline {...props} thread={thread} usage={usage} />;
+}
+
+type ConnectedInspectorProps = Omit<
+  ComponentProps<typeof InspectorPanel>,
+  'thread'
+> & { threadId: string };
+
+function ConnectedInspectorPanel({
+  threadId,
+  ...props
+}: ConnectedInspectorProps) {
+  const selectThread = useCallback(
+    (snapshot: CodexStoreSnapshot) => snapshot.threads[threadId],
+    [threadId]
+  );
+  const thread = useCodexStore(selectThread);
+  // Inspector aggregation (commands, changes, and diffs) is useful but should
+  // never compete with typing, pointer movement, or the live timeline.
+  const deferredThread = useDeferredValue(thread);
+  if (!deferredThread) return null;
+  return <InspectorPanel {...props} thread={deferredThread} />;
+}
+
+type ConnectedComposerProps = Omit<
+  ComponentProps<typeof MessageComposer>,
+  'value'
+> & { persistedDraft: string };
+
+function ConnectedMessageComposer({
+  threadId,
+  persistedDraft,
+  onChange,
+  ...props
+}: ConnectedComposerProps) {
+  const value = useThreadDraft(threadId, persistedDraft);
+  const updateValue = useCallback(
+    (next: string) => {
+      threadDraftStore.set(threadId, next);
+      onChange(next);
+    },
+    [onChange, threadId]
+  );
+  return (
+    <MessageComposer
+      {...props}
+      threadId={threadId}
+      value={value}
+      onChange={updateValue}
+    />
+  );
+}
+
 export default function App() {
-  const codexThreads = useCodexStore(selectCodexThreads);
+  const codexNavigationThreads = useCodexStore(selectCodexNavigationThreads);
   const codexSessions = useCodexStore(selectCodexSessions);
   const codexApprovals = useCodexStore(selectCodexApprovals);
-  const codexUsage = useCodexStore(selectCodexUsage);
   const codexDiagnostics = useCodexStore(selectCodexDiagnostics);
   const codex = {
-    threads: codexThreads,
+    threads: codexNavigationThreads,
     sessions: codexSessions,
     approvals: codexApprovals,
-    usage: codexUsage,
     diagnostics: codexDiagnostics
   };
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -507,6 +635,9 @@ export default function App() {
   );
   const runtimeEventRevision = useRef(0);
   const gitRefreshTimer = useRef<number | null>(null);
+  const focusRefreshTimer = useRef<number | null>(null);
+  const projectGitRefreshTimers = useRef<Record<string, number>>({});
+  const draftPersistenceTimers = useRef<Record<string, number>>({});
   const threadRefreshSequence = useRef<Record<string, number>>({});
   const threadRefreshStartedAt = useRef<Record<string, number>>({});
   const sessionReconfigurationSequence = useRef<Record<string, number>>({});
@@ -587,6 +718,10 @@ export default function App() {
       current === threadId ? null : current
     );
     delete sessionLastUsedAt.current[threadId];
+    const draftTimer = draftPersistenceTimers.current[threadId];
+    if (draftTimer != null) window.clearTimeout(draftTimer);
+    delete draftPersistenceTimers.current[threadId];
+    threadDraftStore.delete(threadId);
     codexStore.removeThread(threadId);
     setThreadIdsByWorkspace((current) =>
       Object.fromEntries(
@@ -681,14 +816,26 @@ export default function App() {
         api.gitWorkspaceStatus(target.path),
         api.gitListBranches(target.path)
       ]);
-      setGitInfoByWorkspace((current) => ({ ...current, [target.id]: info }));
+      setGitInfoByWorkspace((current) =>
+        gitInfoEqual(current[target.id], info)
+          ? current
+          : { ...current, [target.id]: info }
+      );
       if (selectedWorkspaceRef.current?.id === target.id) {
-        setGitInfo(info);
-        setGitStatus(status);
-        setGitBranches(branches);
+        setGitInfo((current) => (gitInfoEqual(current, info) ? current : info));
+        setGitStatus((current) =>
+          gitStatusEqual(current, status) ? current : status
+        );
+        setGitBranches((current) =>
+          gitBranchesEqual(current, branches) ? current : branches
+        );
       }
     } catch {
-      setGitInfoByWorkspace((current) => ({ ...current, [target.id]: null }));
+      setGitInfoByWorkspace((current) =>
+        current[target.id] === null
+          ? current
+          : { ...current, [target.id]: null }
+      );
       if (selectedWorkspaceRef.current?.id === target.id) {
         setGitInfo(null);
         setGitStatus(null);
@@ -699,14 +846,26 @@ export default function App() {
 
   const refreshProjectGit = useCallback(async (workspace: Workspace) => {
     if (!workspace.isAvailable) {
-      setGitInfoByWorkspace((current) => ({ ...current, [workspace.id]: null }));
+      setGitInfoByWorkspace((current) =>
+        current[workspace.id] === null
+          ? current
+          : { ...current, [workspace.id]: null }
+      );
       return;
     }
     try {
       const info = await api.getGitInfo(workspace.path);
-      setGitInfoByWorkspace((current) => ({ ...current, [workspace.id]: info }));
+      setGitInfoByWorkspace((current) =>
+        gitInfoEqual(current[workspace.id], info)
+          ? current
+          : { ...current, [workspace.id]: info }
+      );
     } catch {
-      setGitInfoByWorkspace((current) => ({ ...current, [workspace.id]: null }));
+      setGitInfoByWorkspace((current) =>
+        current[workspace.id] === null
+          ? current
+          : { ...current, [workspace.id]: null }
+      );
     }
   }, []);
 
@@ -718,12 +877,49 @@ export default function App() {
     }, 250);
   }, [refreshGit]);
 
+  const scheduleProjectGitRefresh = useCallback(
+    (workspace: Workspace) => {
+      const previous = projectGitRefreshTimers.current[workspace.id];
+      if (previous != null) window.clearTimeout(previous);
+      projectGitRefreshTimers.current[workspace.id] = window.setTimeout(() => {
+        delete projectGitRefreshTimers.current[workspace.id];
+        void refreshProjectGit(workspace);
+      }, 250);
+    },
+    [refreshProjectGit]
+  );
+
   const persistMetadata = useCallback(
     async (next: CodexThreadUiMetadata) => {
-      setMetadata((current) => ({ ...current, [next.threadId]: next }));
+      const publish = (value: CodexThreadUiMetadata) => {
+        const existing = metadataRef.current[value.threadId];
+        if (!existing || !threadUiMetadataEqual(existing, value)) {
+          metadataRef.current = {
+            ...metadataRef.current,
+            [value.threadId]: value
+          };
+        }
+        setMetadata((current) => {
+          const currentValue = current[value.threadId];
+          return currentValue && threadUiMetadataEqual(currentValue, value)
+            ? current
+            : { ...current, [value.threadId]: value };
+        });
+      };
+      const liveDraft = threadDraftStore.get(next.threadId);
+      const candidate =
+        liveDraft == null || liveDraft === next.draft
+          ? next
+          : { ...next, draft: liveDraft };
+      publish(candidate);
       try {
-        const saved = await api.saveCodexThreadUiMetadata(next);
-        setMetadata((current) => ({ ...current, [saved.threadId]: saved }));
+        const saved = await api.saveCodexThreadUiMetadata(candidate);
+        const latestDraft = threadDraftStore.get(saved.threadId);
+        const synchronized =
+          latestDraft == null || latestDraft === saved.draft
+            ? saved
+            : { ...saved, draft: latestDraft };
+        publish(synchronized);
       } catch (error) {
         showToast(`Could not save thread UI state: ${String(error)}`, 'error');
       }
@@ -753,7 +949,7 @@ export default function App() {
         const snapshot = codexStore.getSnapshot();
         const runningThreadIds = new Set(
           Object.values(snapshot.threads)
-            .filter((thread) => Boolean(lastRunningTurn(thread)))
+            .filter(isThreadRunning)
             .map((thread) => thread.id)
         );
         const release = idleSessionsToRelease({
@@ -766,7 +962,7 @@ export default function App() {
           const current = codexStore.getSnapshot();
           if (
             current.activeThreadId === candidate ||
-            lastRunningTurn(current.threads[candidate])
+            isThreadRunning(current.threads[candidate])
           ) {
             continue;
           }
@@ -775,7 +971,7 @@ export default function App() {
             const after = codexStore.getSnapshot();
             if (
               after.activeThreadId !== candidate &&
-              !lastRunningTurn(after.threads[candidate])
+              !isThreadRunning(after.threads[candidate])
             ) {
               codexStore.clearSession(candidate, true);
               delete sessionLastUsedAt.current[candidate];
@@ -788,12 +984,22 @@ export default function App() {
       });
   }, []);
 
+  useEffect(() => {
+    if (!connected) return;
+    const interval = window.setInterval(() => {
+      const activeThreadId = selectedThreadIdRef.current;
+      if (activeThreadId) retainCodexSession(activeThreadId);
+    }, 30_000);
+    return () => window.clearInterval(interval);
+  }, [connected, retainCodexSession]);
+
   const refreshThreads = useCallback(
     async (workspace: Workspace, searchTerm?: string) => {
       threadRefreshStartedAt.current[workspace.id] = Date.now();
       const refreshSequence = (threadRefreshSequence.current[workspace.id] ?? 0) + 1;
       threadRefreshSequence.current[workspace.id] = refreshSequence;
       setLoadingWorkspaceIds((current) => {
+        if (current.has(workspace.id)) return current;
         const next = new Set(current);
         next.add(workspace.id);
         return next;
@@ -803,7 +1009,11 @@ export default function App() {
       }
       try {
         if (!workspace.isAvailable) {
-          setThreadIdsByWorkspace((current) => ({ ...current, [workspace.id]: [] }));
+          setThreadIdsByWorkspace((current) =>
+            (current[workspace.id]?.length ?? 0) === 0
+              ? current
+              : { ...current, [workspace.id]: [] }
+          );
           return;
         }
         const listAll = async (archived: boolean) => {
@@ -843,12 +1053,34 @@ export default function App() {
             }
           ])
         );
-        metadataRef.current = { ...metadataRef.current, ...uiMap };
-        setMetadata((current) => ({ ...current, ...uiMap }));
-        setThreadIdsByWorkspace((current) => ({
-          ...current,
-          [workspace.id]: [...new Set([...activePage, ...archivedPage].map((thread) => thread.id))]
-        }));
+        let nextMetadata = metadataRef.current;
+        for (const [threadId, incoming] of Object.entries(uiMap)) {
+          const liveDraft = threadDraftStore.get(threadId);
+          const candidate =
+            liveDraft == null || liveDraft === incoming.draft
+              ? incoming
+              : { ...incoming, draft: liveDraft };
+          const existing = nextMetadata[threadId];
+          if (existing && threadUiMetadataEqual(existing, candidate)) continue;
+          if (nextMetadata === metadataRef.current) {
+            nextMetadata = { ...metadataRef.current };
+          }
+          nextMetadata[threadId] = candidate;
+        }
+        if (nextMetadata !== metadataRef.current) {
+          metadataRef.current = nextMetadata;
+          setMetadata(nextMetadata);
+        }
+        const nextThreadIds = [
+          ...new Set(
+            [...activePage, ...archivedPage].map((thread) => thread.id)
+          )
+        ];
+        setThreadIdsByWorkspace((current) =>
+          stringArraysEqual(current[workspace.id] ?? [], nextThreadIds)
+            ? current
+            : { ...current, [workspace.id]: nextThreadIds }
+        );
       } catch (error) {
         if (
           refreshSequence === threadRefreshSequence.current[workspace.id] &&
@@ -859,6 +1091,7 @@ export default function App() {
       } finally {
         if (refreshSequence === threadRefreshSequence.current[workspace.id]) {
           setLoadingWorkspaceIds((current) => {
+            if (!current.has(workspace.id)) return current;
             const next = new Set(current);
             next.delete(workspace.id);
             return next;
@@ -1248,7 +1481,9 @@ export default function App() {
     if (!connected) return;
     let cancelled = false;
     void api
-      .getBrowserDiagnostics(selectedThreadId)
+      // Startup and thread selection only need locally detected configuration.
+      // A full runtime probe starts every configured stdio MCP server.
+      .getBrowserDiagnostics(null, false)
       .then((next) => {
         if (!cancelled) setBrowserDiagnostics(next);
       })
@@ -1264,14 +1499,14 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [connected, selectedThreadId]);
+  }, [connected]);
 
   useEffect(() => {
     if (controlCenter !== 'browser') return;
     let cancelled = false;
     void Promise.allSettled([
       api.getBrowserSetupPlan(),
-      api.getBrowserDiagnostics(selectedThreadId)
+      api.getBrowserDiagnostics(selectedThreadId, true)
     ]).then(([planResult, diagnosticsResult]) => {
       if (cancelled) return;
       if (planResult.status === 'fulfilled') setBrowserSetupPlan(planResult.value);
@@ -1293,30 +1528,54 @@ export default function App() {
     const unlisten: Array<() => void> = [];
     void apiModule.onCodexEvent((event: CodexEvent) => {
       if (event.threadId) {
-        sessionLastUsedAt.current[event.threadId] = Date.now();
+        const previous = sessionLastUsedAt.current[event.threadId] ?? 0;
+        const now = Date.now();
+        if (now - previous >= 1_000) {
+          sessionLastUsedAt.current[event.threadId] = now;
+        }
       }
       const threadWasDeleted = event.kind === 'threadDeleted' && Boolean(event.threadId);
+      const fileStateChanged =
+        event.kind === 'fileChangeUpdated' ||
+        event.kind === 'turnDiffUpdated' ||
+        event.item?.kind === 'fileChange';
+      const needsWorkspaceContext =
+        Boolean(event.thread) ||
+        event.kind === 'threadStarted' ||
+        event.kind === 'turnCompleted' ||
+        fileStateChanged;
       if (threadWasDeleted) {
         removeThreadFromUi(event.threadId!);
       }
       codexStore.queueEvent(event);
-      if (event.kind === 'turnCompleted' && event.threadId) {
-        const completedThreadId = event.threadId;
+      if (
+        event.threadId &&
+        shouldSweepSessionRetention(event.kind, event.status)
+      ) {
+        const retentionThreadId = event.threadId;
         window.requestAnimationFrame(() =>
-          retainCodexSession(completedThreadId)
+          retainCodexSession(retentionThreadId)
         );
       }
       updatePendingSubmissions((current) =>
         reconcilePendingSubmissions(current, event)
       );
-      const eventThread =
-        event.thread ??
-        (event.threadId ? codexStore.getSnapshot().threads[event.threadId] : undefined);
+      const eventThread = needsWorkspaceContext
+        ? event.thread ??
+          (event.threadId
+            ? codexStore.getSnapshot().threads[event.threadId]
+            : undefined)
+        : undefined;
       const eventWorkspace =
-        event.threadId || eventThread
+        needsWorkspaceContext && (event.threadId || eventThread)
           ? findWorkspaceForThread(event.threadId ?? eventThread!.id, eventThread)
           : undefined;
-      if (!threadWasDeleted && eventThread && eventWorkspace) {
+      if (
+        !threadWasDeleted &&
+        (Boolean(event.thread) || event.kind === 'threadStarted') &&
+        eventThread &&
+        eventWorkspace
+      ) {
         setThreadIdsByWorkspace((current) => {
           const known = current[eventWorkspace.id] ?? [];
           if (known.includes(eventThread.id)) return current;
@@ -1364,13 +1623,9 @@ export default function App() {
             .catch(() => undefined);
         }
       }
-      if (
-        event.kind === 'fileChangeUpdated' ||
-        event.kind === 'turnDiffUpdated' ||
-        event.item?.kind === 'fileChange'
-      ) {
+      if (fileStateChanged) {
         if (eventWorkspace?.id === selectedWorkspaceRef.current?.id) scheduleGitRefresh();
-        else if (eventWorkspace) void refreshProjectGit(eventWorkspace);
+        else if (eventWorkspace) scheduleProjectGitRefresh(eventWorkspace);
       }
       if (
         event.kind === 'accountUpdated' ||
@@ -1416,30 +1671,72 @@ export default function App() {
     refreshProjectGit,
     retainCodexSession,
     scheduleGitRefresh,
+    scheduleProjectGitRefresh,
     updateMetadata,
     updatePendingSubmissions
   ]);
 
   useEffect(() => {
     const refreshVisibleProject = () => {
-      const workspace = selectedWorkspaceRef.current;
-      if (!workspace) return;
-      const lastRefresh = threadRefreshStartedAt.current[workspace.id] ?? 0;
-      if (Date.now() - lastRefresh < FOCUS_REFRESH_INTERVAL_MS) return;
-      void refreshThreads(workspace);
-      void refreshGit(workspace);
+      if (focusRefreshTimer.current != null) {
+        window.clearTimeout(focusRefreshTimer.current);
+      }
+      // Let the activation frame and the user's first pointer event paint
+      // before reconciling external Codex/Git changes.
+      focusRefreshTimer.current = window.setTimeout(() => {
+        focusRefreshTimer.current = null;
+        const workspace = selectedWorkspaceRef.current;
+        if (!workspace) return;
+        const lastRefresh = threadRefreshStartedAt.current[workspace.id] ?? 0;
+        if (Date.now() - lastRefresh < FOCUS_REFRESH_INTERVAL_MS) return;
+        void refreshThreads(workspace);
+        void refreshGit(workspace);
+      }, 180);
     };
     window.addEventListener('focus', refreshVisibleProject);
-    return () => window.removeEventListener('focus', refreshVisibleProject);
+    return () => {
+      window.removeEventListener('focus', refreshVisibleProject);
+      if (focusRefreshTimer.current != null) {
+        window.clearTimeout(focusRefreshTimer.current);
+        focusRefreshTimer.current = null;
+      }
+    };
   }, [refreshGit, refreshThreads]);
 
   useEffect(() => {
     if (!connected) return;
-    for (const workspace of workspaces) {
-      if (!workspace.isAvailable) continue;
-      void refreshThreads(workspace);
-      void refreshProjectGit(workspace);
-    }
+    let cancelled = false;
+    const available = workspaces.filter((workspace) => workspace.isAvailable);
+    const selectedId = selectedWorkspaceRef.current?.id;
+    available.sort((left, right) => {
+      if (left.id === selectedId) return -1;
+      if (right.id === selectedId) return 1;
+      return 0;
+    });
+    void (async () => {
+      const selected = available[0]?.id === selectedId ? available[0] : null;
+      let nextIndex = 0;
+      if (selected) {
+        nextIndex = 1;
+        void refreshProjectGit(selected);
+        await refreshThreads(selected);
+      }
+      const refreshNext = async () => {
+        while (!cancelled) {
+          const workspace = available[nextIndex];
+          nextIndex += 1;
+          if (!workspace) return;
+          await Promise.allSettled([
+            refreshThreads(workspace),
+            refreshProjectGit(workspace)
+          ]);
+        }
+      };
+      await Promise.all([refreshNext(), refreshNext()]);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [
     connected,
     refreshProjectGit,
@@ -1502,23 +1799,28 @@ export default function App() {
   const updateDraft = useCallback(
     (value: string) => {
       if (!selectedThread || !selectedWorkspace) return;
-      const current =
-        metadataRef.current[selectedThread.id] ??
-        createUiMetadata(selectedWorkspace, selectedThread, selectedPreferences);
-      const next = { ...current, draft: value, updatedAt: nowIso() };
-      metadataRef.current = { ...metadataRef.current, [selectedThread.id]: next };
-      setMetadata((all) => ({ ...all, [selectedThread.id]: next }));
+      const threadId = selectedThread.id;
+      const previousTimer = draftPersistenceTimers.current[threadId];
+      if (previousTimer != null) window.clearTimeout(previousTimer);
+      draftPersistenceTimers.current[threadId] = window.setTimeout(() => {
+        delete draftPersistenceTimers.current[threadId];
+        const current =
+          metadataRef.current[threadId] ??
+          createUiMetadata(
+            selectedWorkspace,
+            selectedThread,
+            selectedPreferences
+          );
+        const draft = threadDraftStore.get(threadId) ?? value;
+        void persistMetadata({
+          ...current,
+          draft,
+          updatedAt: nowIso()
+        });
+      }, 300);
     },
-    [selectedPreferences, selectedThread, selectedWorkspace]
+    [persistMetadata, selectedPreferences, selectedThread, selectedWorkspace]
   );
-
-  useEffect(() => {
-    if (!selectedMetadata) return;
-    const timer = window.setTimeout(() => {
-      void api.saveCodexThreadUiMetadata(selectedMetadata).catch(() => undefined);
-    }, 450);
-    return () => window.clearTimeout(timer);
-  }, [selectedMetadata?.draft]);
 
   const updatePreferences = useCallback(
     (preferences: ThreadPreferences) => {
@@ -1663,9 +1965,14 @@ export default function App() {
       const submittedAttachments = currentAttachments;
       const submittedSkills = currentSkills;
       const submittedPlugins = currentPlugins;
-      const originalMetadata =
+      const persistedMetadata =
         metadataRef.current[threadId] ??
         createUiMetadata(selectedWorkspace, selectedThread, selectedPreferences);
+      const currentDraft = threadDraftStore.get(threadId);
+      const originalMetadata =
+        currentDraft == null || currentDraft === persistedMetadata.draft
+          ? persistedMetadata
+          : { ...persistedMetadata, draft: currentDraft };
       const optimisticMetadata = {
         ...originalMetadata,
         draft: '',
@@ -1688,6 +1995,10 @@ export default function App() {
         ...metadataRef.current,
         [threadId]: optimisticMetadata
       };
+      const draftTimer = draftPersistenceTimers.current[threadId];
+      if (draftTimer != null) window.clearTimeout(draftTimer);
+      delete draftPersistenceTimers.current[threadId];
+      threadDraftStore.set(threadId, '');
       setMetadata((current) => ({
         ...current,
         [threadId]: optimisticMetadata
@@ -1776,6 +2087,7 @@ export default function App() {
           ...metadataRef.current,
           [threadId]: restoredMetadata
         };
+        threadDraftStore.set(threadId, restoredDraft);
         await persistMetadata(restoredMetadata);
         setAttachmentsByThread((current) => {
           const currentItems = current[threadId] ?? [];
@@ -1882,13 +2194,13 @@ export default function App() {
           showToast('Browser session stopped');
         }
         setBrowserDiagnostics(
-          await api.getBrowserDiagnostics(selectedThread.id)
+          await api.getBrowserDiagnostics(selectedThread.id, true)
         );
       } catch (error) {
         showToast(`Browser action failed: ${String(error)}`, 'error');
         try {
           setBrowserDiagnostics(
-            await api.getBrowserDiagnostics(selectedThread.id)
+            await api.getBrowserDiagnostics(selectedThread.id, true)
           );
         } catch {
           // Preserve the last useful dependency diagnostics.
@@ -1945,7 +2257,7 @@ export default function App() {
         [session.threadId]: session
       }));
       setBrowserDiagnostics(
-        await api.getBrowserDiagnostics(selectedThread.id)
+        await api.getBrowserDiagnostics(selectedThread.id, true)
       );
       showToast('Browser self test passed', 'success');
     } catch (error) {
@@ -3224,7 +3536,28 @@ export default function App() {
           updatePreferences({ ...selectedPreferences, reasoningEffort: effort.value })
       });
     }
-    for (const tier of activeModel?.serviceTiers ?? []) {
+    const activeServiceTiers = activeModel?.serviceTiers ?? [];
+    if (
+      activeServiceTiers.length &&
+      !activeServiceTiers.some((tier) => isNormalServiceTierId(tier.id))
+    ) {
+      actions.push({
+        id: `tier-${NORMAL_SERVICE_TIER_ID}`,
+        label: `Speed: ${serviceTierDisplayName(
+          undefined,
+          NORMAL_SERVICE_TIER_ID
+        )}`,
+        description: 'Use normal processing speed and usage',
+        icon: 'refresh',
+        disabled: !selectedThread,
+        run: () =>
+          updatePreferences({
+            ...selectedPreferences,
+            serviceTier: NORMAL_SERVICE_TIER_ID
+          })
+      });
+    }
+    for (const tier of activeServiceTiers) {
       actions.push({
         id: `tier-${tier.id}`,
         label: `Speed: ${serviceTierDisplayName(tier)}`,
@@ -3559,11 +3892,10 @@ export default function App() {
                     </div>
                   }
                 >
-                  <ConversationTimeline
-                    thread={selectedThread}
+                  <ConnectedConversationTimeline
+                    threadId={selectedThread.id}
                     approvals={selectedApprovals}
                     pendingSubmissions={currentPendingSubmissions}
-                    usage={codex.usage[selectedThread.id]}
                     recovering={selectedThreadRecovering}
                     onRespondToApproval={respondToApproval}
                     onRespondToUserInput={respondToUserInput}
@@ -3575,10 +3907,10 @@ export default function App() {
                     onOpenBrowser={openTimelineBrowser}
                   />
                 </Suspense>
-                <MessageComposer
+                <ConnectedMessageComposer
                   threadId={selectedThread.id}
                   workspacePath={selectedWorkspace.path}
-                  value={selectedMetadata?.draft ?? ''}
+                  persistedDraft={selectedMetadata?.draft ?? ''}
                   promptHistory={selectedMetadata?.promptHistory ?? []}
                   attachments={currentAttachments}
                   skills={runtimeSkills}
@@ -3625,8 +3957,8 @@ export default function App() {
               </section>
               {inspectorOpen ? (
                 <Suspense fallback={null}>
-                  <InspectorPanel
-                    thread={selectedThread}
+                  <ConnectedInspectorPanel
+                    threadId={selectedThread.id}
                     workspacePath={selectedWorkspace.path}
                     session={selectedSession}
                     metadata={selectedMetadata}
@@ -3790,86 +4122,101 @@ export default function App() {
         </div>
       ) : null}
 
-      <ProjectImportDialog
-        open={projectImportOpen}
-        projects={discoveredProjects}
-        loading={projectImportLoading}
-        busy={projectImportBusy}
-        error={projectImportError}
-        onRefresh={() => void scanCodexProjects()}
-        onImport={(paths) => void importCodexProjects(paths)}
-        onClose={() => {
-          if (!projectImportBusy) setProjectImportOpen(false);
-        }}
-      />
-      <CloneRepositoryDialog
-        open={cloneOpen}
-        destinationParent={cloneDestinationParent}
-        busy={cloneBusy}
-        error={cloneError}
-        onChooseDestination={() => void chooseCloneDestination()}
-        onClone={(repository) => void cloneRepository(repository)}
-        onClose={() => {
-          if (!cloneBusy) setCloneOpen(false);
-        }}
-      />
-      <ManageProjectsDialog
-        open={manageProjectsOpen}
-        workspaces={workspaces}
-        threadsByWorkspace={threadsByWorkspace}
-        gitInfoByWorkspace={gitInfoByWorkspace}
-        focusedWorkspaceId={managedWorkspaceId}
-        onOpen={(workspaceId) => {
-          selectProject(workspaceId);
-          setManageProjectsOpen(false);
-        }}
-        onReveal={(workspaceId) => {
-          const workspace = workspacesRef.current.find(
-            (candidate) => candidate.id === workspaceId
-          );
-          if (workspace) {
-            void api
-              .openInFinder(workspace.path)
-              .catch((error) => showToast(`Could not reveal project: ${String(error)}`, 'error'));
-          }
-        }}
-        onRename={(workspaceId) => {
-          setManageProjectsOpen(false);
-          renameProject(workspaceId);
-        }}
-        onTogglePin={(workspaceId) => {
-          const workspace = workspacesRef.current.find(
-            (candidate) => candidate.id === workspaceId
-          );
-          if (workspace) {
-            void updateProject(
-              workspace.id,
-              { isPinned: !workspace.isPinned },
-              { isPinned: !workspace.isPinned }
-            );
-          }
-        }}
-        onMove={moveManagedProject}
-        onImportThreads={(workspaceId) => {
-          const workspace = workspacesRef.current.find(
-            (candidate) => candidate.id === workspaceId
-          );
-          if (workspace) void refreshThreads(workspace);
-        }}
-        onRemove={(workspaceId) => void removeProject(workspaceId)}
-        onClose={() => setManageProjectsOpen(false)}
-      />
-      <ProjectIconDialog
-        workspace={
-          projectIconWorkspaceId
-            ? workspaces.find((workspace) => workspace.id === projectIconWorkspaceId) ?? null
-            : null
-        }
-        onSelect={(preference) => void setProjectIcon(preference)}
-        onClose={() => setProjectIconWorkspaceId(null)}
-      />
-
-      <CommandPalette open={paletteOpen} actions={paletteActions} onClose={() => setPaletteOpen(false)} />
+      <Suspense fallback={null}>
+        {projectImportOpen ? (
+          <ProjectImportDialog
+            open
+            projects={discoveredProjects}
+            loading={projectImportLoading}
+            busy={projectImportBusy}
+            error={projectImportError}
+            onRefresh={() => void scanCodexProjects()}
+            onImport={(paths) => void importCodexProjects(paths)}
+            onClose={() => {
+              if (!projectImportBusy) setProjectImportOpen(false);
+            }}
+          />
+        ) : null}
+        {cloneOpen ? (
+          <CloneRepositoryDialog
+            open
+            destinationParent={cloneDestinationParent}
+            busy={cloneBusy}
+            error={cloneError}
+            onChooseDestination={() => void chooseCloneDestination()}
+            onClone={(repository) => void cloneRepository(repository)}
+            onClose={() => {
+              if (!cloneBusy) setCloneOpen(false);
+            }}
+          />
+        ) : null}
+        {manageProjectsOpen ? (
+          <ManageProjectsDialog
+            open
+            workspaces={workspaces}
+            threadsByWorkspace={threadsByWorkspace}
+            gitInfoByWorkspace={gitInfoByWorkspace}
+            focusedWorkspaceId={managedWorkspaceId}
+            onOpen={(workspaceId) => {
+              selectProject(workspaceId);
+              setManageProjectsOpen(false);
+            }}
+            onReveal={(workspaceId) => {
+              const workspace = workspacesRef.current.find(
+                (candidate) => candidate.id === workspaceId
+              );
+              if (workspace) {
+                void api
+                  .openInFinder(workspace.path)
+                  .catch((error) => showToast(`Could not reveal project: ${String(error)}`, 'error'));
+              }
+            }}
+            onRename={(workspaceId) => {
+              setManageProjectsOpen(false);
+              renameProject(workspaceId);
+            }}
+            onTogglePin={(workspaceId) => {
+              const workspace = workspacesRef.current.find(
+                (candidate) => candidate.id === workspaceId
+              );
+              if (workspace) {
+                void updateProject(
+                  workspace.id,
+                  { isPinned: !workspace.isPinned },
+                  { isPinned: !workspace.isPinned }
+                );
+              }
+            }}
+            onMove={moveManagedProject}
+            onImportThreads={(workspaceId) => {
+              const workspace = workspacesRef.current.find(
+                (candidate) => candidate.id === workspaceId
+              );
+              if (workspace) void refreshThreads(workspace);
+            }}
+            onRemove={(workspaceId) => void removeProject(workspaceId)}
+            onClose={() => setManageProjectsOpen(false)}
+          />
+        ) : null}
+        {projectIconWorkspaceId ? (
+          <ProjectIconDialog
+            workspace={
+              workspaces.find(
+                (workspace) => workspace.id === projectIconWorkspaceId
+              ) ?? null
+            }
+            onSelect={(preference) => void setProjectIcon(preference)}
+            onClose={() => setProjectIconWorkspaceId(null)}
+          />
+        ) : null}
+        {paletteOpen ? (
+          <CommandPalette
+            open
+            actions={paletteActions}
+            onClose={() => setPaletteOpen(false)}
+          />
+        ) : null}
+      </Suspense>
       {controlCenter ? (
         <Suspense fallback={null}>
           <ControlCenterDialog

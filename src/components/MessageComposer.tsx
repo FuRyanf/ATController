@@ -1,6 +1,8 @@
 import {
   memo,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -20,7 +22,11 @@ import type {
   PermissionMode,
   ThreadPreferences
 } from '../types';
-import { serviceTierDisplayName } from '../lib/codexLabels';
+import {
+  isNormalServiceTierId,
+  NORMAL_SERVICE_TIER_ID,
+  serviceTierDisplayName
+} from '../lib/codexLabels';
 import { INTERFACE_SCALE_CHANGED_EVENT } from '../lib/interfaceScale';
 import { AppIcon } from './AppIcon';
 
@@ -494,12 +500,24 @@ function MessageComposerComponent({
   const effectiveTier = serviceTiers.find(
     (tier) => tier.id === effectiveServiceTier
   );
-  const selectedTierId =
-    preferences.serviceTier ?? selectedModel?.defaultServiceTier ?? '';
+  const advertisedNormalTier = serviceTiers.find((tier) =>
+    isNormalServiceTierId(tier.id)
+  );
+  const requestedTierId =
+    preferences.serviceTier ??
+    effectiveServiceTier ??
+    selectedModel?.defaultServiceTier ??
+    advertisedNormalTier?.id ??
+    NORMAL_SERVICE_TIER_ID;
+  const selectedTierId = isNormalServiceTierId(requestedTierId)
+    ? advertisedNormalTier?.id ?? NORMAL_SERVICE_TIER_ID
+    : requestedTierId;
   const selectedTier = serviceTiers.find((tier) => tier.id === selectedTierId);
   const speedDescription =
     selectedTier?.description ||
-    effectiveTier?.description ||
+    (isNormalServiceTierId(selectedTierId)
+      ? 'Uses normal Codex processing speed and usage.'
+      : effectiveTier?.description) ||
     'Controls the Codex runtime processing speed for future turns.';
   const canSubmit =
     connected &&
@@ -547,27 +565,36 @@ function MessageComposerComponent({
     setDragging(active);
   };
 
-  useEffect(() => {
+  const resizeTextarea = useCallback(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
-    const resize = () => {
-      textarea.style.height = '0px';
-      textarea.style.height = `${Math.min(240, Math.max(44, textarea.scrollHeight))}px`;
-    };
-    resize();
+    textarea.style.height = '0px';
+    textarea.style.height = `${Math.min(240, Math.max(44, textarea.scrollHeight))}px`;
+  }, []);
+
+  useLayoutEffect(() => {
+    resizeTextarea();
+    const textarea = textareaRef.current;
+    if (!textarea) return;
     if (pendingSelectionRef.current != null) {
       const cursor = pendingSelectionRef.current;
       pendingSelectionRef.current = null;
       textarea.focus();
       textarea.setSelectionRange(cursor, cursor);
     }
-    window.addEventListener('resize', resize);
-    window.addEventListener(INTERFACE_SCALE_CHANGED_EVENT, resize);
+  }, [resizeTextarea, threadId, value]);
+
+  useEffect(() => {
+    window.addEventListener('resize', resizeTextarea);
+    window.addEventListener(INTERFACE_SCALE_CHANGED_EVENT, resizeTextarea);
     return () => {
-      window.removeEventListener('resize', resize);
-      window.removeEventListener(INTERFACE_SCALE_CHANGED_EVENT, resize);
+      window.removeEventListener('resize', resizeTextarea);
+      window.removeEventListener(
+        INTERFACE_SCALE_CHANGED_EVENT,
+        resizeTextarea
+      );
     };
-  }, [threadId, value]);
+  }, [resizeTextarea]);
 
   useEffect(() => {
     const focus = () => textareaRef.current?.focus();
@@ -1229,11 +1256,12 @@ function MessageComposerComponent({
                     })
                   }
                 >
-                  {!selectedModel?.defaultServiceTier ? (
-                    <option value="">
-                      {effectiveTier
-                        ? `Speed: ${serviceTierDisplayName(effectiveTier)}`
-                        : 'Speed: Default'}
+                  {!advertisedNormalTier ? (
+                    <option value={NORMAL_SERVICE_TIER_ID}>
+                      {`Speed: ${serviceTierDisplayName(
+                        undefined,
+                        NORMAL_SERVICE_TIER_ID
+                      )}`}
                     </option>
                   ) : null}
                   {serviceTiers.map((tier) => (

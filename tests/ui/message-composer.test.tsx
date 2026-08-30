@@ -188,6 +188,33 @@ describe('Codex message composer', () => {
     );
   });
 
+  it('offers Normal when the runtime advertises only the Fast override', async () => {
+    const user = userEvent.setup();
+    const props = renderComposer({
+      models: [
+        {
+          ...model,
+          serviceTiers: [{ id: 'priority', name: 'Fast', description: '' }],
+          defaultServiceTier: null
+        }
+      ],
+      effectiveServiceTier: 'priority'
+    });
+    const speed = screen.getByRole('combobox', {
+      name: 'Speed'
+    }) as HTMLSelectElement;
+
+    expect(Array.from(speed.options, (option) => option.text)).toEqual([
+      'Speed: Normal',
+      'Speed: Fast'
+    ]);
+    await user.selectOptions(speed, 'default');
+    expect(props.onPreferencesChange).toHaveBeenCalledWith({
+      ...preferences,
+      serviceTier: 'default'
+    });
+  });
+
   it('opens plugins and project skills from an explicit inline Skills control', async () => {
     const user = userEvent.setup();
     const props = renderComposer({

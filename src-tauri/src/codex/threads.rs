@@ -14,6 +14,8 @@ use super::rpc::RequestOptions;
 use super::CodexRuntime;
 use crate::storage;
 
+const NORMAL_SERVICE_TIER_ID: &str = "default";
+
 impl CodexRuntime {
     pub async fn list_threads(
         self: &std::sync::Arc<Self>,
@@ -522,10 +524,11 @@ impl CodexRuntime {
             }
         }
         if let Some(service_tier) = &preferences.service_tier {
-            if !model
-                .service_tiers
-                .iter()
-                .any(|tier| tier.id == *service_tier)
+            if service_tier != NORMAL_SERVICE_TIER_ID
+                && !model
+                    .service_tiers
+                    .iter()
+                    .any(|tier| tier.id == *service_tier)
             {
                 return Err(anyhow!(
                     "Service tier `{service_tier}` is unsupported by {}",
@@ -890,7 +893,10 @@ fn permission_mode_label(permission: PermissionMode) -> &'static str {
 mod tests {
     use serde_json::json;
 
-    use super::{sandbox_policy, thread_open_params, turn_start_params, turn_steer_params};
+    use super::{
+        sandbox_policy, thread_open_params, turn_start_params, turn_steer_params,
+        NORMAL_SERVICE_TIER_ID,
+    };
     use crate::codex::protocol::{PermissionMode, ThreadPreferences};
 
     #[test]
@@ -927,6 +933,25 @@ mod tests {
             sandbox_policy(PermissionMode::FullAccess, "/tmp/project"),
             json!({"type":"dangerFullAccess"})
         );
+    }
+
+    #[test]
+    fn normal_speed_uses_codex_default_tier_override() {
+        let preferences = ThreadPreferences {
+            service_tier: Some(NORMAL_SERVICE_TIER_ID.to_string()),
+            ..ThreadPreferences::default()
+        };
+        let thread = thread_open_params("/tmp/project", &preferences, None);
+        let turn = turn_start_params(
+            "/tmp/project",
+            "thread-1",
+            "client-message-1",
+            vec![json!({"type":"text","text":"hello","text_elements":[]})],
+            &preferences,
+        );
+
+        assert_eq!(thread["serviceTier"], NORMAL_SERVICE_TIER_ID);
+        assert_eq!(turn["serviceTier"], NORMAL_SERVICE_TIER_ID);
     }
 
     #[test]

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { idleSessionsToRelease } from '../../src/lib/sessionRetention';
+import {
+  currentRunningTurn,
+  idleSessionsToRelease,
+  isThreadRunning,
+  shouldSweepSessionRetention
+} from '../../src/lib/sessionRetention';
 
 describe('Codex session retention', () => {
   it('releases the oldest inactive sessions above the idle limit', () => {
@@ -29,5 +34,29 @@ describe('Codex session retention', () => {
         maxIdleSessions: 0
       })
     ).toEqual(['idle-1', 'idle-2']);
+  });
+
+  it('does not let a stale historical turn pin an idle session', () => {
+    const thread = {
+      turns: [
+        { id: 'stale', status: 'inProgress' },
+        { id: 'latest', status: 'completed' }
+      ]
+    };
+
+    expect(currentRunningTurn(thread)).toBeUndefined();
+    expect(isThreadRunning({ ...thread, status: 'idle' })).toBe(false);
+    expect(
+      currentRunningTurn({
+        turns: [...thread.turns, { id: 'active', status: 'inProgress' }]
+      })?.id
+    ).toBe('active');
+    expect(isThreadRunning({ ...thread, status: 'active' })).toBe(true);
+  });
+
+  it('retries retention when Codex publishes the post-turn idle status', () => {
+    expect(shouldSweepSessionRetention('turnCompleted', 'completed')).toBe(true);
+    expect(shouldSweepSessionRetention('threadStatusChanged', 'idle')).toBe(true);
+    expect(shouldSweepSessionRetention('threadStatusChanged', 'active')).toBe(false);
   });
 });

@@ -8,7 +8,7 @@ mod models;
 mod project_terminal;
 mod storage;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::{Manager, State};
@@ -38,10 +38,15 @@ struct AppState {
 async fn browser_get_diagnostics(
     state: State<'_, AppState>,
     thread_id: Option<String>,
+    probe_runtime: Option<bool>,
 ) -> Result<BrowserDiagnostics, String> {
     state
         .browser
-        .diagnostics(state.codex.clone(), thread_id)
+        .diagnostics(
+            state.codex.clone(),
+            thread_id,
+            probe_runtime.unwrap_or(false),
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -793,27 +798,91 @@ fn open_codex_configuration() -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn open_external_url(url: String) -> Result<(), String> {
+const GOOGLE_CHROME_APPLICATION: &str = "/Applications/Google Chrome.app";
+
+fn validate_external_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim();
     if trimmed.len() > 4_096 || trimmed.chars().any(char::is_control) {
         return Err("URL is invalid or too long".to_string());
     }
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+    let parsed = tauri::Url::parse(trimmed).map_err(|_| "URL is invalid".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("Only http(s) URLs are allowed".to_string());
     }
+    Ok(parsed.to_string())
+}
 
+fn external_open_arguments(url: &str, chrome_available: bool) -> Vec<String> {
+    if chrome_available {
+        vec![
+            "-a".to_string(),
+            "Google Chrome".to_string(),
+            url.to_string(),
+        ]
+    } else {
+        vec![url.to_string()]
+    }
+}
+
+fn run_system_open(arguments: &[String]) -> Result<bool, String> {
     std::process::Command::new("/usr/bin/open")
-        .arg(trimmed)
+        .args(arguments)
         .status()
+        .map(|status| status.success())
         .map_err(|error| error.to_string())
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err("Failed to open URL".to_string())
+}
+
+fn launch_external_url(url: &str) -> Result<(), String> {
+    let url = validate_external_url(url)?;
+    let chrome_available = Path::new(GOOGLE_CHROME_APPLICATION).is_dir();
+    if chrome_available && run_system_open(&external_open_arguments(&url, true))? {
+        return Ok(());
+    }
+
+    if run_system_open(&external_open_arguments(&url, false))? {
+        Ok(())
+    } else {
+        Err("Failed to open URL".to_string())
+    }
+}
+
+fn is_internal_app_navigation(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" | "asset" | "customprotocol" => true,
+        "http" | "https" if url.host_str() == Some("tauri.localhost") => true,
+        "http"
+            if cfg!(debug_assertions)
+                && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+                && url.port() == Some(1420) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn external_navigation_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("external-navigation")
+        .on_navigation(|webview, url| {
+            if is_internal_app_navigation(url) {
+                return true;
             }
+            if webview.label() == "main" && matches!(url.scheme(), "http" | "https") {
+                let target = url.to_string();
+                std::thread::spawn(move || {
+                    if let Err(error) = launch_external_url(&target) {
+                        eprintln!("Could not redirect external navigation to the browser: {error}");
+                    }
+                });
+            }
+            false
         })
+        .build()
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    launch_external_url(&url)
 }
 
 #[tauri::command]
@@ -916,6 +985,7 @@ fn main() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(external_navigation_plugin())
         .enable_macos_default_menu(true)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -1062,7 +1132,9 @@ fn main() {
 
 #[cfg(test)]
 mod command_tests {
-    use super::shell_quote;
+    use super::{
+        external_open_arguments, is_internal_app_navigation, shell_quote, validate_external_url,
+    };
 
     #[test]
     fn project_shell_commands_escape_spaces_and_single_quotes() {
@@ -1070,5 +1142,41 @@ mod command_tests {
             shell_quote("/tmp/Project's workspace"),
             "'/tmp/Project'\\''s workspace'"
         );
+    }
+
+    #[test]
+    fn external_urls_are_validated_and_chrome_is_preferred() {
+        assert_eq!(
+            validate_external_url(" https://github.com/login?from=terminal ").unwrap(),
+            "https://github.com/login?from=terminal"
+        );
+        assert!(validate_external_url("javascript:alert(1)").is_err());
+        assert!(validate_external_url("file:///tmp/private").is_err());
+        assert!(validate_external_url("https://example.com/\nattack").is_err());
+
+        assert_eq!(
+            external_open_arguments("https://github.com/login", true),
+            vec!["-a", "Google Chrome", "https://github.com/login"]
+        );
+        assert_eq!(
+            external_open_arguments("https://github.com/login", false),
+            vec!["https://github.com/login"]
+        );
+    }
+
+    #[test]
+    fn only_application_origins_can_replace_the_main_webview() {
+        assert!(is_internal_app_navigation(
+            &tauri::Url::parse("tauri://localhost/index.html").unwrap()
+        ));
+        assert!(is_internal_app_navigation(
+            &tauri::Url::parse("http://tauri.localhost/index.html").unwrap()
+        ));
+        assert!(!is_internal_app_navigation(
+            &tauri::Url::parse("https://github.com/login").unwrap()
+        ));
+        assert!(!is_internal_app_navigation(
+            &tauri::Url::parse("javascript:alert(1)").unwrap()
+        ));
     }
 }

@@ -1697,6 +1697,7 @@ kbd {
   position: relative;
   min-height: 0;
   flex: 1;
+  contain: layout paint;
 }
 
 .thread-find-bar {
@@ -1901,7 +1902,6 @@ kbd {
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
-  animation: activity-pulse 1.5s ease-in-out infinite;
 }
 
 .pending-submission.accepted .pending-submission-status {
@@ -1911,7 +1911,6 @@ kbd {
 .pending-submission.accepted .pending-submission-status > span {
   background: var(--success);
   box-shadow: 0 0 0 2px var(--success-soft);
-  animation: none;
 }
 
 .pending-submission.failed .pending-submission-status {
@@ -1921,7 +1920,6 @@ kbd {
 .pending-submission.failed .pending-submission-status > span {
   background: var(--danger);
   box-shadow: 0 0 0 2px var(--danger-soft);
-  animation: none;
 }
 
 .timeline-message-attachments {
@@ -2261,13 +2259,6 @@ kbd {
   background: var(--text-tertiary);
   content: "";
   vertical-align: -2px;
-  animation: cursor-pulse 0.9s ease-in-out infinite;
-}
-
-@keyframes cursor-pulse {
-  50% {
-    opacity: 0.18;
-  }
 }
 
 .activity-card,
@@ -2624,7 +2615,7 @@ kbd {
   padding-left: 10px;
 }
 
-.activity-pulse {
+.activity-indicator {
   width: 7px;
   height: 7px;
   flex: 0 0 auto;
@@ -2632,17 +2623,10 @@ kbd {
   border-radius: 50%;
 }
 
-.activity-pulse.live {
+.activity-indicator.live {
   border-color: var(--purple);
   background: var(--purple);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--purple) 13%, transparent);
-  animation: activity-pulse 1.5s ease-in-out infinite;
-}
-
-@keyframes activity-pulse {
-  50% {
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--purple) 5%, transparent);
-  }
 }
 
 .plan-card {

@@ -77,6 +77,17 @@ function exitLabel(exit: ProjectTerminalExit): string {
   return `Exited with code ${exit.exitCode ?? 'unknown'}`;
 }
 
+export function normalizeTerminalExternalLink(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:'
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function ProjectTerminalShelf({
   open,
   workspace,
@@ -137,6 +148,17 @@ export function ProjectTerminalShelf({
       fontSize: 12,
       lineHeight: 1.2,
       macOptionIsMeta: true,
+      linkHandler: {
+        activate(_event, value) {
+          const url = normalizeTerminalExternalLink(value);
+          if (!url) return;
+          void api.openExternalUrl(url).catch((error) => {
+            onErrorRef.current(
+              `Could not open terminal link in your browser: ${String(error)}`
+            );
+          });
+        }
+      },
       scrollback: 8_000,
       smoothScrollDuration: 0,
       theme: terminalTheme()

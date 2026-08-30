@@ -1357,17 +1357,12 @@ pub fn normalize_notification(sequence: u64, method: &str, params: &Value) -> Co
         | "item/commandExecution/outputDelta"
         | "item/fileChange/outputDelta" => {
             event.delta = optional_string(params, "delta");
-            if method.contains("reasoning") {
-                event.data = Some(params.clone());
-            }
         }
         "item/mcpToolCall/progress" => {
             event.delta = optional_string(params, "message");
-            event.data = Some(params.clone());
         }
         "item/reasoning/summaryPartAdded" => {
             event.delta = Some(String::new());
-            event.data = Some(params.clone());
         }
         "item/fileChange/patchUpdated" => {
             event.item = Some(CodexItem {
@@ -1414,7 +1409,18 @@ pub fn normalize_notification(sequence: u64, method: &str, params: &Value) -> Co
                 ..CodexItem::default()
             });
         }
-        "turn/diff/updated" | "serverRequest/resolved" => event.data = Some(params.clone()),
+        // Git remains the source of truth for the inspector. The app server's
+        // full turn diff can be very large, and sending a duplicate across the
+        // WebKit bridge on every patch update creates avoidable serialization
+        // and garbage-collection pressure.
+        "turn/diff/updated" => {}
+        "serverRequest/resolved" => {
+            event.data = params
+                .get("requestId")
+                .cloned()
+                .map(|request_id| json!({ "requestId": request_id }));
+        }
+        "account/updated" | "account/rateLimits/updated" | "account/login/completed" => {}
         "error" => {
             event.error = params.get("error").map(normalize_error);
             if let Some(error) = event.error.as_mut() {
@@ -1539,6 +1545,7 @@ fn event_kind(method: &str) -> &'static str {
         "item/reasoning/summaryPartAdded" => "reasoningSummaryPartAdded",
         "item/reasoning/textDelta" => "reasoningDelta",
         "item/commandExecution/outputDelta" => "commandOutputDelta",
+        "item/fileChange/outputDelta" => "fileChangeOutputDelta",
         "item/fileChange/patchUpdated" => "fileChangeUpdated",
         "item/mcpToolCall/progress" => "mcpToolCallProgress",
         "turn/diff/updated" => "turnDiffUpdated",
@@ -2104,6 +2111,32 @@ mod tests {
             event.data.unwrap()["paths"][0],
             "/tmp/project/.github/skills/review/SKILL.md"
         );
+    }
+
+    #[test]
+    fn high_frequency_notifications_keep_only_ui_relevant_payloads() {
+        let diff = normalize_notification(
+            9,
+            "turn/diff/updated",
+            &json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "large duplicate diff"
+            }),
+        );
+        assert_eq!(diff.kind, "turnDiffUpdated");
+        assert!(diff.data.is_none());
+
+        let resolved = normalize_notification(
+            10,
+            "serverRequest/resolved",
+            &json!({
+                "threadId": "thread-1",
+                "requestId": 42,
+                "largeUnusedPayload": "not forwarded"
+            }),
+        );
+        assert_eq!(resolved.data.unwrap(), json!({ "requestId": 42 }));
     }
 
     #[test]

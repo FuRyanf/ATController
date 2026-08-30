@@ -35,6 +35,7 @@ const MAX_CACHE_FILES: usize = 160;
 const MAX_RECENT_ACTIVITIES: usize = 40;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+const MCP_RUNTIME_PROBE_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -245,6 +246,48 @@ struct BrowserRuntimeInner {
     app: OnceLock<AppHandle>,
     sessions: Mutex<BTreeMap<String, BrowserSessionMetadata>>,
     last_error: Mutex<Option<String>>,
+    mcp_runtime_probe_gate: tokio::sync::Mutex<()>,
+    mcp_runtime_probe_cache: Mutex<Option<CachedMcpRuntimeProbe>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpRuntimeProbe {
+    codex_can_see_server: bool,
+    codex_can_see_browser_tools: bool,
+    tool_names: Vec<String>,
+    mcp_server_version: Option<String>,
+    connection_state: String,
+    last_error: Option<String>,
+}
+
+impl McpRuntimeProbe {
+    fn unprobed(configured: bool) -> Self {
+        Self {
+            codex_can_see_server: false,
+            codex_can_see_browser_tools: false,
+            tool_names: Vec::new(),
+            mcp_server_version: None,
+            connection_state: if configured {
+                "configured".to_string()
+            } else {
+                "notConfigured".to_string()
+            },
+            last_error: None,
+        }
+    }
+}
+
+struct CachedMcpRuntimeProbe {
+    thread_id: Option<String>,
+    checked_at: Instant,
+    probe: McpRuntimeProbe,
+}
+
+impl CachedMcpRuntimeProbe {
+    fn is_fresh_for(&self, thread_id: Option<&str>, now: Instant) -> bool {
+        self.thread_id.as_deref() == thread_id
+            && now.saturating_duration_since(self.checked_at) <= MCP_RUNTIME_PROBE_TTL
+    }
 }
 
 impl Default for BrowserRuntime {
@@ -260,6 +303,8 @@ impl Default for BrowserRuntime {
                 app: OnceLock::new(),
                 sessions: Mutex::new(sessions),
                 last_error: Mutex::new(None),
+                mcp_runtime_probe_gate: tokio::sync::Mutex::new(()),
+                mcp_runtime_probe_cache: Mutex::new(None),
             }),
         }
     }
@@ -330,6 +375,7 @@ impl BrowserRuntime {
     }
 
     pub fn mark_disconnected(&self) {
+        self.invalidate_mcp_runtime_probe();
         let changed = {
             let Ok(mut sessions) = self.inner.sessions.lock() else {
                 return;
@@ -393,7 +439,7 @@ impl BrowserRuntime {
             return Err(anyhow!(plan.blockers.join(" ")));
         }
         if plan.ready {
-            return self.diagnostics(codex, None).await;
+            return self.diagnostics(codex, None, true).await;
         }
         if plan.requires_replacement {
             let existing = configurations
@@ -425,13 +471,15 @@ impl BrowserRuntime {
             .await
             .context("Playwright MCP configuration task failed")??;
         codex.reload_mcp_servers().await?;
-        self.diagnostics(codex, None).await
+        self.invalidate_mcp_runtime_probe();
+        self.diagnostics(codex, None, true).await
     }
 
     pub async fn diagnostics(
         &self,
         codex: Arc<CodexRuntime>,
         thread_id: Option<String>,
+        probe_runtime: bool,
     ) -> Result<BrowserDiagnostics> {
         if let Some(thread_id) = thread_id.as_deref() {
             validate_identifier(thread_id, "thread identifier")?;
@@ -450,49 +498,12 @@ impl BrowserRuntime {
             .get(PLAYWRIGHT_SERVER_NAME)
             .cloned()
             .unwrap_or_else(|| desired_configuration(&environment));
-        let mut tool_names = Vec::new();
-        let mut can_see_server = false;
-        let mut server_version = None;
-        let mut connection_state = if configuration.configured {
-            "configured".to_string()
+        let runtime_probe = if configuration.configured && probe_runtime {
+            self.probe_mcp_runtime(codex, thread_id.as_deref()).await
         } else {
-            "notConfigured".to_string()
+            McpRuntimeProbe::unprobed(configuration.configured)
         };
-        let mut runtime_error = None;
-        if configuration.configured {
-            match codex.mcp_server_status(thread_id.clone()).await {
-                Ok(statuses) => {
-                    if let Some(status) = statuses
-                        .get("data")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .find(|status| {
-                            status.get("name").and_then(Value::as_str)
-                                == Some(PLAYWRIGHT_SERVER_NAME)
-                        })
-                    {
-                        can_see_server = true;
-                        connection_state = "ready".to_string();
-                        server_version = status
-                            .pointer("/serverInfo/version")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        tool_names = status
-                            .get("tools")
-                            .and_then(Value::as_object)
-                            .map(|tools| tools.keys().cloned().collect::<Vec<_>>())
-                            .unwrap_or_default();
-                        tool_names.sort();
-                    }
-                }
-                Err(error) => {
-                    connection_state = "failed".to_string();
-                    runtime_error = Some(error.to_string());
-                }
-            }
-        }
-        let last_error = runtime_error.or_else(|| {
+        let last_error = runtime_probe.last_error.clone().or_else(|| {
             self.inner
                 .last_error
                 .lock()
@@ -505,16 +516,96 @@ impl BrowserRuntime {
             browser: environment.browser,
             playwright_browsers_available: environment.playwright_cached_browser.is_some(),
             configuration,
-            codex_can_see_server: can_see_server,
-            codex_can_see_browser_tools: tool_names.iter().any(|tool| tool.starts_with("browser_")),
-            tool_names,
-            mcp_server_version: server_version,
+            codex_can_see_server: runtime_probe.codex_can_see_server,
+            codex_can_see_browser_tools: runtime_probe.codex_can_see_browser_tools,
+            tool_names: runtime_probe.tool_names,
+            mcp_server_version: runtime_probe.mcp_server_version,
             mcp_process_id: None,
             browser_process_id: None,
             screenshot_cache_path: cache_root()?.to_string_lossy().to_string(),
-            connection_state,
+            connection_state: runtime_probe.connection_state,
             last_error,
         })
+    }
+
+    async fn probe_mcp_runtime(
+        &self,
+        codex: Arc<CodexRuntime>,
+        thread_id: Option<&str>,
+    ) -> McpRuntimeProbe {
+        if let Some(probe) = self.cached_mcp_runtime_probe(thread_id) {
+            return probe;
+        }
+
+        // A full status request starts every configured stdio MCP server. Keep
+        // same-thread callers behind one gate and recheck the cache after
+        // waiting so concurrent UI requests share a single expensive probe.
+        let _probe_guard = self.inner.mcp_runtime_probe_gate.lock().await;
+        if let Some(probe) = self.cached_mcp_runtime_probe(thread_id) {
+            return probe;
+        }
+
+        let mut probe = McpRuntimeProbe::unprobed(true);
+        match codex.mcp_server_status(thread_id.map(str::to_string)).await {
+            Ok(statuses) => {
+                if let Some(status) = statuses
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|status| {
+                        status.get("name").and_then(Value::as_str) == Some(PLAYWRIGHT_SERVER_NAME)
+                    })
+                {
+                    probe.codex_can_see_server = true;
+                    probe.connection_state = "ready".to_string();
+                    probe.mcp_server_version = status
+                        .pointer("/serverInfo/version")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    probe.tool_names = status
+                        .get("tools")
+                        .and_then(Value::as_object)
+                        .map(|tools| tools.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    probe.tool_names.sort();
+                    probe.codex_can_see_browser_tools = probe
+                        .tool_names
+                        .iter()
+                        .any(|tool| tool.starts_with("browser_"));
+                }
+            }
+            Err(error) => {
+                probe.connection_state = "failed".to_string();
+                probe.last_error = Some(error.to_string());
+            }
+        }
+        self.store_mcp_runtime_probe(thread_id, probe.clone());
+        probe
+    }
+
+    fn cached_mcp_runtime_probe(&self, thread_id: Option<&str>) -> Option<McpRuntimeProbe> {
+        let cache = self.inner.mcp_runtime_probe_cache.lock().ok()?;
+        cache
+            .as_ref()
+            .filter(|cached| cached.is_fresh_for(thread_id, Instant::now()))
+            .map(|cached| cached.probe.clone())
+    }
+
+    fn store_mcp_runtime_probe(&self, thread_id: Option<&str>, probe: McpRuntimeProbe) {
+        if let Ok(mut cache) = self.inner.mcp_runtime_probe_cache.lock() {
+            *cache = Some(CachedMcpRuntimeProbe {
+                thread_id: thread_id.map(str::to_string),
+                checked_at: Instant::now(),
+                probe,
+            });
+        }
+    }
+
+    fn invalidate_mcp_runtime_probe(&self) {
+        if let Ok(mut cache) = self.inner.mcp_runtime_probe_cache.lock() {
+            *cache = None;
+        }
     }
 
     pub async fn perform_action(
@@ -696,7 +787,7 @@ impl BrowserRuntime {
         let workspace_path = process::validate_workspace_path(&workspace_path)?;
         let started = Instant::now();
         let diagnostics = self
-            .diagnostics(codex.clone(), Some(thread_id.clone()))
+            .diagnostics(codex.clone(), Some(thread_id.clone()), true)
             .await?;
         if !diagnostics.configuration.configured {
             return Err(anyhow!(
@@ -2035,6 +2126,7 @@ impl LocalTestServer {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
 
@@ -2043,7 +2135,7 @@ mod tests {
         count_failed_requests, normalize_restored_sessions, parse_node_major,
         resolve_screenshot_reference, screenshot_reference_from_result, BrowserActivity,
         BrowserControlOwner, BrowserDependency, BrowserSessionMetadata, BrowserSessionState,
-        DetectedEnvironment,
+        CachedMcpRuntimeProbe, DetectedEnvironment, McpRuntimeProbe, MCP_RUNTIME_PROBE_TTL,
     };
 
     #[test]
@@ -2051,6 +2143,23 @@ mod tests {
         assert_eq!(parse_node_major("v22.12.0\n"), Some(22));
         assert_eq!(parse_node_major("18.20.1"), Some(18));
         assert_eq!(parse_node_major("not-node"), None);
+    }
+
+    #[test]
+    fn mcp_runtime_probe_cache_is_short_lived_and_thread_scoped() {
+        let checked_at = Instant::now();
+        let cached = CachedMcpRuntimeProbe {
+            thread_id: Some("thread-1".to_string()),
+            checked_at,
+            probe: McpRuntimeProbe::unprobed(true),
+        };
+
+        assert!(cached.is_fresh_for(Some("thread-1"), checked_at));
+        assert!(!cached.is_fresh_for(Some("thread-2"), checked_at));
+        assert!(!cached.is_fresh_for(
+            Some("thread-1"),
+            checked_at + MCP_RUNTIME_PROBE_TTL + Duration::from_millis(1)
+        ));
     }
 
     #[test]

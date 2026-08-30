@@ -10,7 +10,11 @@ import type {
   PermissionMode,
   Settings
 } from '../types';
-import { serviceTierDisplayName } from '../lib/codexLabels';
+import {
+  isNormalServiceTierId,
+  NORMAL_SERVICE_TIER_ID,
+  serviceTierDisplayName
+} from '../lib/codexLabels';
 import {
   formatUsageRemaining,
   formatUsageReset,
@@ -111,6 +115,18 @@ export function ControlCenterDialog({
     catalog?.models.find((model) => model.id === draft.defaultModel || model.model === draft.defaultModel) ??
     catalog?.models.find((model) => model.isDefault) ??
     catalog?.models[0];
+  const advertisedNormalTier = defaultModel?.serviceTiers.find((tier) =>
+    isNormalServiceTierId(tier.id)
+  );
+  const requestedDefaultTierId =
+    draft.defaultServiceTier ??
+    catalog?.configuredServiceTier ??
+    defaultModel?.defaultServiceTier ??
+    advertisedNormalTier?.id ??
+    NORMAL_SERVICE_TIER_ID;
+  const selectedDefaultTierId = isNormalServiceTierId(requestedDefaultTierId)
+    ? advertisedNormalTier?.id ?? NORMAL_SERVICE_TIER_ID
+    : requestedDefaultTierId;
 
   return (
     <div className="modal-backdrop" onPointerDown={onClose}>
@@ -270,11 +286,7 @@ export function ControlCenterDialog({
                     <span>Speed</span>
                     <select
                       aria-label="Speed"
-                      value={
-                        draft.defaultServiceTier ??
-                        defaultModel.defaultServiceTier ??
-                        ''
-                      }
+                      value={selectedDefaultTierId}
                       onChange={(event) =>
                         setDraft({
                           ...draft,
@@ -282,8 +294,10 @@ export function ControlCenterDialog({
                         })
                       }
                     >
-                      {!defaultModel.defaultServiceTier ? (
-                        <option value="">Default speed</option>
+                      {!advertisedNormalTier ? (
+                        <option value={NORMAL_SERVICE_TIER_ID}>
+                          {serviceTierDisplayName(undefined, NORMAL_SERVICE_TIER_ID)}
+                        </option>
                       ) : null}
                       {defaultModel.serviceTiers.map((tier) => (
                         <option key={tier.id} value={tier.id}>

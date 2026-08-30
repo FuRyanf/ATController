@@ -27,8 +27,10 @@ function thread(): CodexThread {
 }
 
 function snapshot(): CodexStoreSnapshot {
+  const initialThread = thread();
   return {
-    threads: { 'thread-1': thread() },
+    threads: { 'thread-1': initialThread },
+    navigationThreads: { 'thread-1': initialThread },
     sessions: {},
     approvals: {},
     usage: {},
@@ -80,6 +82,30 @@ describe('structured Codex event reduction', () => {
     expect(store.getSnapshot().lastSequence).toBe(400);
   });
 
+  it('drains large backlogs without dropping events while compacting the queue', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    for (let sequence = 1; sequence <= 10_000; sequence += 1) {
+      store.queueEvent(
+        event({ sequence, kind: 'generic', method: `future/event/${sequence}` })
+      );
+    }
+
+    expect(store.getSnapshot().lastSequence).toBeGreaterThan(0);
+
+    let timestamp = 0;
+    while (frames.length) {
+      frames.shift()?.(timestamp++);
+    }
+
+    expect(store.getSnapshot().lastSequence).toBe(10_000);
+  });
+
   it('coalesces streaming deltas before they enter the frame queue', () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -106,6 +132,33 @@ describe('structured Codex event reduction', () => {
     expect(
       store.getSnapshot().threads['thread-1'].turns[0].items[0].text
     ).toHaveLength(2_000);
+  });
+
+  it('does not publish new thread maps for unchanged list refreshes', () => {
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    const before = store.getSnapshot();
+
+    store.upsertThreads([thread()]);
+    expect(store.getSnapshot()).toBe(before);
+
+    store.replaceWorkspaceThreads('/tmp/project', false, [thread()]);
+    expect(store.getSnapshot()).toBe(before);
+  });
+
+  it('publishes navigation changes when a refreshed thread header changes', () => {
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    const before = store.getSnapshot();
+
+    store.replaceWorkspaceThreads('/tmp/project', false, [
+      { ...thread(), title: 'Renamed thread', updatedAt: 3 }
+    ]);
+
+    expect(store.getSnapshot()).not.toBe(before);
+    expect(store.getSnapshot().navigationThreads['thread-1'].title).toBe(
+      'Renamed thread'
+    );
   });
 
   it('coalesces adjacent high-frequency deltas without crossing item boundaries', () => {
@@ -162,9 +215,67 @@ describe('structured Codex event reduction', () => {
     );
 
     expect(after.threads).toBe(before.threads);
+    expect(after.navigationThreads).toBe(before.navigationThreads);
     expect(after.approvals).toBe(before.approvals);
     expect(after.usage).toBe(before.usage);
     expect(after.lastSequence).toBe(1);
+  });
+
+  it('keeps navigation state stable while content streams, then updates on lifecycle changes', () => {
+    let state = reduceCodexEvent(
+      snapshot(),
+      event({
+        sequence: 1,
+        kind: 'turnStarted',
+        method: 'turn/started',
+        turn: {
+          id: 'turn-streaming',
+          status: 'inProgress',
+          items: [],
+          itemsView: 'full'
+        }
+      })
+    );
+    const navigationWhileRunning = state.navigationThreads;
+    const fullThreadsWhileRunning = state.threads;
+
+    state = reduceCodexEvent(
+      state,
+      event({
+        sequence: 2,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-streaming',
+        itemId: 'agent-streaming',
+        delta: 'A streamed response chunk'
+      })
+    );
+
+    expect(state.threads).not.toBe(fullThreadsWhileRunning);
+    expect(state.navigationThreads).toBe(navigationWhileRunning);
+    expect(
+      state.navigationThreads['thread-1'].turns[0].items
+    ).toEqual([]);
+
+    state = reduceCodexEvent(
+      state,
+      event({
+        sequence: 3,
+        kind: 'turnCompleted',
+        method: 'turn/completed',
+        turn: {
+          id: 'turn-streaming',
+          status: 'completed',
+          items: [],
+          itemsView: 'full'
+        }
+      })
+    );
+
+    expect(state.navigationThreads).not.toBe(navigationWhileRunning);
+    expect(state.navigationThreads['thread-1'].turns[0].status).toBe(
+      'completed'
+    );
   });
 
   it('accepts item events before turn responses and streams into only that item', () => {
@@ -468,6 +579,9 @@ describe('structured Codex event reduction', () => {
       },
       instructionSources: []
     });
+
+    expect(store.getSnapshot().threads['thread-1'].turns).toHaveLength(1);
+    expect(store.getSnapshot().sessions['thread-1'].thread.turns).toEqual([]);
 
     store.clearSession('thread-1', true);
 

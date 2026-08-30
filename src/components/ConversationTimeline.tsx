@@ -3,6 +3,7 @@ import {
   isValidElement,
   memo,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -53,6 +54,8 @@ const EARLIER_TURN_PAGE_SIZE = 24;
 const THREAD_FIND_HIGHLIGHT = 'atcontroller-thread-find';
 const THREAD_FIND_ACTIVE_HIGHLIGHT = 'atcontroller-thread-find-active';
 const MAX_THREAD_FIND_MATCHES = 2_000;
+const LIVE_CONTENT_RENDER_INTERVAL_MS = 48;
+const MARKDOWN_PLUGINS = [remarkGfm];
 const LOCAL_DEVELOPMENT_URL =
   /https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(?::\d{1,5})?(?:\/[^\s"'<>]*)?/gi;
 
@@ -281,7 +284,7 @@ export function classifyMarkdownLink(href?: string): MarkdownLinkTarget {
   }
 }
 
-function MarkdownContent({
+const MarkdownContent = memo(function MarkdownContent({
   text,
   onCopy,
   onOpenFile
@@ -361,13 +364,101 @@ function MarkdownContent({
   return (
     <div className="markdown-content">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={MARKDOWN_PLUGINS}
         components={components}
         skipHtml
       >
         {normalizeAgentMarkdown(text)}
       </ReactMarkdown>
     </div>
+  );
+});
+
+/**
+ * Structured deltas can arrive faster than WebKit can usefully paint them.
+ * Keep the authoritative value in the store while limiting expensive live
+ * content presentation to roughly 20 frames per second. Completion always
+ * renders the final value immediately.
+ */
+function useThrottledLiveText(value: string, live: boolean): string {
+  const [presented, setPresented] = useState(value);
+  const latest = useRef(value);
+  const timer = useRef<number | null>(null);
+  const lastPresentationAt = useRef(Date.now());
+
+  useEffect(() => {
+    latest.current = value;
+    if (!live) {
+      if (timer.current != null) window.clearTimeout(timer.current);
+      timer.current = null;
+      lastPresentationAt.current = Date.now();
+      setPresented((current) => (current === value ? current : value));
+      return;
+    }
+    if (timer.current != null || presented === value) return;
+    const elapsed = Date.now() - lastPresentationAt.current;
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      lastPresentationAt.current = Date.now();
+      const next = latest.current;
+      setPresented((current) => (current === next ? current : next));
+    }, Math.max(0, LIVE_CONTENT_RENDER_INTERVAL_MS - elapsed));
+  }, [live, presented, value]);
+
+  useEffect(
+    () => () => {
+      if (timer.current != null) window.clearTimeout(timer.current);
+    },
+    []
+  );
+
+  return live ? presented : value;
+}
+
+function AgentMessage({
+  item,
+  onCopy,
+  onOpenFile
+}: {
+  item: CodexItem;
+  onCopy: ConversationTimelineProps['onCopy'];
+  onOpenFile: ConversationTimelineProps['onOpenFile'];
+}) {
+  const text = item.text || '…';
+  const liveText = useThrottledLiveText(text, item.status === 'inProgress');
+  const deferredText = useDeferredValue(liveText);
+  const displayedText = item.status === 'inProgress' ? deferredText : text;
+  const markdown = useMemo(
+    () =>
+      item.status === 'inProgress'
+        ? ''
+        : normalizeAgentMarkdown(item.text ?? ''),
+    [item.status, item.text]
+  );
+  return (
+    <article
+      className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`}
+      data-item-id={item.id}
+    >
+      <MarkdownContent
+        text={displayedText}
+        onCopy={onCopy}
+        onOpenFile={onOpenFile}
+      />
+      {item.status !== 'inProgress' && markdown.trim() ? (
+        <div className="timeline-agent-message-actions" data-thread-find-ignore>
+          <button
+            type="button"
+            aria-label="Copy response as Markdown"
+            title="Copy response as Markdown"
+            onClick={() => onCopy(markdown, 'Markdown response')}
+          >
+            <AppIcon name="copy" size={12} />
+            <span>Copy Markdown</span>
+          </button>
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -457,7 +548,7 @@ function ReasoningItem({ item }: { item: CodexItem }) {
   return (
     <details className="activity-disclosure reasoning-card" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
-        <span className={`activity-pulse ${item.status === 'inProgress' ? 'live' : ''}`} />
+        <span className={`activity-indicator ${item.status === 'inProgress' ? 'live' : ''}`} />
         <span>{summary}</span>
         <span className="disclosure-action">{expanded ? 'Hide reasoning' : 'Show reasoning'}</span>
       </summary>
@@ -520,13 +611,27 @@ function CommandItem({
   const [fullCommand, setFullCommand] = useState(false);
   const running = item.status === 'inProgress';
   const output = item.output ?? '';
+  const liveOutput = useThrottledLiveText(output, running);
+  const deferredOutput = useDeferredValue(liveOutput);
+  const renderedOutput = running ? deferredOutput : output;
   const displayedOutput =
-    !expanded && output.length > 12_000
-      ? `… earlier output hidden …\n${output.slice(-12_000)}`
-      : output;
+    !expanded && renderedOutput.length > 12_000
+      ? `… earlier output hidden …\n${renderedOutput.slice(-12_000)}`
+      : renderedOutput;
   const command = item.command || 'Command details unavailable';
   const commandIsLong = command.length > 160 || command.includes('\n');
-  const localDevelopmentUrl = findLocalDevelopmentUrl(`${output}\n${command}`);
+  const detectedLocalDevelopmentUrl = useMemo(() => {
+    const boundedOutput =
+      renderedOutput.length <= 24_000
+        ? renderedOutput
+        : `${renderedOutput.slice(0, 4_096)}\n${renderedOutput.slice(-16_384)}`;
+    return findLocalDevelopmentUrl(`${command}\n${boundedOutput}`);
+  }, [command, renderedOutput]);
+  const retainedLocalDevelopmentUrl = useRef<string | null>(null);
+  if (detectedLocalDevelopmentUrl) {
+    retainedLocalDevelopmentUrl.current = detectedLocalDevelopmentUrl;
+  }
+  const localDevelopmentUrl = retainedLocalDevelopmentUrl.current;
   return (
     <article className={`activity-card command-card ${running ? 'running' : ''}`} data-item-id={item.id}>
       <header>
@@ -1058,34 +1163,13 @@ function TimelineItemComponent({
     case 'userMessage':
       return <UserMessage item={item} />;
     case 'agentMessage':
-      {
-        const markdown = item.text ? normalizeAgentMarkdown(item.text) : '';
-        return (
-          <article
-            className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`}
-            data-item-id={item.id}
-          >
-            <MarkdownContent
-              text={item.text || '…'}
-              onCopy={onCopy}
-              onOpenFile={onOpenFile}
-            />
-            {item.status !== 'inProgress' && markdown.trim() ? (
-              <div className="timeline-agent-message-actions" data-thread-find-ignore>
-                <button
-                  type="button"
-                  aria-label="Copy response as Markdown"
-                  title="Copy response as Markdown"
-                  onClick={() => onCopy(markdown, 'Markdown response')}
-                >
-                  <AppIcon name="copy" size={12} />
-                  <span>Copy Markdown</span>
-                </button>
-              </div>
-            ) : null}
-          </article>
-        );
-      }
+      return (
+        <AgentMessage
+          item={item}
+          onCopy={onCopy}
+          onOpenFile={onOpenFile}
+        />
+      );
     case 'reasoning':
       return <ReasoningItem item={item} />;
     case 'plan':
@@ -1452,11 +1536,15 @@ function ConversationTimelineComponent({
   const unassociatedApprovals = threadApprovals.filter(
     (approval) => !approval.turnId || !knownTurnIds.has(approval.turnId)
   );
-  const runningItems =
-    latestTurn?.status === 'inProgress'
-      ? latestTurn.items.filter((item) => item.status === 'inProgress')
-      : [];
-  const runningItem = runningItems.length ? runningItems[runningItems.length - 1] : undefined;
+  let runningItem: CodexItem | undefined;
+  if (latestTurn?.status === 'inProgress') {
+    for (let index = latestTurn.items.length - 1; index >= 0; index -= 1) {
+      if (latestTurn.items[index].status === 'inProgress') {
+        runningItem = latestTurn.items[index];
+        break;
+      }
+    }
+  }
   const usagePresentation = usage ? tokenUsagePresentation(usage) : null;
 
   return (
@@ -1615,7 +1703,7 @@ function ConversationTimelineComponent({
       </div>
       {runningItem ? (
         <div className="current-action">
-          <span className="activity-pulse live" />
+          <span className="activity-indicator live" />
           <span>
             {runningItem.kind === 'commandExecution'
               ? runningItem.command || 'Running command'

@@ -207,6 +207,41 @@ describe('ATController control center', () => {
     );
   });
 
+  it('can override a configured Fast tier with Normal speed', async () => {
+    const user = userEvent.setup();
+    const control = props();
+    const fastConfiguredCatalog: CodexRuntimeCatalog = {
+      ...catalog,
+      configuredServiceTier: 'priority',
+      models: catalog.models.map((model) => ({
+        ...model,
+        serviceTiers: [{ id: 'priority', name: 'Fast', description: '' }],
+        defaultServiceTier: null
+      }))
+    };
+    render(
+      <ControlCenterDialog
+        {...control}
+        catalog={fastConfiguredCatalog}
+      />
+    );
+    const speed = screen.getByRole('combobox', {
+      name: 'Speed'
+    }) as HTMLSelectElement;
+
+    expect(speed).toHaveDisplayValue('Fast');
+    expect(Array.from(speed.options, (option) => option.text)).toEqual([
+      'Normal',
+      'Fast'
+    ]);
+    await user.selectOptions(speed, 'default');
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    expect(control.onSaveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultServiceTier: 'default' })
+    );
+  });
+
   it('shows runtime health and invokes every recovery action', async () => {
     const user = userEvent.setup();
     const control = { ...props(), initialTab: 'diagnostics' as const };

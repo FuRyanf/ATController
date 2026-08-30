@@ -13,6 +13,12 @@ import type {
 
 export interface CodexStoreSnapshot {
   threads: Readonly<Record<string, CodexThread>>;
+  /**
+   * Lightweight thread records for navigation chrome. Turn items are omitted
+   * and the map remains referentially stable while only streamed content
+   * changes, so the application shell does not rerender for every delta.
+   */
+  navigationThreads: Readonly<Record<string, CodexThread>>;
   sessions: Readonly<Record<string, CodexThreadSession>>;
   approvals: Readonly<Record<string, CodexApprovalRequest>>;
   usage: Readonly<Record<string, CodexTokenUsage>>;
@@ -27,6 +33,7 @@ type Listener = () => void;
 // release thousands of buffered notifications at once; reducing all of them in
 // one callback makes WebKit stop servicing pointer and paint events.
 const MAX_EVENTS_PER_FRAME = 128;
+const MAX_PENDING_EVENTS = 2_048;
 const MAX_RENDERED_COMMAND_OUTPUT_CHARACTERS = 128_000;
 const OUTPUT_TRUNCATION_MARKER = '[Earlier command output truncated]\n';
 const COALESCIBLE_DELTA_KINDS = new Set([
@@ -40,6 +47,7 @@ const COALESCIBLE_DELTA_KINDS = new Set([
 
 const EMPTY_SNAPSHOT: CodexStoreSnapshot = {
   threads: {},
+  navigationThreads: {},
   sessions: {},
   approvals: {},
   usage: {},
@@ -84,6 +92,18 @@ function boundedItem(item: CodexItem): CodexItem {
     : item;
 }
 
+function itemIndex(items: CodexItem[], itemId: string): number {
+  const lastIndex = items.length - 1;
+  if (lastIndex >= 0 && items[lastIndex].id === itemId) return lastIndex;
+  return items.findIndex((item) => item.id === itemId);
+}
+
+function turnIndex(turns: CodexTurn[], turnId: string): number {
+  const lastIndex = turns.length - 1;
+  if (lastIndex >= 0 && turns[lastIndex].id === turnId) return lastIndex;
+  return turns.findIndex((turn) => turn.id === turnId);
+}
+
 function mergeItem(existing: CodexItem | undefined, incoming: CodexItem): CodexItem {
   if (!existing) {
     return boundedItem(incoming);
@@ -102,7 +122,7 @@ function mergeItem(existing: CodexItem | undefined, incoming: CodexItem): CodexI
 }
 
 function upsertItem(turn: CodexTurn, item: CodexItem): CodexTurn {
-  const index = turn.items.findIndex((candidate) => candidate.id === item.id);
+  const index = itemIndex(turn.items, item.id);
   if (index < 0) {
     return { ...turn, items: [...turn.items, boundedItem(item)] };
   }
@@ -115,7 +135,7 @@ function appendItemDelta(turn: CodexTurn, event: CodexEvent): CodexTurn {
   if (!event.itemId || event.delta == null) {
     return turn;
   }
-  let index = turn.items.findIndex((item) => item.id === event.itemId);
+  let index = itemIndex(turn.items, event.itemId);
   let items = turn.items;
   if (index < 0) {
     const kind =
@@ -212,7 +232,7 @@ function mergeTurnStartResponse(
 }
 
 function upsertTurn(thread: CodexThread, incoming: CodexTurn): CodexThread {
-  const index = thread.turns.findIndex((turn) => turn.id === incoming.id);
+  const index = turnIndex(thread.turns, incoming.id);
   if (index < 0) {
     return { ...thread, turns: [...thread.turns, incoming] };
   }
@@ -226,7 +246,7 @@ function updateTurn(
   turnId: string,
   update: (turn: CodexTurn) => CodexTurn
 ): CodexThread {
-  const index = thread.turns.findIndex((turn) => turn.id === turnId);
+  const index = turnIndex(thread.turns, turnId);
   const turns = [...thread.turns];
   if (index < 0) {
     turns.push(update(emptyTurn(turnId)));
@@ -254,11 +274,80 @@ function placeholderThread(threadId: string): CodexThread {
   };
 }
 
+function lastTurn(thread: CodexThread): CodexTurn | undefined {
+  return thread.turns[thread.turns.length - 1];
+}
+
+function threadMetadataMatches(left: CodexThread, right: CodexThread): boolean {
+  return (
+    left.id === right.id &&
+    left.sessionId === right.sessionId &&
+    left.forkedFromId === right.forkedFromId &&
+    left.parentThreadId === right.parentThreadId &&
+    left.title === right.title &&
+    left.preview === right.preview &&
+    left.cwd === right.cwd &&
+    left.modelProvider === right.modelProvider &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    left.recencyAt === right.recencyAt &&
+    left.status === right.status &&
+    left.source === right.source &&
+    left.cliVersion === right.cliVersion &&
+    left.archived === right.archived
+  );
+}
+
+function navigationThreadMatches(
+  navigation: CodexThread | undefined,
+  thread: CodexThread
+): boolean {
+  if (!navigation) return false;
+  const navigationTurn = lastTurn(navigation);
+  const threadTurn = lastTurn(thread);
+  return (
+    threadMetadataMatches(navigation, thread) &&
+    navigationTurn?.id === threadTurn?.id &&
+    navigationTurn?.status === threadTurn?.status
+  );
+}
+
+function projectNavigationThread(thread: CodexThread): CodexThread {
+  const turn = lastTurn(thread);
+  return {
+    ...thread,
+    turns: turn
+      ? [
+          {
+            id: turn.id,
+            status: turn.status,
+            items: [],
+            itemsView: turn.itemsView
+          }
+        ]
+      : []
+  };
+}
+
+function upsertNavigationThread(
+  navigationThreads: Readonly<Record<string, CodexThread>>,
+  thread: CodexThread
+): Readonly<Record<string, CodexThread>> {
+  if (navigationThreadMatches(navigationThreads[thread.id], thread)) {
+    return navigationThreads;
+  }
+  return {
+    ...navigationThreads,
+    [thread.id]: projectNavigationThread(thread)
+  };
+}
+
 function mergeThread(existing: CodexThread | undefined, incoming: CodexThread): CodexThread {
   if (!existing) {
     return incoming;
   }
   if (incoming.turns.length === 0) {
+    if (threadMetadataMatches(existing, incoming)) return existing;
     return { ...existing, ...incoming, turns: existing.turns };
   }
 
@@ -299,6 +388,7 @@ export function reduceCodexEvent(
   }
 
   let threads = snapshot.threads;
+  let navigationThreads = snapshot.navigationThreads;
   let approvals: Readonly<Record<string, CodexApprovalRequest>> =
     snapshot.approvals;
   let usage: Readonly<Record<string, CodexTokenUsage>> = snapshot.usage;
@@ -310,9 +400,11 @@ export function reduceCodexEvent(
       ? mergeThread(existingThread, event.thread)
       : existingThread ?? placeholderThread(threadId);
     let threadChanged = Boolean(event.thread) || !existingThread;
+    let navigationChanged = threadChanged;
     if (event.turn) {
       thread = upsertTurn(thread, event.turn);
       threadChanged = true;
+      navigationChanged = true;
     }
     if (event.turnId && event.item) {
       thread = updateTurn(thread, event.turnId, (turn) => upsertItem(turn, event.item!));
@@ -325,28 +417,40 @@ export function reduceCodexEvent(
     if (event.kind === 'threadStatusChanged' && event.status) {
       thread = { ...thread, status: event.status };
       threadChanged = true;
+      navigationChanged = true;
     }
     if (event.kind === 'threadNameUpdated') {
       const name = dataIdentifier(event.data, 'name');
       if (name) {
         thread = { ...thread, title: name };
         threadChanged = true;
+        navigationChanged = true;
       }
     }
     if (event.kind === 'threadArchived') {
       thread = { ...thread, archived: true };
       threadChanged = true;
+      navigationChanged = true;
     }
     if (event.kind === 'threadUnarchived') {
       thread = { ...thread, archived: false };
       threadChanged = true;
+      navigationChanged = true;
     }
     if (event.kind === 'threadDeleted') {
       const next = { ...threads };
       delete next[threadId];
       threads = next;
+      if (Object.prototype.hasOwnProperty.call(navigationThreads, threadId)) {
+        const nextNavigation = { ...navigationThreads };
+        delete nextNavigation[threadId];
+        navigationThreads = nextNavigation;
+      }
     } else if (threadChanged) {
       threads = { ...threads, [threadId]: thread };
+      if (navigationChanged) {
+        navigationThreads = upsertNavigationThread(navigationThreads, thread);
+      }
     }
   }
 
@@ -371,6 +475,7 @@ export function reduceCodexEvent(
   return {
     ...snapshot,
     threads,
+    navigationThreads,
     approvals,
     usage,
     lastSequence: event.sequence,
@@ -426,6 +531,7 @@ export class CodexStore {
   private snapshot = EMPTY_SNAPSHOT;
   private listeners = new Set<Listener>();
   private pendingEvents: CodexEvent[] = [];
+  private pendingEventHead = 0;
   private frame: number | null = null;
 
   getSnapshot = (): CodexStoreSnapshot => this.snapshot;
@@ -455,6 +561,12 @@ export class CodexStore {
     } else {
       this.pendingEvents.push(event);
     }
+    if (this.pendingEvents.length - this.pendingEventHead >= MAX_PENDING_EVENTS) {
+      // Tauri can deliver a native batch faster than WebKit can paint. Apply
+      // one bounded reducer slice immediately at the high-water mark so the
+      // JS queue cannot grow without limit while preserving every event.
+      this.flushEvents();
+    }
     this.scheduleFlush();
   }
 
@@ -467,16 +579,36 @@ export class CodexStore {
   }
 
   flushEvents() {
-    if (this.pendingEvents.length === 0) {
+    const pendingCount = this.pendingEvents.length - this.pendingEventHead;
+    if (pendingCount === 0) {
+      this.pendingEvents = [];
+      this.pendingEventHead = 0;
       return;
     }
-    const events = this.pendingEvents.splice(0, MAX_EVENTS_PER_FRAME);
+    const end = Math.min(
+      this.pendingEvents.length,
+      this.pendingEventHead + MAX_EVENTS_PER_FRAME
+    );
+    const events = this.pendingEvents.slice(this.pendingEventHead, end);
+    this.pendingEventHead = end;
+    if (this.pendingEventHead === this.pendingEvents.length) {
+      this.pendingEvents = [];
+      this.pendingEventHead = 0;
+    } else if (
+      this.pendingEventHead >= 4_096 &&
+      this.pendingEventHead * 2 >= this.pendingEvents.length
+    ) {
+      // Avoid O(n) front-splices for large history bursts while periodically
+      // releasing consumed references once compaction is worthwhile.
+      this.pendingEvents = this.pendingEvents.slice(this.pendingEventHead);
+      this.pendingEventHead = 0;
+    }
     const next = coalesceCodexEvents(
       events.sort((left, right) => left.sequence - right.sequence)
     )
       .reduce(reduceCodexEvent, this.snapshot);
     this.publish(next);
-    if (this.pendingEvents.length > 0) {
+    if (this.pendingEvents.length - this.pendingEventHead > 0) {
       this.scheduleFlush();
     }
   }
@@ -494,13 +626,16 @@ export class CodexStore {
   }
 
   removeThread(threadId: string) {
-    this.pendingEvents = this.pendingEvents.filter(
+    this.pendingEvents = this.pendingEvents.slice(this.pendingEventHead).filter(
       (event) => event.threadId !== threadId && event.thread?.id !== threadId
     );
+    this.pendingEventHead = 0;
     const threads = { ...this.snapshot.threads };
+    const navigationThreads = { ...this.snapshot.navigationThreads };
     const sessions = { ...this.snapshot.sessions };
     const usage = { ...this.snapshot.usage };
     delete threads[threadId];
+    delete navigationThreads[threadId];
     delete sessions[threadId];
     delete usage[threadId];
     const approvals = Object.fromEntries(
@@ -511,6 +646,7 @@ export class CodexStore {
     this.publish({
       ...this.snapshot,
       threads,
+      navigationThreads,
       sessions,
       approvals,
       usage,
@@ -521,50 +657,125 @@ export class CodexStore {
 
   upsertThreads(incoming: CodexThread[]) {
     if (incoming.length === 0) return;
-    const threads = { ...this.snapshot.threads };
-    for (const thread of incoming) {
-      threads[thread.id] = mergeThread(threads[thread.id], thread);
+    let mutableThreads: Record<string, CodexThread> | null = null;
+    let navigationThreads = this.snapshot.navigationThreads;
+    for (const incomingThread of incoming) {
+      const threads = mutableThreads ?? this.snapshot.threads;
+      const existing = threads[incomingThread.id];
+      const thread = mergeThread(existing, incomingThread);
+      if (thread === existing) continue;
+      mutableThreads ??= { ...this.snapshot.threads };
+      mutableThreads[incomingThread.id] = thread;
+      navigationThreads = upsertNavigationThread(
+        navigationThreads,
+        thread
+      );
     }
-    this.publish({ ...this.snapshot, threads });
+    if (
+      mutableThreads == null &&
+      navigationThreads === this.snapshot.navigationThreads
+    ) {
+      return;
+    }
+    this.publish({
+      ...this.snapshot,
+      threads: mutableThreads ?? this.snapshot.threads,
+      navigationThreads
+    });
   }
 
   mergeTurnStartResponse(threadId: string, turn: CodexTurn) {
     const thread = this.snapshot.threads[threadId] ?? placeholderThread(threadId);
     const existing = thread.turns.find((candidate) => candidate.id === turn.id);
     const merged = mergeTurnStartResponse(existing, turn);
+    const nextThread = upsertTurn(thread, merged);
     this.publish({
       ...this.snapshot,
       threads: {
         ...this.snapshot.threads,
-        [threadId]: upsertTurn(thread, merged)
-      }
+        [threadId]: nextThread
+      },
+      navigationThreads: upsertNavigationThread(
+        this.snapshot.navigationThreads,
+        nextThread
+      )
     });
   }
 
   replaceWorkspaceThreads(workspacePath: string, archived: boolean, incoming: CodexThread[]) {
     const incomingIds = new Set(incoming.map((thread) => thread.id));
-    const threads = Object.fromEntries(
-      Object.entries(this.snapshot.threads).filter(
-        ([threadId, thread]) =>
-          thread.cwd !== workspacePath || thread.archived !== archived || incomingIds.has(threadId)
-      )
-    );
-    for (const thread of incoming) {
-      threads[thread.id] = mergeThread(this.snapshot.threads[thread.id], thread);
+    let mutableThreads: Record<string, CodexThread> | null = null;
+    let mutableNavigationThreads: Record<string, CodexThread> | null = null;
+    let navigationThreads = this.snapshot.navigationThreads;
+    for (const [threadId, thread] of Object.entries(this.snapshot.threads)) {
+      if (
+        thread.cwd === workspacePath &&
+        thread.archived === archived &&
+        !incomingIds.has(threadId)
+      ) {
+        mutableThreads ??= { ...this.snapshot.threads };
+        delete mutableThreads[threadId];
+        if (Object.prototype.hasOwnProperty.call(navigationThreads, threadId)) {
+          mutableNavigationThreads ??= { ...navigationThreads };
+          delete mutableNavigationThreads[threadId];
+          navigationThreads = mutableNavigationThreads;
+        }
+      }
     }
-    this.publish({ ...this.snapshot, threads });
+    for (const incomingThread of incoming) {
+      const threads = mutableThreads ?? this.snapshot.threads;
+      const existing = threads[incomingThread.id];
+      const thread = mergeThread(existing, incomingThread);
+      if (thread === existing) continue;
+      mutableThreads ??= { ...this.snapshot.threads };
+      mutableThreads[incomingThread.id] = thread;
+      navigationThreads = upsertNavigationThread(
+        navigationThreads,
+        thread
+      );
+    }
+    if (
+      mutableThreads == null &&
+      navigationThreads === this.snapshot.navigationThreads
+    ) {
+      return;
+    }
+    this.publish({
+      ...this.snapshot,
+      threads: mutableThreads ?? this.snapshot.threads,
+      navigationThreads
+    });
   }
 
   setSession(session: CodexThreadSession) {
+    const thread = mergeThread(
+      this.snapshot.threads[session.thread.id],
+      session.thread
+    );
+    // Session presence and effective settings are the only session fields the
+    // UI consumes. Keeping the resume response's full thread here retains a
+    // second root to every historical item and streamed output, preventing an
+    // inactive thread from being collected when its canonical history is
+    // discarded.
+    const lightweightSession = session.thread.turns.length
+      ? {
+          ...session,
+          thread: { ...session.thread, turns: [] }
+        }
+      : session;
     this.publish({
       ...this.snapshot,
       threads: {
         ...this.snapshot.threads,
-        [session.thread.id]: mergeThread(this.snapshot.threads[session.thread.id], session.thread)
+        [session.thread.id]: thread
       },
+      navigationThreads: upsertNavigationThread(
+        this.snapshot.navigationThreads,
+        thread
+      ),
       sessions: {
         ...this.snapshot.sessions,
-        [session.thread.id]: session
+        [session.thread.id]: lightweightSession
       }
     });
   }
