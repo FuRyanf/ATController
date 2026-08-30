@@ -158,6 +158,97 @@ describe('structured Codex timeline', () => {
     );
   });
 
+  it('defers Markdown parsing until a streamed agent message completes', () => {
+    const thread = structuredThread();
+    thread.turns = [
+      {
+        id: 'turn-live',
+        status: 'inProgress',
+        itemsView: 'full',
+        items: [
+          {
+            id: 'agent-live',
+            kind: 'agentMessage',
+            status: 'inProgress',
+            text: 'Read [the docs](https://example.com/docs)',
+            summary: [],
+            reasoning: [],
+            content: [],
+            changes: []
+          }
+        ]
+      }
+    ];
+    const callbacks = {
+      onRespondToApproval: vi.fn(),
+      onRespondToUserInput: vi.fn(),
+      onCopy: vi.fn(),
+      onOpenFile: vi.fn(),
+      onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(),
+      onOpenTerminal: vi.fn()
+    };
+    const { rerender } = render(
+      <ConversationTimeline thread={thread} approvals={[]} {...callbacks} />
+    );
+
+    expect(screen.queryByRole('link', { name: 'the docs' })).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Read [the docs](https://example.com/docs)')
+    ).toBeInTheDocument();
+
+    const completed = structuredThread();
+    completed.turns = [
+      {
+        ...thread.turns[0],
+        status: 'completed',
+        items: [{ ...thread.turns[0].items[0], status: 'completed' }]
+      }
+    ];
+    rerender(
+      <ConversationTimeline thread={completed} approvals={[]} {...callbacks} />
+    );
+
+    expect(screen.getByRole('link', { name: 'the docs' })).toBeInTheDocument();
+  });
+
+  it('refreshes completed-turn actions when callback props change', () => {
+    const thread = structuredThread();
+    const firstCopy = vi.fn();
+    const secondCopy = vi.fn();
+    const callbacks = {
+      onRespondToApproval: vi.fn(),
+      onRespondToUserInput: vi.fn(),
+      onOpenFile: vi.fn(),
+      onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(),
+      onOpenTerminal: vi.fn()
+    };
+    const { rerender } = render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onCopy={firstCopy}
+        {...callbacks}
+      />
+    );
+    rerender(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onCopy={secondCopy}
+        {...callbacks}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy response as Markdown' }));
+    expect(firstCopy).not.toHaveBeenCalled();
+    expect(secondCopy).toHaveBeenCalledWith(
+      'Created the file and verified it.',
+      'Markdown response'
+    );
+  });
+
   it('uses the current context rather than cumulative thread tokens for context percentage', () => {
     expect(
       tokenUsagePresentation({

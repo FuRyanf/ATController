@@ -517,10 +517,6 @@ fn normalize_path_for_compare(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn paths_match(left: &Path, right: &Path) -> bool {
-    normalize_path_for_compare(left) == normalize_path_for_compare(right)
-}
-
 fn short_branch_name(branch_ref: &str) -> &str {
     branch_ref
         .trim()
@@ -574,6 +570,21 @@ fn list_worktrees(workspace_path: &str) -> Result<Vec<GitWorktreeEntry>> {
     Ok(entries)
 }
 
+fn current_worktree_index(workspace_path: &str, worktrees: &[GitWorktreeEntry]) -> Option<usize> {
+    let workspace = normalize_path_for_compare(Path::new(workspace_path));
+    worktrees
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let root = normalize_path_for_compare(&entry.path);
+            workspace
+                .starts_with(&root)
+                .then_some((index, root.components().count()))
+        })
+        .max_by_key(|(_, depth)| *depth)
+        .map(|(index, _)| index)
+}
+
 fn resolve_current_worktree_root(workspace_path: &str) -> Result<PathBuf> {
     let top_level = run_git_checked(workspace_path, &["rev-parse", "--show-toplevel"])?;
     if top_level.trim().is_empty() {
@@ -611,6 +622,49 @@ fn derive_linked_worktree_label(entry: &GitWorktreeEntry) -> Option<String> {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GitStatusSummary {
+    branch: Option<String>,
+    oid: Option<String>,
+    is_dirty: bool,
+    ahead: u32,
+    behind: u32,
+}
+
+fn parse_status_summary(output: &str) -> GitStatusSummary {
+    let mut summary = GitStatusSummary::default();
+    for record in output
+        .split('\0')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(value) = record.strip_prefix("# branch.head ") {
+            summary.branch = Some(value.to_string());
+        } else if let Some(value) = record.strip_prefix("# branch.oid ") {
+            summary.oid = Some(value.to_string());
+        } else if let Some(value) = record.strip_prefix("# branch.ab ") {
+            for count in value.split_whitespace() {
+                if let Some(value) = count.strip_prefix('+') {
+                    summary.ahead = value.parse::<u32>().unwrap_or(0);
+                } else if let Some(value) = count.strip_prefix('-') {
+                    summary.behind = value.parse::<u32>().unwrap_or(0);
+                }
+            }
+        } else if !record.starts_with("# ") && !record.starts_with("! ") {
+            summary.is_dirty = true;
+        }
+    }
+    summary
+}
+
+fn abbreviated_oid(oid: &str) -> Option<String> {
+    let oid = oid.trim();
+    if oid.is_empty() || oid.starts_with('(') {
+        return None;
+    }
+    Some(oid.chars().take(7).collect())
+}
+
 fn short_head_commit(workspace_path: &str) -> Result<Option<String>> {
     let commit = run_git(workspace_path, &["rev-parse", "--short", "HEAD"])?;
     if commit.trim().is_empty() {
@@ -620,51 +674,49 @@ fn short_head_commit(workspace_path: &str) -> Result<Option<String>> {
 }
 
 pub fn get_git_info(workspace_path: &str) -> Result<Option<GitInfo>> {
-    if !is_git_repo(workspace_path)? {
-        return Ok(None);
-    }
-
-    let mut branch = run_git(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    if branch.is_empty() {
-        return Ok(None);
-    }
-
-    let short_hash = run_git(workspace_path, &["rev-parse", "--short", "HEAD"])?;
-    if branch == "HEAD" && !short_hash.is_empty() {
-        branch = format!("(detached at {short_hash})");
-    }
-    let status = run_git(workspace_path, &["status", "--porcelain"])?;
-    let is_dirty = !status.trim().is_empty();
-    let ahead_behind = run_git(
+    // Porcelain v2 exposes HEAD, upstream divergence, and dirty state in one
+    // stable, machine-readable call. Keeping this consolidated matters because
+    // the selected project's Git chrome refreshes frequently while Codex runs.
+    let status = run_git_raw(
         workspace_path,
-        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        &["status", "--porcelain=v2", "--branch", "-z"],
     )?;
-    let (ahead, behind) = parse_ahead_behind(&ahead_behind);
-    let current_worktree_root = resolve_current_worktree_root(workspace_path)?;
+    let summary = parse_status_summary(&status);
+    let short_hash = summary.oid.as_deref().and_then(abbreviated_oid);
+    let (Some(mut branch), Some(short_hash)) = (summary.branch, short_hash) else {
+        return Ok(None);
+    };
+    if branch == "(detached)" {
+        let symbolic_branch = run_git(workspace_path, &["symbolic-ref", "--short", "-q", "HEAD"])?;
+        branch = if symbolic_branch.is_empty() {
+            format!("(detached at {short_hash})")
+        } else {
+            symbolic_branch
+        };
+    }
     let worktrees = list_worktrees(workspace_path)?;
-    let (is_main_worktree, worktree_label, worktree_path) = worktrees
-        .iter()
-        .enumerate()
-        .find(|(_, entry)| paths_match(&entry.path, &current_worktree_root))
-        .map(|(index, entry)| {
-            if index == 0 {
-                (true, None, None)
-            } else {
-                (
-                    false,
-                    derive_linked_worktree_label(entry),
-                    Some(canonicalize_path_or_original(&entry.path)),
-                )
-            }
-        })
-        .unwrap_or((true, None, None));
+    let (is_main_worktree, worktree_label, worktree_path) =
+        current_worktree_index(workspace_path, &worktrees)
+            .and_then(|index| worktrees.get(index).map(|entry| (index, entry)))
+            .map(|(index, entry)| {
+                if index == 0 {
+                    (true, None, None)
+                } else {
+                    (
+                        false,
+                        derive_linked_worktree_label(entry),
+                        Some(canonicalize_path_or_original(&entry.path)),
+                    )
+                }
+            })
+            .unwrap_or((true, None, None));
 
     Ok(Some(GitInfo {
         branch,
         short_hash,
-        is_dirty,
-        ahead,
-        behind,
+        is_dirty: summary.is_dirty,
+        ahead: summary.ahead,
+        behind: summary.behind,
         is_main_worktree,
         worktree_label,
         worktree_path,
@@ -880,28 +932,23 @@ fn parse_changed_files(status: &str) -> Vec<(String, String, bool)> {
 }
 
 pub fn list_branches(workspace_path: &str) -> Result<Vec<GitBranchEntry>> {
-    if !is_git_repo(workspace_path)? {
-        return Ok(Vec::new());
-    }
-
-    let current_branch = run_git(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let refs = run_git(
         workspace_path,
         &[
             "for-each-ref",
             "refs/heads/",
-            "--format=%(refname:short)\t%(committerdate:unix)",
+            "--format=%(HEAD)\t%(refname:short)\t%(committerdate:unix)",
             "--sort=-committerdate",
         ],
     )?;
 
     let mut branches = Vec::new();
     for line in refs.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
-        let mut parts = trimmed.splitn(2, '\t');
+        let mut parts = line.splitn(3, '\t');
+        let is_current = parts.next().is_some_and(|value| value.trim() == "*");
         let name = parts.next().unwrap_or_default().trim().to_string();
         if name.is_empty() {
             continue;
@@ -911,7 +958,7 @@ pub fn list_branches(workspace_path: &str) -> Result<Vec<GitBranchEntry>> {
             .and_then(|value| value.trim().parse::<i64>().ok())
             .unwrap_or(0);
         branches.push(GitBranchEntry {
-            is_current: name == current_branch,
+            is_current,
             name,
             last_commit_unix,
         });
@@ -921,7 +968,10 @@ pub fn list_branches(workspace_path: &str) -> Result<Vec<GitBranchEntry>> {
 }
 
 pub fn workspace_status(workspace_path: &str) -> Result<GitWorkspaceStatus> {
-    if !is_git_repo(workspace_path)? {
+    let status = run_git_raw(workspace_path, &["status", "--porcelain=v1", "-z"])?;
+    let changed = parse_changed_files(&status);
+    let uncommitted_files = changed.len() as u32;
+    if changed.is_empty() {
         return Ok(GitWorkspaceStatus {
             is_dirty: false,
             uncommitted_files: 0,
@@ -930,13 +980,18 @@ pub fn workspace_status(workspace_path: &str) -> Result<GitWorkspaceStatus> {
             files: Vec::new(),
         });
     }
-
-    let status = run_git_raw(workspace_path, &["status", "--porcelain=v1", "-z"])?;
-    let changed = parse_changed_files(&status);
-    let uncommitted_files = changed.len() as u32;
-    let unstaged_numstat = run_git(workspace_path, &["diff", "--numstat"])?;
-    let staged_numstat = run_git(workspace_path, &["diff", "--cached", "--numstat"])?;
-    let numstat = format!("{unstaged_numstat}\n{staged_numstat}");
+    // Compare the final working tree directly with HEAD. Summing the staged
+    // and unstaged diffs double-counts a line that was staged and then edited
+    // again. Repositories without an initial commit need the legacy fallback.
+    let numstat = match run_git_checked(workspace_path, &["diff", "--numstat", "HEAD"]) {
+        Ok(numstat) => numstat,
+        Err(_) if changed.iter().any(|(_, _, staged)| *staged) => {
+            let unstaged_numstat = run_git(workspace_path, &["diff", "--numstat"])?;
+            let staged_numstat = run_git(workspace_path, &["diff", "--cached", "--numstat"])?;
+            format!("{unstaged_numstat}\n{staged_numstat}")
+        }
+        Err(_) => String::new(),
+    };
     let per_file = parse_numstat(&numstat);
     let mut insertions = 0u32;
     let mut deletions = 0u32;
@@ -1078,19 +1133,6 @@ pub fn git_pull_master_for_new_thread(workspace_path: &str) -> Result<GitPullFor
         outcome: "pulled".to_string(),
         message,
     })
-}
-
-fn parse_ahead_behind(input: &str) -> (u32, u32) {
-    let mut parts = input.split_whitespace();
-    let ahead = parts
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0);
-    let behind = parts
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0);
-    (ahead, behind)
 }
 
 #[cfg(test)]
@@ -1249,12 +1291,86 @@ mod tests {
         assert_eq!(clean.behind, 0);
         assert!(clean.is_main_worktree);
         assert_eq!(clean.worktree_label, None);
+        let branches = list_branches(temp_repo.to_string_lossy().as_ref())
+            .expect("branch list should resolve");
+        assert_eq!(
+            branches
+                .iter()
+                .filter(|branch| branch.is_current)
+                .map(|branch| branch.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![clean.branch.as_str()]
+        );
 
         fs::write(temp_repo.join("README.md"), "changed\n").expect("failed to update file");
         let dirty = get_git_info(temp_repo.to_string_lossy().as_ref())
             .expect("git info should resolve after modification")
             .expect("repo should still be detected");
         assert!(dirty.is_dirty);
+
+        git(&temp_repo, &["restore", "README.md"]);
+        git(&temp_repo, &["checkout", "--detach"]);
+        let detached = get_git_info(temp_repo.to_string_lossy().as_ref())
+            .expect("detached Git info should resolve")
+            .expect("detached repository should be detected");
+        assert_eq!(
+            detached.branch,
+            format!("(detached at {})", detached.short_hash)
+        );
+
+        git(&temp_repo, &["checkout", "-b", "(detached)"]);
+        let parenthesized = get_git_info(temp_repo.to_string_lossy().as_ref())
+            .expect("parenthesized branch info should resolve")
+            .expect("parenthesized branch should be detected");
+        assert_eq!(parenthesized.branch, "(detached)");
+
+        let _ = fs::remove_dir_all(temp_repo);
+    }
+
+    #[test]
+    fn workspace_status_counts_the_final_tree_without_double_counting_the_index() {
+        let temp_repo =
+            std::env::temp_dir().join(format!("atcontroller-git-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
+        git(&temp_repo, &["init"]);
+        configure_test_author(&temp_repo);
+        fs::write(temp_repo.join("tracked.txt"), "one\n").expect("failed to write fixture");
+        git(&temp_repo, &["add", "tracked.txt"]);
+        git(&temp_repo, &["commit", "-m", "initial"]);
+
+        fs::write(temp_repo.join("tracked.txt"), "one\ntwo\n")
+            .expect("failed to write staged fixture");
+        git(&temp_repo, &["add", "tracked.txt"]);
+        fs::write(temp_repo.join("tracked.txt"), "one\nthree\n")
+            .expect("failed to write working-tree fixture");
+
+        let status = workspace_status(temp_repo.to_string_lossy().as_ref())
+            .expect("workspace status should resolve");
+        assert_eq!(status.uncommitted_files, 1);
+        assert_eq!(status.insertions, 1);
+        assert_eq!(status.deletions, 0);
+        assert_eq!(status.files[0].insertions, 1);
+        assert_eq!(status.files[0].deletions, 0);
+        assert!(status.files[0].staged);
+
+        let _ = fs::remove_dir_all(temp_repo);
+    }
+
+    #[test]
+    fn workspace_status_supports_an_unborn_repository() {
+        let temp_repo =
+            std::env::temp_dir().join(format!("atcontroller-git-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
+        git(&temp_repo, &["init"]);
+        fs::write(temp_repo.join("first.txt"), "one\ntwo\n").expect("failed to write fixture");
+        git(&temp_repo, &["add", "first.txt"]);
+
+        let status = workspace_status(temp_repo.to_string_lossy().as_ref())
+            .expect("unborn workspace status should resolve");
+        assert_eq!(status.uncommitted_files, 1);
+        assert_eq!(status.insertions, 2);
+        assert_eq!(status.deletions, 0);
+        assert!(status.files[0].staged);
 
         let _ = fs::remove_dir_all(temp_repo);
     }
@@ -1391,10 +1507,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_ahead_behind_counts() {
-        assert_eq!(parse_ahead_behind("3\t2"), (3, 2));
-        assert_eq!(parse_ahead_behind(""), (0, 0));
-        assert_eq!(parse_ahead_behind("bad input"), (0, 0));
+    fn parses_porcelain_v2_branch_and_workspace_state() {
+        assert_eq!(
+            parse_status_summary(concat!(
+                "# branch.oid abcdef1234567890\0",
+                "# branch.head feature/performance\0",
+                "# branch.upstream origin/feature/performance\0",
+                "# branch.ab +3 -2\0",
+                "1 .M N... 100644 100644 100644 abc def tracked.txt\0"
+            )),
+            GitStatusSummary {
+                branch: Some("feature/performance".to_string()),
+                oid: Some("abcdef1234567890".to_string()),
+                is_dirty: true,
+                ahead: 3,
+                behind: 2,
+            }
+        );
     }
 
     #[test]

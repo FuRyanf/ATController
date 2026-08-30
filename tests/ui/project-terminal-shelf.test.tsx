@@ -218,6 +218,65 @@ describe('Project Terminal shelf', () => {
     );
   });
 
+  it('buffers startup output and discards trailing bytes from an older session', async () => {
+    let resolveStart!: (session: {
+      id: string;
+      workspaceId: string;
+      cwd: string;
+      shell: string;
+      processId: number;
+    }) => void;
+    apiMocks.start.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStart = resolve;
+      })
+    );
+    render(
+      <ProjectTerminalShelf
+        open
+        workspace={workspace}
+        requestedCwd={workspace.path}
+        onClose={vi.fn()}
+        onError={vi.fn()}
+      />
+    );
+    await waitFor(() => expect(apiMocks.start).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      apiMocks.outputHandler?.({
+        sessionId: 'terminal-old',
+        workspaceId: workspace.id,
+        dataBase64: window.btoa('stale output'),
+        byteLength: 12
+      });
+      apiMocks.outputHandler?.({
+        sessionId: 'terminal-2',
+        workspaceId: workspace.id,
+        dataBase64: window.btoa('new prompt'),
+        byteLength: 10
+      });
+    });
+
+    const decodedWrites = () =>
+      terminalState.writes
+        .filter((value): value is Uint8Array => value instanceof Uint8Array)
+        .map((value) => new TextDecoder().decode(value));
+    expect(decodedWrites()).toEqual([]);
+
+    await act(async () => {
+      resolveStart({
+        id: 'terminal-2',
+        workspaceId: workspace.id,
+        cwd: workspace.path,
+        shell: '/bin/zsh',
+        processId: 456
+      });
+    });
+
+    await waitFor(() => expect(decodedWrites()).toContain('new prompt'));
+    expect(decodedWrites()).not.toContain('stale output');
+  });
+
   it('hides without stopping and exposes explicit restart and stop controls', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

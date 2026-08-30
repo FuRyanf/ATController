@@ -136,7 +136,9 @@ describe('structured Codex event reduction', () => {
 
   it('does not publish new thread maps for unchanged list refreshes', () => {
     const store = new CodexStore();
-    store.upsertThreads([thread()]);
+    const initial = thread();
+    store.upsertThreads([initial]);
+    expect(store.getSnapshot().threads['thread-1']).toBe(initial);
     const before = store.getSnapshot();
 
     store.upsertThreads([thread()]);
@@ -344,6 +346,68 @@ describe('structured Codex event reduction', () => {
     expect(output).toMatch(/^\[Earlier command output truncated\]/);
     expect(output).toHaveLength(128_035);
     expect(output.endsWith('latest')).toBe(true);
+  });
+
+  it('bounds oversized command output when history first enters the store', () => {
+    const store = new CodexStore();
+    const hydrated = thread();
+    hydrated.turns = [
+      {
+        id: 'turn-hydrated',
+        status: 'completed',
+        itemsView: 'full',
+        items: [
+          {
+            id: 'command-hydrated',
+            kind: 'commandExecution',
+            output: `${'a'.repeat(128_050)}latest`,
+            summary: [],
+            reasoning: [],
+            content: [],
+            changes: []
+          }
+        ]
+      }
+    ];
+
+    store.upsertThreads([hydrated]);
+
+    const output =
+      store.getSnapshot().threads['thread-1'].turns[0].items[0].output ?? '';
+    expect(output).toMatch(/^\[Earlier command output truncated\]/);
+    expect(output).toHaveLength(128_035);
+    expect(output.endsWith('latest')).toBe(true);
+    expect(hydrated.turns[0].items[0].output).toHaveLength(128_056);
+  });
+
+  it('sorts the exceptional out-of-order event path before reducing it', () => {
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    store.queueEvent(
+      event({
+        sequence: 2,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-reordered',
+        itemId: 'agent-reordered',
+        delta: 'B'
+      })
+    );
+    store.queueEvent(
+      event({
+        sequence: 1,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-reordered',
+        itemId: 'agent-reordered',
+        delta: 'A'
+      })
+    );
+    store.flushEvents();
+
+    expect(
+      store.getSnapshot().threads['thread-1'].turns[0].items[0].text
+    ).toBe('AB');
   });
 
   it('preserves separate streamed reasoning summary parts', () => {

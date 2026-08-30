@@ -18,6 +18,7 @@ pub const EXIT_EVENT: &str = "atcontroller://project-terminal-exit";
 
 const OUTPUT_QUEUE_CAPACITY: usize = 128;
 const OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
+const OUTPUT_EVENT_BATCH_BYTES: usize = 128 * 1024;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const MIN_COLS: u16 = 2;
 const MAX_COLS: u16 = 500;
@@ -60,6 +61,27 @@ enum TerminalFrame {
         signal: Option<String>,
         error: Option<String>,
     },
+}
+
+type TerminalExitState = (Option<u32>, Option<String>, Option<String>);
+
+fn collect_queued_output(
+    mut bytes: Vec<u8>,
+    frames: &mpsc::Receiver<TerminalFrame>,
+    exit: &mut Option<TerminalExitState>,
+) -> Vec<u8> {
+    while bytes.len() < OUTPUT_EVENT_BATCH_BYTES {
+        match frames.try_recv() {
+            Ok(TerminalFrame::Output(next)) => bytes.extend_from_slice(&next),
+            Ok(TerminalFrame::Exit {
+                exit_code,
+                signal,
+                error,
+            }) => *exit = Some((exit_code, signal, error)),
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    bytes
 }
 
 struct ProjectTerminalSession {
@@ -289,6 +311,11 @@ impl ProjectTerminalManager {
                 while let Ok(frame) = frames_rx.recv() {
                     match frame {
                         TerminalFrame::Output(bytes) => {
+                            // PTYs commonly yield many tiny reads during a
+                            // command burst. Drain only frames already waiting
+                            // in the bounded queue to reduce native-to-webview
+                            // event traffic without adding presentation delay.
+                            let bytes = collect_queued_output(bytes, &frames_rx, &mut exit);
                             let payload = ProjectTerminalOutput {
                                 session_id: emit_info.id.clone(),
                                 workspace_id: emit_info.workspace_id.clone(),
@@ -461,10 +488,35 @@ fn resolved_shell() -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::sync::mpsc;
 
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-    use super::{resolve_terminal_cwd, validated_size};
+    use super::{collect_queued_output, resolve_terminal_cwd, validated_size, TerminalFrame};
+
+    #[test]
+    fn queued_terminal_output_is_batched_without_losing_exit_state() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TerminalFrame::Output(b"second".to_vec()))
+            .expect("queue second output");
+        sender
+            .send(TerminalFrame::Exit {
+                exit_code: Some(0),
+                signal: None,
+                error: None,
+            })
+            .expect("queue exit");
+        sender
+            .send(TerminalFrame::Output(b"third".to_vec()))
+            .expect("queue trailing output");
+
+        let mut exit = None;
+        let output = collect_queued_output(b"first".to_vec(), &receiver, &mut exit);
+
+        assert_eq!(output, b"firstsecondthird");
+        assert_eq!(exit, Some((Some(0), None, None)));
+    }
 
     #[test]
     fn terminal_size_is_bounded() {

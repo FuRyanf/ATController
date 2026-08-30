@@ -440,11 +440,11 @@ function AgentMessage({
       className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`}
       data-item-id={item.id}
     >
-      <MarkdownContent
-        text={displayedText}
-        onCopy={onCopy}
-        onOpenFile={onOpenFile}
-      />
+      {item.status === 'inProgress' ? (
+        <TextContent text={displayedText} />
+      ) : (
+        <MarkdownContent text={text} onCopy={onCopy} onOpenFile={onOpenFile} />
+      )}
       {item.status !== 'inProgress' && markdown.trim() ? (
         <div className="timeline-agent-message-actions" data-thread-find-ignore>
           <button
@@ -1296,7 +1296,15 @@ const TurnBlock = memo(
   (previous, next) =>
     previous.turn === next.turn &&
     previous.approvals.length === next.approvals.length &&
-    previous.approvals.every((approval, index) => approval === next.approvals[index])
+    previous.approvals.every((approval, index) => approval === next.approvals[index]) &&
+    previous.onRespondToApproval === next.onRespondToApproval &&
+    previous.onRespondToUserInput === next.onRespondToUserInput &&
+    previous.onCopy === next.onCopy &&
+    previous.onOpenFile === next.onOpenFile &&
+    previous.onRevealPath === next.onRevealPath &&
+    previous.onRevertFile === next.onRevertFile &&
+    previous.onOpenTerminal === next.onOpenTerminal &&
+    previous.onOpenBrowser === next.onOpenBrowser
 );
 
 function ConversationTimelineComponent({
@@ -1529,12 +1537,20 @@ function ConversationTimelineComponent({
     }
     return grouped;
   }, [threadApprovals]);
-  const knownTurnIds = useMemo(
-    () => new Set(thread.turns.map((turn) => turn.id)),
-    [thread.turns]
-  );
-  const unassociatedApprovals = threadApprovals.filter(
-    (approval) => !approval.turnId || !knownTurnIds.has(approval.turnId)
+  const unassociatedApprovals = useMemo(
+    () => {
+      if (
+        threadApprovals.length === 0 ||
+        threadApprovals.every((approval) => !approval.turnId)
+      ) {
+        return threadApprovals;
+      }
+      const knownTurnIds = new Set(thread.turns.map((turn) => turn.id));
+      return threadApprovals.filter(
+        (approval) => !approval.turnId || !knownTurnIds.has(approval.turnId)
+      );
+    },
+    [thread.turns, threadApprovals]
   );
   let runningItem: CodexItem | undefined;
   if (latestTurn?.status === 'inProgress') {

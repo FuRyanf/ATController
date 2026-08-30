@@ -87,9 +87,36 @@ function boundedCommandOutput(value: string | null | undefined): string | undefi
 }
 
 function boundedItem(item: CodexItem): CodexItem {
-  return item.output != null
-    ? { ...item, output: boundedCommandOutput(item.output) }
-    : item;
+  if (item.output == null) return item;
+  const output = boundedCommandOutput(item.output);
+  return output === item.output ? item : { ...item, output };
+}
+
+function boundedItems(items: CodexItem[]): CodexItem[] {
+  let result: CodexItem[] | null = null;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = boundedItem(items[index]);
+    if (item === items[index]) continue;
+    result ??= [...items];
+    result[index] = item;
+  }
+  return result ?? items;
+}
+
+function boundedTurn(turn: CodexTurn): CodexTurn {
+  const items = boundedItems(turn.items);
+  return items === turn.items ? turn : { ...turn, items };
+}
+
+function boundedThread(thread: CodexThread): CodexThread {
+  let turns: CodexTurn[] | null = null;
+  for (let index = 0; index < thread.turns.length; index += 1) {
+    const turn = boundedTurn(thread.turns[index]);
+    if (turn === thread.turns[index]) continue;
+    turns ??= [...thread.turns];
+    turns[index] = turn;
+  }
+  return turns ? { ...thread, turns } : thread;
 }
 
 function itemIndex(items: CodexItem[], itemId: string): number {
@@ -194,9 +221,7 @@ function appendItemDelta(turn: CodexTurn, event: CodexEvent): CodexTurn {
 
 function mergeTurn(existing: CodexTurn | undefined, incoming: CodexTurn): CodexTurn {
   if (!existing) {
-    return incoming.items.length > 0
-      ? { ...incoming, items: incoming.items.map(boundedItem) }
-      : incoming;
+    return boundedTurn(incoming);
   }
   return {
     ...existing,
@@ -234,7 +259,7 @@ function mergeTurnStartResponse(
 function upsertTurn(thread: CodexThread, incoming: CodexTurn): CodexThread {
   const index = turnIndex(thread.turns, incoming.id);
   if (index < 0) {
-    return { ...thread, turns: [...thread.turns, incoming] };
+    return { ...thread, turns: [...thread.turns, mergeTurn(undefined, incoming)] };
   }
   const turns = [...thread.turns];
   turns[index] = mergeTurn(turns[index], incoming);
@@ -344,7 +369,7 @@ function upsertNavigationThread(
 
 function mergeThread(existing: CodexThread | undefined, incoming: CodexThread): CodexThread {
   if (!existing) {
-    return incoming;
+    return boundedThread(incoming);
   }
   if (incoming.turns.length === 0) {
     if (threadMetadataMatches(existing, incoming)) return existing;
@@ -488,6 +513,7 @@ export function reduceCodexEvent(
 
 function canCoalesceDelta(previous: CodexEvent, next: CodexEvent): boolean {
   return (
+    previous.sequence < next.sequence &&
     previous.delta != null &&
     next.delta != null &&
     COALESCIBLE_DELTA_KINDS.has(previous.kind) &&
@@ -525,6 +551,20 @@ export function coalesceCodexEvents(events: CodexEvent[]): CodexEvent[] {
     }
   }
   return result;
+}
+
+function prepareQueuedEvents(events: CodexEvent[]): CodexEvent[] {
+  for (let index = 1; index < events.length; index += 1) {
+    if (events[index - 1].sequence > events[index].sequence) {
+      return coalesceCodexEvents(
+        events.sort((left, right) => left.sequence - right.sequence)
+      );
+    }
+  }
+  // queueEvent already coalesces adjacent deltas. The native bridge normally
+  // delivers monotonically increasing sequences, so this path avoids another
+  // array allocation and O(n log n) sort on every animation-frame reducer pass.
+  return events;
 }
 
 export class CodexStore {
@@ -603,10 +643,10 @@ export class CodexStore {
       this.pendingEvents = this.pendingEvents.slice(this.pendingEventHead);
       this.pendingEventHead = 0;
     }
-    const next = coalesceCodexEvents(
-      events.sort((left, right) => left.sequence - right.sequence)
-    )
-      .reduce(reduceCodexEvent, this.snapshot);
+    const next = prepareQueuedEvents(events).reduce(
+      reduceCodexEvent,
+      this.snapshot
+    );
     this.publish(next);
     if (this.pendingEvents.length - this.pendingEventHead > 0) {
       this.scheduleFlush();
