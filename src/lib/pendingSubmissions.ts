@@ -1,6 +1,7 @@
 import type {
   CodexEvent,
   CodexItem,
+  CodexThread,
   CodexTurn,
   ComposerInput,
   PendingSubmissionResource,
@@ -90,6 +91,7 @@ export function eventAcknowledgesSubmission(
   if (event.threadId !== submission.threadId) return false;
   const messages = eventUserMessages(event);
   if (messages.some((item) => item.clientId === submission.clientId)) return true;
+  if (submission.turnId && submission.turnId !== eventTurnId(event)) return false;
 
   // Older compatible runtimes may omit the echoed client id. Restrict the
   // fallback to the new turn/item payload and the same thread so repeated
@@ -139,6 +141,7 @@ export function reconcilePendingSubmissions(
       const submissionIndex = submissions.findIndex(
         (submission, index) =>
           !matchedSubmissions.has(index) &&
+          (!submission.turnId || submission.turnId === eventTurnId(event)) &&
           (submission.text.trim()
             ? submission.text.trim() === messageText
             : messageText === '')
@@ -157,11 +160,12 @@ export function reconcilePendingSubmissions(
   }
 
   const turnId = eventTurnId(event);
-  if (event.kind === 'turnStarted' && turnId) {
-    // turn/started may arrive before the turn/start response. Bind the oldest
-    // unbound request now so a later completion can retire it reliably.
+  if ((event.kind === 'turnStarted' || event.kind === 'turnCompleted') && turnId) {
+    // turn/started may arrive before the response, or be omitted altogether.
+    // Bind the oldest request so its local copy stays with the correct turn.
     const unboundIndex = submissions.findIndex(
-      (submission) => submission.mode === 'turn' && !submission.turnId
+      (submission) =>
+        submission.mode === 'turn' && !submission.turnId && submission.status !== 'failed'
     );
     if (unboundIndex >= 0) {
       submissions = submissions.map((submission, index) =>
@@ -169,55 +173,52 @@ export function reconcilePendingSubmissions(
       );
       changed = true;
     }
-
-    // A newer turn proves any acknowledged submission attached to an older
-    // turn is no longer pending, even if its completion notification was lost.
-    const withoutStale = submissions.filter(
-      (submission) =>
-        !(
-          submission.status === 'accepted' &&
-          submission.turnId &&
-          submission.turnId !== turnId
-        )
-    );
-    if (withoutStale.length !== submissions.length) {
-      submissions = withoutStale;
-      changed = true;
-    }
   }
 
-  if (event.kind === 'turnCompleted' && turnId) {
-    const hasBoundSubmission = submissions.some(
-      (submission) => submission.turnId === turnId
-    );
-    let consumedUnboundTurn = false;
-    const withoutCompleted = submissions.filter((submission) => {
-      if (submission.turnId === turnId) return false;
-      if (
-        !hasBoundSubmission &&
-        !consumedUnboundTurn &&
-        submission.mode === 'turn' &&
-        !submission.turnId &&
-        submission.status !== 'failed'
-      ) {
-        // Defensive fallback for runtimes that omit turn/started. There can be
-        // only one newly starting turn per thread, so consume one request.
-        consumedUnboundTurn = true;
-        return false;
-      }
-      return true;
-    });
-    if (withoutCompleted.length !== submissions.length) {
-      submissions = withoutCompleted;
-      changed = true;
-    }
-  }
+  // Turn completion (or a later turn) says nothing about whether the UI has
+  // received the user's message. Keep its local copy until a matching item
+  // can replace it, including for accepted steers.
 
   if (!changed) return current;
   const next = { ...current };
   if (submissions.length) next[threadId] = submissions;
   else delete next[threadId];
   return next;
+}
+
+/** Exclude local copies only when their actual user items are in the timeline. */
+export function unacknowledgedSubmissions(
+  submissions: PendingUserSubmission[],
+  thread: CodexThread
+): PendingUserSubmission[] {
+  if (!submissions.length) return submissions;
+  let current: PendingSubmissionsByThread = { [thread.id]: submissions };
+  for (const turn of thread.turns) {
+    if (!current[thread.id].length) break;
+    const eligible = current[thread.id]?.filter(
+      (submission) =>
+        submission.turnId
+          ? submission.turnId === turn.id
+          : turn.items.some((item) => item.clientId === submission.clientId)
+    );
+    if (!eligible?.length) continue;
+    const remaining = reconcilePendingSubmissions({ [thread.id]: eligible }, {
+      sequence: 0,
+      kind: 'historyLoaded',
+      method: 'thread/read',
+      threadId: thread.id,
+      turnId: turn.id,
+      turn
+    })[thread.id] ?? [];
+    if (remaining.length === eligible.length) continue;
+    const acknowledged = new Set(eligible
+      .filter((submission) => !remaining.includes(submission))
+      .map((submission) => submission.clientId));
+    current = { [thread.id]: current[thread.id].filter(
+      (submission) => !acknowledged.has(submission.clientId)
+    ) };
+  }
+  return current[thread.id];
 }
 
 export function acceptPendingSubmission(

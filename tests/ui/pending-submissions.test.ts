@@ -7,11 +7,13 @@ import {
   reconcilePendingSubmissions,
   reconcileTurnStartResponse,
   removePendingSubmission,
+  unacknowledgedSubmissions,
   updatePendingSubmissionStatus
 } from '../../src/lib/pendingSubmissions';
 import type {
   CodexEvent,
   CodexItem,
+  CodexThread,
   CodexTurn,
   ComposerInput
 } from '../../src/types';
@@ -150,7 +152,7 @@ describe('optimistic user submissions', () => {
     ).toEqual({ 'thread-1': [second] });
   });
 
-  it('binds an early turn event and retires the submission on completion', () => {
+  it('keeps a bound submission until the actual user item arrives after completion', () => {
     const pending = createPendingSubmission(
       'thread-1',
       'client-1',
@@ -167,17 +169,20 @@ describe('optimistic user submissions', () => {
     const bound = reconcilePendingSubmissions({ 'thread-1': [pending] }, started);
     expect(bound['thread-1'][0].turnId).toBe('turn-9');
 
-    expect(
-      reconcilePendingSubmissions(bound, {
+    const completed = reconcilePendingSubmissions(bound, {
         ...started,
         sequence: 2,
         kind: 'turnCompleted',
         method: 'turn/completed'
-      })
-    ).toEqual({});
+    });
+    expect(completed).toEqual(bound);
+    expect(reconcilePendingSubmissions(completed, {
+      ...itemEvent('thread-1', userMessage('client-1', 'Run it')),
+      turnId: 'turn-9'
+    })).toEqual({});
   });
 
-  it('retires one unbound turn when a runtime omits turn/started', () => {
+  it('binds but preserves the prompt when a runtime omits turn/started', () => {
     const pending = createPendingSubmission(
       'thread-1',
       'client-1',
@@ -196,10 +201,10 @@ describe('optimistic user submissions', () => {
           turnId: 'turn-fast'
         }
       )
-    ).toEqual({});
+    ).toEqual({ 'thread-1': [{ ...pending, turnId: 'turn-fast' }] });
   });
 
-  it('retires every accepted steer when its active turn completes', () => {
+  it('preserves accepted steers when completion omits their user items', () => {
     const first = {
       ...createPendingSubmission('thread-1', 'client-1', 'steer', [
         { type: 'text', text: 'First steer' }
@@ -232,7 +237,45 @@ describe('optimistic user submissions', () => {
         threadId: 'thread-1',
         turnId: 'turn-1'
       })
-    ).toEqual({});
+    ).toEqual(accepted);
+  });
+
+  it('does not discard earlier prompts when a later turn starts', () => {
+    const pending = createPendingSubmission('thread-1', 'client-1', 'turn', [
+      { type: 'text', text: 'Keep the first question' }
+    ]);
+    const accepted = acceptPendingSubmission(
+      { 'thread-1': [pending] }, 'thread-1', 'client-1', 'turn-1'
+    );
+    expect(reconcilePendingSubmissions(accepted, {
+      sequence: 2, kind: 'turnStarted', method: 'turn/started',
+      threadId: 'thread-1', turnId: 'turn-2'
+    })).toEqual(accepted);
+  });
+
+  it('matches repeated prompts against their own turn when history is loaded', () => {
+    const pending = {
+      ...createPendingSubmission('thread-1', 'client-2', 'turn', [
+        { type: 'text', text: 'Same question' }
+      ]),
+      turnId: 'turn-2'
+    };
+    const oldTurn: CodexTurn = {
+      id: 'turn-1', status: 'completed', itemsView: 'full',
+      items: [userMessage(null, 'Same question')]
+    };
+    const history: CodexThread = {
+      id: 'thread-1', sessionId: 'thread-1', title: 'History', preview: '',
+      cwd: '/tmp/project', modelProvider: 'openai', createdAt: 1, updatedAt: 2,
+      status: 'idle', source: 'appServer', cliVersion: '', archived: false,
+      turns: [oldTurn]
+    };
+    expect(unacknowledgedSubmissions([pending], history)).toEqual([pending]);
+    expect(reconcilePendingSubmissions({ 'thread-1': [pending] },
+      itemEvent('thread-1', userMessage(null, 'Same question'))
+    )).toEqual({ 'thread-1': [pending] });
+    history.turns.push({ ...oldTurn, id: 'turn-2' });
+    expect(unacknowledgedSubmissions([pending], history)).toEqual([]);
   });
 
   it('uses the direct turn/start response as the authoritative acknowledgement', () => {

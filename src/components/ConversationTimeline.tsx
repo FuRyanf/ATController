@@ -15,6 +15,7 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { api } from '../lib/api';
+import { unacknowledgedSubmissions } from '../lib/pendingSubmissions';
 import type {
   BrowserActivity,
   CodexApprovalRequest,
@@ -26,6 +27,8 @@ import type {
   CodexTurn
 } from '../types';
 import { AppIcon } from './AppIcon';
+
+const EMPTY_SUBMISSIONS: PendingUserSubmission[] = [];
 
 interface ConversationTimelineProps {
   thread: CodexThread;
@@ -492,9 +495,11 @@ function UserMessage({ item }: { item: CodexItem }) {
 }
 
 function PendingUserMessage({
-  submission
+  submission,
+  settled = false
 }: {
   submission: PendingUserSubmission;
+  settled?: boolean;
 }) {
   const statusLabel =
     submission.status === 'failed'
@@ -528,7 +533,7 @@ function PendingUserMessage({
           ))}
         </div>
       ) : null}
-      <footer
+      {!settled || submission.status === 'failed' ? <footer
         className="pending-submission-status"
         role="status"
         aria-live="polite"
@@ -536,7 +541,7 @@ function PendingUserMessage({
       >
         <span aria-hidden="true" />
         {statusLabel}
-      </footer>
+      </footer> : null}
     </article>
   );
 }
@@ -1227,6 +1232,7 @@ const TimelineItem = memo(
 function TurnBlockComponent({
   turn,
   approvals,
+  pendingSubmissions = EMPTY_SUBMISSIONS,
   onRespondToApproval,
   onRespondToUserInput,
   onCopy,
@@ -1246,6 +1252,13 @@ function TurnBlockComponent({
   );
   return (
     <section className={`turn-block ${turn.status}`} data-turn-id={turn.id}>
+      {pendingSubmissions.filter((submission) => submission.mode === 'turn').map((submission) => (
+        <PendingUserMessage
+          key={submission.clientId}
+          submission={submission}
+          settled={turn.status !== 'inProgress'}
+        />
+      ))}
       {turn.items.map((item) => (
         <div className="timeline-item-wrap" key={item.id}>
           <TimelineItem
@@ -1265,6 +1278,13 @@ function TurnBlockComponent({
             />
           ) : null}
         </div>
+      ))}
+      {pendingSubmissions.filter((submission) => submission.mode === 'steer').map((submission) => (
+        <PendingUserMessage
+          key={submission.clientId}
+          submission={submission}
+          settled={turn.status !== 'inProgress'}
+        />
       ))}
       {remainingApprovals.map((approval) => (
         <ApprovalCard
@@ -1295,6 +1315,11 @@ const TurnBlock = memo(
   TurnBlockComponent,
   (previous, next) =>
     previous.turn === next.turn &&
+    (previous.pendingSubmissions === next.pendingSubmissions ||
+      ((previous.pendingSubmissions?.length ?? 0) === (next.pendingSubmissions?.length ?? 0) &&
+        (previous.pendingSubmissions ?? EMPTY_SUBMISSIONS).every(
+          (submission, index) => submission === next.pendingSubmissions?.[index]
+        ))) &&
     previous.approvals.length === next.approvals.length &&
     previous.approvals.every((approval, index) => approval === next.approvals[index]) &&
     previous.onRespondToApproval === next.onRespondToApproval &&
@@ -1310,7 +1335,7 @@ const TurnBlock = memo(
 function ConversationTimelineComponent({
   thread,
   approvals,
-  pendingSubmissions = [],
+  pendingSubmissions = EMPTY_SUBMISSIONS,
   usage,
   recovering = false,
   onRespondToApproval,
@@ -1537,6 +1562,22 @@ function ConversationTimelineComponent({
     }
     return grouped;
   }, [threadApprovals]);
+  const localSubmissions = useMemo(() => {
+    const byTurn = new Map<string, PendingUserSubmission[]>();
+    const unbound: PendingUserSubmission[] = [];
+    if (!pendingSubmissions.length) return { byTurn, unbound };
+    const turnIds = new Set(thread.turns.map((turn) => turn.id));
+    for (const submission of unacknowledgedSubmissions(pendingSubmissions, thread)) {
+      if (submission.turnId && turnIds.has(submission.turnId)) {
+        const existing = byTurn.get(submission.turnId);
+        if (existing) existing.push(submission);
+        else byTurn.set(submission.turnId, [submission]);
+      } else {
+        unbound.push(submission);
+      }
+    }
+    return { byTurn, unbound };
+  }, [pendingSubmissions, thread.id, thread.turns]);
   const unassociatedApprovals = useMemo(
     () => {
       if (
@@ -1683,6 +1724,7 @@ function ConversationTimelineComponent({
                 <TurnBlock
                   key={turn.id}
                   turn={turn}
+                  pendingSubmissions={localSubmissions.byTurn.get(turn.id) ?? EMPTY_SUBMISSIONS}
                   approvals={approvalsByTurn.get(turn.id) ?? []}
                   onRespondToApproval={onRespondToApproval}
                   onRespondToUserInput={onRespondToUserInput}
@@ -1696,7 +1738,7 @@ function ConversationTimelineComponent({
               ))}
             </>
           )}
-          {pendingSubmissions.map((submission) => (
+          {localSubmissions.unbound.map((submission) => (
             <PendingUserMessage
               key={submission.clientId}
               submission={submission}

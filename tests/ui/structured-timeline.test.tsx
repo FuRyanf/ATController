@@ -10,6 +10,12 @@ import {
   tokenUsagePresentation
 } from '../../src/components/ConversationTimeline';
 import type { CodexApprovalRequest, CodexThread } from '../../src/types';
+import {
+  acceptPendingSubmission,
+  createPendingSubmission,
+  reconcilePendingSubmissions
+} from '../../src/lib/pendingSubmissions';
+import { CodexStore } from '../../src/stores/codexStore';
 
 function structuredThread(): CodexThread {
   return {
@@ -109,6 +115,58 @@ function structuredThread(): CodexThread {
 }
 
 describe('structured Codex timeline', () => {
+  it('keeps the submitted question above the completed answer until history supplies it', () => {
+    const initial = structuredThread();
+    const question = initial.turns[0].items[0];
+    const answer = initial.turns[0].items.at(-1)!;
+    initial.turns = [{
+      ...initial.turns[0], status: 'inProgress', items: [answer]
+    }];
+    const store = new CodexStore();
+    store.upsertThreads([initial]);
+    let pending = acceptPendingSubmission({
+      'thread-1': [createPendingSubmission('thread-1', 'client-1', 'turn', [
+        { type: 'text', text: 'Create hello.txt' }
+      ])]
+    }, 'thread-1', 'client-1', 'turn-1');
+    const callbacks = {
+      onRespondToApproval: vi.fn(), onRespondToUserInput: vi.fn(),
+      onCopy: vi.fn(), onOpenFile: vi.fn(), onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(), onOpenTerminal: vi.fn()
+    };
+    const timeline = () => <ConversationTimeline
+      thread={store.getSnapshot().threads['thread-1']}
+      pendingSubmissions={pending['thread-1']}
+      approvals={[]}
+      {...callbacks}
+    />;
+    const { rerender } = render(timeline());
+    const completed = {
+      sequence: 1, kind: 'turnCompleted', method: 'turn/completed',
+      threadId: 'thread-1', turnId: 'turn-1',
+      turn: { ...initial.turns[0], status: 'completed', itemsView: 'summary' }
+    };
+    store.queueEvent(completed);
+    store.flushEvents();
+    pending = reconcilePendingSubmissions(pending, completed);
+    rerender(timeline());
+
+    const prompt = screen.getByText('Create hello.txt');
+    const response = screen.getByText('Created the file and verified it.');
+    expect(prompt.closest('[data-turn-id]')).toHaveAttribute('data-turn-id', 'turn-1');
+    expect(prompt.compareDocumentPosition(response) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText('Sent to Codex')).not.toBeInTheDocument();
+
+    // A later history read has the actual user item, without an echoed clientId.
+    store.upsertThreads([{ ...initial, turns: [{
+      ...completed.turn, itemsView: 'full', items: [question, answer]
+    }] }]);
+    rerender(timeline());
+    expect(screen.getAllByText('Create hello.txt')).toHaveLength(1);
+    expect(screen.getByText('Create hello.txt').closest('[data-item-id]'))
+      .toHaveAttribute('data-item-id', 'user-1');
+  });
+
   it('classifies only safe web URLs and project file links', () => {
     expect(classifyMarkdownLink('https://example.com/docs?a=1')).toEqual({
       kind: 'external',

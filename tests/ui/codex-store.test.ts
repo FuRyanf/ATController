@@ -6,7 +6,7 @@ import {
   reduceCodexEvent,
   type CodexStoreSnapshot
 } from '../../src/stores/codexStore';
-import type { CodexEvent, CodexThread } from '../../src/types';
+import type { CodexEvent, CodexItem, CodexThread } from '../../src/types';
 
 function thread(): CodexThread {
   return {
@@ -56,6 +56,49 @@ afterEach(() => {
 });
 
 describe('structured Codex event reduction', () => {
+  it('keeps the original prompt when completion supplies only the polished answer', () => {
+    const prompt: CodexItem = {
+      id: 'user-1', clientId: 'client-1', kind: 'userMessage',
+      content: [{ kind: 'text', text: 'What should I do first?' }],
+      summary: [], reasoning: [], changes: []
+    };
+    const answer: CodexItem = {
+      id: 'answer-1', kind: 'agentMessage', text: 'Draft answer',
+      content: [], summary: [], reasoning: [], changes: []
+    };
+    const initial = thread();
+    initial.turns = [{
+      id: 'turn-1', status: 'inProgress', itemsView: 'full',
+      items: [prompt, answer]
+    }];
+    const store = new CodexStore();
+    store.upsertThreads([initial]);
+    store.queueEvent(event({
+      kind: 'turnCompleted', method: 'turn/completed', turnId: 'turn-1',
+      turn: {
+        id: 'turn-1', status: 'completed', itemsView: 'summary',
+        items: [{ ...answer, text: 'Polished final answer' }]
+      }
+    }));
+    store.flushEvents();
+
+    const completed = store.getSnapshot().threads['thread-1'].turns[0];
+    expect(completed.status).toBe('completed');
+    expect(completed.items.map(item => item.id)).toEqual(['user-1', 'answer-1']);
+    expect(completed.items[0].content[0].text).toBe('What should I do first?');
+    expect(completed.items[1].text).toBe('Polished final answer');
+
+    // Full persisted history is authoritative, even when live IDs differ.
+    store.upsertThreads([{ ...initial, turns: [{
+      ...completed, itemsView: 'full', items: [
+        { ...prompt, id: 'persisted-user' },
+        { ...answer, id: 'persisted-answer', text: 'Polished final answer' }
+      ]
+    }] }]);
+    expect(store.getSnapshot().threads['thread-1'].turns[0].items.map(item => item.id))
+      .toEqual(['persisted-user', 'persisted-answer']);
+  });
+
   it('yields large event bursts across animation frames', () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {

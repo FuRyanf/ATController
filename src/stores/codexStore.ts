@@ -223,13 +223,31 @@ function mergeTurn(existing: CodexTurn | undefined, incoming: CodexTurn): CodexT
   if (!existing) {
     return boundedTurn(incoming);
   }
+  // Completion notifications can contain just the final answer. Only a full
+  // history payload can replace the item list; a summary must retain the
+  // prompt and other items already delivered for this turn.
+  let items = existing.items;
+  if (incoming.items.length > 0) {
+    if (incoming.itemsView === 'full') {
+      items = boundedItems(incoming.items);
+    } else {
+      const indexes = new Map(items.map((item, index) => [item.id, index]));
+      items = [...items];
+      for (const item of incoming.items) {
+        const index = indexes.get(item.id);
+        if (index == null) {
+          indexes.set(item.id, items.length);
+          items.push(boundedItem(item));
+        } else {
+          items[index] = mergeItem(items[index], item);
+        }
+      }
+    }
+  }
   return {
     ...existing,
     ...incoming,
-    items:
-      incoming.items.length === 0
-        ? existing.items
-        : incoming.items.map(boundedItem)
+    items
   };
 }
 
