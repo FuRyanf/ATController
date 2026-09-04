@@ -192,7 +192,7 @@ ATController is not an operating-system sandbox. Choose Standard or Workspace Ac
 
 ## Models, reasoning, and usage
 
-Model, reasoning-effort, service-tier, permission-profile, account, plan, and rate-limit data come from the connected Codex runtime. ATController does not invent model names or reasoning values.
+Model, reasoning-effort, service-tier, permission-profile, account, plan, and rate-limit data come from the connected Codex runtime. ATController does not invent model names or reasoning values, so newly available models such as GPT-6 Astra appear in every model picker as soon as Codex reports them.
 
 Requested and effective settings remain distinct. Runtime defaults and fallbacks are shown instead of silently presenting a rejected value as applied. Ultra appears only when the selected runtime model reports it.
 

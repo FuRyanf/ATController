@@ -58,6 +58,27 @@ const model: CodexModel = {
   inputModalities: ['text', 'image']
 };
 
+const astraModel: CodexModel = {
+  id: 'gpt-6-astra',
+  model: 'gpt-6-astra',
+  displayName: 'GPT-6-Astra',
+  description: 'Our most capable model for complex, demanding work.',
+  hidden: false,
+  isDefault: true,
+  defaultReasoningEffort: 'medium',
+  reasoningEfforts: [
+    { value: 'low', description: 'Lighter reasoning' },
+    { value: 'medium', description: 'Balanced reasoning' },
+    { value: 'high', description: 'Greater reasoning depth' },
+    { value: 'xhigh', description: 'Extra high reasoning depth' },
+    { value: 'max', description: 'Maximum reasoning depth' },
+    { value: 'ultra', description: 'Maximum reasoning with delegation' }
+  ],
+  serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Increased speed' }],
+  defaultServiceTier: null,
+  inputModalities: ['text', 'image']
+};
+
 const preferences: ThreadPreferences = {
   permissionMode: 'fullAccess',
   model: 'runtime-model',
@@ -170,6 +191,24 @@ describe('Codex message composer', () => {
     expect(props.onPreferencesChange).toHaveBeenCalledWith({
       ...preferences,
       serviceTier: 'priority'
+    });
+  });
+
+  it('offers Astra from the runtime catalog and applies its defaults', async () => {
+    const user = userEvent.setup();
+    const props = renderComposer({ models: [astraModel, model] });
+    const modelPicker = screen.getByRole('combobox', { name: 'Model' });
+
+    expect(modelPicker).toHaveDisplayValue('Runtime Model');
+    expect(screen.getByRole('option', { name: 'GPT-6-Astra' })).toBeInTheDocument();
+
+    await user.selectOptions(modelPicker, 'gpt-6-astra');
+
+    expect(props.onPreferencesChange).toHaveBeenCalledWith({
+      ...preferences,
+      model: 'gpt-6-astra',
+      reasoningEffort: 'medium',
+      serviceTier: null
     });
   });
 

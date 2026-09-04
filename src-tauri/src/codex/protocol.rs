@@ -1952,9 +1952,63 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        build_wire_inputs, normalize_item, normalize_notification, normalize_plugins,
-        normalize_rate_limits, normalize_server_request, ComposerInput,
+        build_wire_inputs, normalize_catalog, normalize_item, normalize_notification,
+        normalize_plugins, normalize_rate_limits, normalize_server_request, ComposerInput,
     };
+
+    #[test]
+    fn normalizes_astra_for_runtime_model_selection() {
+        let catalog = normalize_catalog(
+            &json!({
+                "data": [{
+                    "id": "gpt-6-astra",
+                    "model": "gpt-6-astra",
+                    "displayName": "GPT-6-Astra",
+                    "description": "Our most capable model for complex, demanding work.",
+                    "hidden": false,
+                    "isDefault": true,
+                    "defaultReasoningEffort": "medium",
+                    "supportedReasoningEfforts": [
+                        { "reasoningEffort": "low", "description": "Lighter reasoning" },
+                        { "reasoningEffort": "medium", "description": "Balanced reasoning" },
+                        { "reasoningEffort": "high", "description": "Greater reasoning depth" },
+                        { "reasoningEffort": "xhigh", "description": "Extra high reasoning depth" },
+                        { "reasoningEffort": "max", "description": "Maximum reasoning depth" },
+                        { "reasoningEffort": "ultra", "description": "Maximum reasoning with delegation" }
+                    ],
+                    "serviceTiers": [{
+                        "id": "priority",
+                        "name": "Fast",
+                        "description": "Increased speed"
+                    }],
+                    "defaultServiceTier": null,
+                    "inputModalities": ["text", "image"]
+                }]
+            }),
+            &json!({ "account": { "type": "chatgpt", "planType": "pro" } }),
+            &json!({}),
+            &json!({ "data": [] }),
+            &json!({ "config": {} }),
+        )
+        .expect("Astra catalog entry should normalize");
+
+        let astra = &catalog.models[0];
+        assert_eq!(astra.id, "gpt-6-astra");
+        assert_eq!(astra.model, "gpt-6-astra");
+        assert_eq!(astra.display_name, "GPT-6-Astra");
+        assert!(astra.is_default);
+        assert_eq!(astra.default_reasoning_effort, "medium");
+        assert_eq!(
+            astra
+                .reasoning_efforts
+                .iter()
+                .map(|effort| effort.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(astra.service_tiers[0].id, "priority");
+        assert_eq!(astra.input_modalities, vec!["text", "image"]);
+    }
 
     #[test]
     fn normalizes_structured_command_items() {
