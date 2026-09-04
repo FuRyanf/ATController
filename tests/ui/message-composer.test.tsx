@@ -58,6 +58,27 @@ const model: CodexModel = {
   inputModalities: ['text', 'image']
 };
 
+const astraModel: CodexModel = {
+  id: 'gpt-6-astra',
+  model: 'gpt-6-astra',
+  displayName: 'GPT-6-Astra',
+  description: 'Our most capable model for complex, demanding work.',
+  hidden: false,
+  isDefault: true,
+  defaultReasoningEffort: 'medium',
+  reasoningEfforts: [
+    { value: 'low', description: 'Lighter reasoning' },
+    { value: 'medium', description: 'Balanced reasoning' },
+    { value: 'high', description: 'Greater reasoning depth' },
+    { value: 'xhigh', description: 'Extra high reasoning depth' },
+    { value: 'max', description: 'Maximum reasoning depth' },
+    { value: 'ultra', description: 'Maximum reasoning with delegation' }
+  ],
+  serviceTiers: [{ id: 'priority', name: 'Fast', description: 'Increased speed' }],
+  defaultServiceTier: null,
+  inputModalities: ['text', 'image']
+};
+
 const preferences: ThreadPreferences = {
   permissionMode: 'fullAccess',
   model: 'runtime-model',
@@ -152,14 +173,11 @@ describe('Codex message composer', () => {
     expect(props.onSubmit).toHaveBeenCalledWith([{ type: 'text', text: 'Run the tests' }]);
   });
 
-  it('shows runtime-derived model, Ultra reasoning, Full Access, and usage', async () => {
+  it('shows runtime-derived model, Ultra reasoning, and Full Access', async () => {
     const user = userEvent.setup();
-    const props = renderComposer({
-      fiveHourLimit: { usedPercent: 25, windowDurationMins: 300 },
-      weeklyLimit: { usedPercent: 60, windowDurationMins: 10_080 }
-    });
+    const props = renderComposer();
 
-    expect(screen.getByText(/5h 75% left · Week 40% left/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Usage$/)).not.toBeInTheDocument();
     expect(screen.getByText(/Full Access — Codex may read/)).toBeInTheDocument();
 
     const effort = screen.getByRole('combobox', { name: 'Reasoning effort' });
@@ -176,6 +194,24 @@ describe('Codex message composer', () => {
     });
   });
 
+  it('offers Astra from the runtime catalog and applies its defaults', async () => {
+    const user = userEvent.setup();
+    const props = renderComposer({ models: [astraModel, model] });
+    const modelPicker = screen.getByRole('combobox', { name: 'Model' });
+
+    expect(modelPicker).toHaveDisplayValue('Runtime Model');
+    expect(screen.getByRole('option', { name: 'GPT-6-Astra' })).toBeInTheDocument();
+
+    await user.selectOptions(modelPicker, 'gpt-6-astra');
+
+    expect(props.onPreferencesChange).toHaveBeenCalledWith({
+      ...preferences,
+      model: 'gpt-6-astra',
+      reasoningEffort: 'medium',
+      serviceTier: null
+    });
+  });
+
   it('shows the effective runtime speed with a friendly label', () => {
     const runtimeDefaultModel = {
       ...model,
@@ -189,6 +225,33 @@ describe('Codex message composer', () => {
     expect(screen.getByRole('combobox', { name: 'Speed' })).toHaveDisplayValue(
       'Speed: Fast'
     );
+  });
+
+  it('offers Normal when the runtime advertises only the Fast override', async () => {
+    const user = userEvent.setup();
+    const props = renderComposer({
+      models: [
+        {
+          ...model,
+          serviceTiers: [{ id: 'priority', name: 'Fast', description: '' }],
+          defaultServiceTier: null
+        }
+      ],
+      effectiveServiceTier: 'priority'
+    });
+    const speed = screen.getByRole('combobox', {
+      name: 'Speed'
+    }) as HTMLSelectElement;
+
+    expect(Array.from(speed.options, (option) => option.text)).toEqual([
+      'Speed: Normal',
+      'Speed: Fast'
+    ]);
+    await user.selectOptions(speed, 'default');
+    expect(props.onPreferencesChange).toHaveBeenCalledWith({
+      ...preferences,
+      serviceTier: 'default'
+    });
   });
 
   it('opens plugins and project skills from an explicit inline Skills control', async () => {
@@ -688,6 +751,29 @@ describe('Codex message composer', () => {
     expect(props.onStop).toHaveBeenCalledOnce();
     await user.click(screen.getByRole('button', { name: 'Steer active turn' }));
     expect(props.onSubmit).toHaveBeenCalled();
+  });
+
+  it('makes an in-flight steer visibly distinct while Codex acknowledges it', () => {
+    renderComposer({ running: true, submitting: true });
+    expect(screen.getByRole('button', { name: 'Queueing steer' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Steer active turn' })).not.toBeInTheDocument();
+  });
+
+  it('remeasures the draft after interface scaling without exposing scrollbars', () => {
+    renderComposer();
+    const composer = screen.getByRole('textbox', {
+      name: 'Message Codex'
+    }) as HTMLTextAreaElement;
+    Object.defineProperty(composer, 'scrollHeight', {
+      configurable: true,
+      value: 128
+    });
+
+    act(() => {
+      window.dispatchEvent(new Event('atcontroller:interface-scale-changed'));
+    });
+
+    expect(composer.style.height).toBe('128px');
   });
 
   it('keeps archived threads readable and requires an explicit restore before continuing', async () => {

@@ -10,6 +10,7 @@ import type {
 
 const terminalState = vi.hoisted(() => ({
   dataHandler: null as ((data: string) => void) | null,
+  options: {} as Record<string, unknown>,
   writes: [] as Array<string | Uint8Array>,
   reset: vi.fn(),
   clear: vi.fn(),
@@ -21,6 +22,7 @@ const apiMocks = vi.hoisted(() => ({
   write: vi.fn(),
   resize: vi.fn(),
   stop: vi.fn(),
+  openExternalUrl: vi.fn(),
   outputHandler: null as ((output: ProjectTerminalOutput) => void) | null,
   exitHandler: null as ((exit: ProjectTerminalExit) => void) | null
 }));
@@ -29,7 +31,12 @@ vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols = 100;
     rows = 24;
-    options: Record<string, unknown> = {};
+    options: Record<string, unknown>;
+
+    constructor(options: Record<string, unknown>) {
+      this.options = options;
+      terminalState.options = options;
+    }
 
     loadAddon() {}
     open() {}
@@ -73,7 +80,8 @@ vi.mock('../../src/lib/api', () => ({
     startProjectTerminal: apiMocks.start,
     writeProjectTerminal: apiMocks.write,
     resizeProjectTerminal: apiMocks.resize,
-    stopProjectTerminal: apiMocks.stop
+    stopProjectTerminal: apiMocks.stop,
+    openExternalUrl: apiMocks.openExternalUrl
   },
   onProjectTerminalOutput: vi.fn(
     async (handler: (output: ProjectTerminalOutput) => void) => {
@@ -89,7 +97,10 @@ vi.mock('../../src/lib/api', () => ({
   )
 }));
 
-import { ProjectTerminalShelf } from '../../src/components/ProjectTerminalShelf';
+import {
+  normalizeTerminalExternalLink,
+  ProjectTerminalShelf
+} from '../../src/components/ProjectTerminalShelf';
 
 const workspace: Workspace = {
   id: 'workspace-1',
@@ -109,6 +120,7 @@ describe('Project Terminal shelf', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     terminalState.dataHandler = null;
+    terminalState.options = {};
     terminalState.writes = [];
     apiMocks.outputHandler = null;
     apiMocks.exitHandler = null;
@@ -122,6 +134,44 @@ describe('Project Terminal shelf', () => {
     apiMocks.write.mockResolvedValue(undefined);
     apiMocks.resize.mockResolvedValue(undefined);
     apiMocks.stop.mockResolvedValue(undefined);
+    apiMocks.openExternalUrl.mockResolvedValue(undefined);
+  });
+
+  it('routes safe OSC hyperlinks to the native browser instead of a bare webview', async () => {
+    render(
+      <ProjectTerminalShelf
+        open
+        workspace={workspace}
+        requestedCwd={workspace.path}
+        onClose={vi.fn()}
+        onError={vi.fn()}
+      />
+    );
+    await waitFor(() => expect(apiMocks.start).toHaveBeenCalledTimes(1));
+
+    const linkHandler = terminalState.options.linkHandler as {
+      activate: (event: MouseEvent, value: string) => void;
+    };
+    act(() => {
+      linkHandler.activate(new MouseEvent('click'), 'https://github.com/login?from=terminal');
+      linkHandler.activate(new MouseEvent('click'), 'javascript:alert(1)');
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.openExternalUrl).toHaveBeenCalledWith(
+        'https://github.com/login?from=terminal'
+      )
+    );
+    expect(apiMocks.openExternalUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts only HTTP(S) terminal links', () => {
+    expect(normalizeTerminalExternalLink('https://github.com/login')).toBe(
+      'https://github.com/login'
+    );
+    expect(normalizeTerminalExternalLink('file:///tmp/private')).toBeNull();
+    expect(normalizeTerminalExternalLink('javascript:alert(1)')).toBeNull();
+    expect(normalizeTerminalExternalLink('not a URL')).toBeNull();
   });
 
   it('waits for event listeners, starts in the project, and carries binary output and input', async () => {
@@ -166,6 +216,65 @@ describe('Project Terminal shelf', () => {
     await waitFor(() =>
       expect(apiMocks.write).toHaveBeenCalledWith('terminal-1', 'pwd\r')
     );
+  });
+
+  it('buffers startup output and discards trailing bytes from an older session', async () => {
+    let resolveStart!: (session: {
+      id: string;
+      workspaceId: string;
+      cwd: string;
+      shell: string;
+      processId: number;
+    }) => void;
+    apiMocks.start.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStart = resolve;
+      })
+    );
+    render(
+      <ProjectTerminalShelf
+        open
+        workspace={workspace}
+        requestedCwd={workspace.path}
+        onClose={vi.fn()}
+        onError={vi.fn()}
+      />
+    );
+    await waitFor(() => expect(apiMocks.start).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      apiMocks.outputHandler?.({
+        sessionId: 'terminal-old',
+        workspaceId: workspace.id,
+        dataBase64: window.btoa('stale output'),
+        byteLength: 12
+      });
+      apiMocks.outputHandler?.({
+        sessionId: 'terminal-2',
+        workspaceId: workspace.id,
+        dataBase64: window.btoa('new prompt'),
+        byteLength: 10
+      });
+    });
+
+    const decodedWrites = () =>
+      terminalState.writes
+        .filter((value): value is Uint8Array => value instanceof Uint8Array)
+        .map((value) => new TextDecoder().decode(value));
+    expect(decodedWrites()).toEqual([]);
+
+    await act(async () => {
+      resolveStart({
+        id: 'terminal-2',
+        workspaceId: workspace.id,
+        cwd: workspace.path,
+        shell: '/bin/zsh',
+        processId: 456
+      });
+    });
+
+    await waitFor(() => expect(decodedWrites()).toContain('new prompt'));
+    expect(decodedWrites()).not.toContain('stale output');
   });
 
   it('hides without stopping and exposes explicit restart and stop controls', async () => {

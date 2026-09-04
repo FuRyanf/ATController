@@ -1,4 +1,11 @@
-import { memo, useEffect, useMemo, useState } from 'react';
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 
 import { api } from '../lib/api';
 import { serviceTierDisplayName } from '../lib/codexLabels';
@@ -70,6 +77,7 @@ function formatTimestamp(timestamp: number): string {
 
 function InspectorPanelComponent({
   thread,
+  workspacePath,
   session,
   metadata,
   diagnostics,
@@ -105,6 +113,7 @@ function InspectorPanelComponent({
   const [newBranch, setNewBranch] = useState('');
   const [browserScreenshot, setBrowserScreenshot] = useState('');
   const [browserScreenshotError, setBrowserScreenshotError] = useState('');
+  const diffRequestSequence = useRef(0);
   const changes = useMemo(() => allFileChanges(thread), [thread]);
   const workingFiles = useMemo<GitChangedFile[]>(
     () =>
@@ -147,6 +156,17 @@ function InspectorPanelComponent({
       cancelled = true;
     };
   }, [browserSession?.lastScreenshotReference, tab, thread.id]);
+
+  useLayoutEffect(() => {
+    diffRequestSequence.current += 1;
+    setExpandedPath(null);
+    setDiff('');
+    setDiffError('');
+    setLoadingDiff(false);
+    return () => {
+      diffRequestSequence.current += 1;
+    };
+  }, [thread.id, workspacePath]);
 
   return (
     <aside className="inspector-panel">
@@ -246,17 +266,32 @@ function InspectorPanelComponent({
                         type="button"
                         onClick={() => {
                           if (expanded) {
+                            diffRequestSequence.current += 1;
                             setExpandedPath(null);
+                            setLoadingDiff(false);
                             return;
                           }
+                          const requestSequence = ++diffRequestSequence.current;
                           setExpandedPath(change.path);
                           setDiff('');
                           setDiffError('');
                           setLoadingDiff(true);
                           void onLoadDiff(change.path)
-                            .then(setDiff)
-                            .catch((error) => setDiffError(String(error)))
-                            .finally(() => setLoadingDiff(false));
+                            .then((nextDiff) => {
+                              if (requestSequence === diffRequestSequence.current) {
+                                setDiff(nextDiff);
+                              }
+                            })
+                            .catch((error) => {
+                              if (requestSequence === diffRequestSequence.current) {
+                                setDiffError(String(error));
+                              }
+                            })
+                            .finally(() => {
+                              if (requestSequence === diffRequestSequence.current) {
+                                setLoadingDiff(false);
+                              }
+                            });
                         }}
                       >
                         <AppIcon name="file" />

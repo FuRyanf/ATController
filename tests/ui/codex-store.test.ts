@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   coalesceCodexEvents,
@@ -6,7 +6,7 @@ import {
   reduceCodexEvent,
   type CodexStoreSnapshot
 } from '../../src/stores/codexStore';
-import type { CodexEvent, CodexThread } from '../../src/types';
+import type { CodexEvent, CodexItem, CodexThread } from '../../src/types';
 
 function thread(): CodexThread {
   return {
@@ -27,8 +27,10 @@ function thread(): CodexThread {
 }
 
 function snapshot(): CodexStoreSnapshot {
+  const initialThread = thread();
   return {
-    threads: { 'thread-1': thread() },
+    threads: { 'thread-1': initialThread },
+    navigationThreads: { 'thread-1': initialThread },
     sessions: {},
     approvals: {},
     usage: {},
@@ -49,7 +51,161 @@ function event(overrides: Partial<CodexEvent>): CodexEvent {
   };
 }
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe('structured Codex event reduction', () => {
+  it('keeps the original prompt when completion supplies only the polished answer', () => {
+    const prompt: CodexItem = {
+      id: 'user-1', clientId: 'client-1', kind: 'userMessage',
+      content: [{ kind: 'text', text: 'What should I do first?' }],
+      summary: [], reasoning: [], changes: []
+    };
+    const answer: CodexItem = {
+      id: 'answer-1', kind: 'agentMessage', text: 'Draft answer',
+      content: [], summary: [], reasoning: [], changes: []
+    };
+    const initial = thread();
+    initial.turns = [{
+      id: 'turn-1', status: 'inProgress', itemsView: 'full',
+      items: [prompt, answer]
+    }];
+    const store = new CodexStore();
+    store.upsertThreads([initial]);
+    store.queueEvent(event({
+      kind: 'turnCompleted', method: 'turn/completed', turnId: 'turn-1',
+      turn: {
+        id: 'turn-1', status: 'completed', itemsView: 'summary',
+        items: [{ ...answer, text: 'Polished final answer' }]
+      }
+    }));
+    store.flushEvents();
+
+    const completed = store.getSnapshot().threads['thread-1'].turns[0];
+    expect(completed.status).toBe('completed');
+    expect(completed.items.map(item => item.id)).toEqual(['user-1', 'answer-1']);
+    expect(completed.items[0].content[0].text).toBe('What should I do first?');
+    expect(completed.items[1].text).toBe('Polished final answer');
+
+    // Full persisted history is authoritative, even when live IDs differ.
+    store.upsertThreads([{ ...initial, turns: [{
+      ...completed, itemsView: 'full', items: [
+        { ...prompt, id: 'persisted-user' },
+        { ...answer, id: 'persisted-answer', text: 'Polished final answer' }
+      ]
+    }] }]);
+    expect(store.getSnapshot().threads['thread-1'].turns[0].items.map(item => item.id))
+      .toEqual(['persisted-user', 'persisted-answer']);
+  });
+
+  it('yields large event bursts across animation frames', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    for (let sequence = 1; sequence <= 400; sequence += 1) {
+      store.queueEvent(
+        event({ sequence, kind: 'generic', method: 'future/event' })
+      );
+    }
+
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(0);
+    expect(store.getSnapshot().lastSequence).toBeGreaterThan(0);
+    expect(store.getSnapshot().lastSequence).toBeLessThan(400);
+
+    let timestamp = 1;
+    while (frames.length) {
+      frames.shift()?.(timestamp++);
+    }
+    expect(store.getSnapshot().lastSequence).toBe(400);
+  });
+
+  it('drains large backlogs without dropping events while compacting the queue', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    for (let sequence = 1; sequence <= 10_000; sequence += 1) {
+      store.queueEvent(
+        event({ sequence, kind: 'generic', method: `future/event/${sequence}` })
+      );
+    }
+
+    expect(store.getSnapshot().lastSequence).toBeGreaterThan(0);
+
+    let timestamp = 0;
+    while (frames.length) {
+      frames.shift()?.(timestamp++);
+    }
+
+    expect(store.getSnapshot().lastSequence).toBe(10_000);
+  });
+
+  it('coalesces streaming deltas before they enter the frame queue', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    for (let sequence = 1; sequence <= 2_000; sequence += 1) {
+      store.queueEvent(
+        event({
+          sequence,
+          kind: 'agentMessageDelta',
+          method: 'item/agentMessage/delta',
+          turnId: 'turn-streaming',
+          itemId: 'agent-streaming',
+          delta: 'x'
+        })
+      );
+    }
+
+    expect(frames).toHaveLength(1);
+    frames.shift()?.(0);
+    expect(
+      store.getSnapshot().threads['thread-1'].turns[0].items[0].text
+    ).toHaveLength(2_000);
+  });
+
+  it('does not publish new thread maps for unchanged list refreshes', () => {
+    const store = new CodexStore();
+    const initial = thread();
+    store.upsertThreads([initial]);
+    expect(store.getSnapshot().threads['thread-1']).toBe(initial);
+    const before = store.getSnapshot();
+
+    store.upsertThreads([thread()]);
+    expect(store.getSnapshot()).toBe(before);
+
+    store.replaceWorkspaceThreads('/tmp/project', false, [thread()]);
+    expect(store.getSnapshot()).toBe(before);
+  });
+
+  it('publishes navigation changes when a refreshed thread header changes', () => {
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    const before = store.getSnapshot();
+
+    store.replaceWorkspaceThreads('/tmp/project', false, [
+      { ...thread(), title: 'Renamed thread', updatedAt: 3 }
+    ]);
+
+    expect(store.getSnapshot()).not.toBe(before);
+    expect(store.getSnapshot().navigationThreads['thread-1'].title).toBe(
+      'Renamed thread'
+    );
+  });
+
   it('coalesces adjacent high-frequency deltas without crossing item boundaries', () => {
     const events = coalesceCodexEvents([
       event({
@@ -104,9 +260,67 @@ describe('structured Codex event reduction', () => {
     );
 
     expect(after.threads).toBe(before.threads);
+    expect(after.navigationThreads).toBe(before.navigationThreads);
     expect(after.approvals).toBe(before.approvals);
     expect(after.usage).toBe(before.usage);
     expect(after.lastSequence).toBe(1);
+  });
+
+  it('keeps navigation state stable while content streams, then updates on lifecycle changes', () => {
+    let state = reduceCodexEvent(
+      snapshot(),
+      event({
+        sequence: 1,
+        kind: 'turnStarted',
+        method: 'turn/started',
+        turn: {
+          id: 'turn-streaming',
+          status: 'inProgress',
+          items: [],
+          itemsView: 'full'
+        }
+      })
+    );
+    const navigationWhileRunning = state.navigationThreads;
+    const fullThreadsWhileRunning = state.threads;
+
+    state = reduceCodexEvent(
+      state,
+      event({
+        sequence: 2,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-streaming',
+        itemId: 'agent-streaming',
+        delta: 'A streamed response chunk'
+      })
+    );
+
+    expect(state.threads).not.toBe(fullThreadsWhileRunning);
+    expect(state.navigationThreads).toBe(navigationWhileRunning);
+    expect(
+      state.navigationThreads['thread-1'].turns[0].items
+    ).toEqual([]);
+
+    state = reduceCodexEvent(
+      state,
+      event({
+        sequence: 3,
+        kind: 'turnCompleted',
+        method: 'turn/completed',
+        turn: {
+          id: 'turn-streaming',
+          status: 'completed',
+          items: [],
+          itemsView: 'full'
+        }
+      })
+    );
+
+    expect(state.navigationThreads).not.toBe(navigationWhileRunning);
+    expect(state.navigationThreads['thread-1'].turns[0].status).toBe(
+      'completed'
+    );
   });
 
   it('accepts item events before turn responses and streams into only that item', () => {
@@ -168,13 +382,75 @@ describe('structured Codex event reduction', () => {
         method: 'item/commandExecution/outputDelta',
         turnId: 'turn-large',
         itemId: 'command-large',
-        delta: `${'a'.repeat(1_000_050)}latest`
+        delta: `${'a'.repeat(128_050)}latest`
       })
     );
     const output = state.threads['thread-1'].turns[0].items[0].output ?? '';
     expect(output).toMatch(/^\[Earlier command output truncated\]/);
-    expect(output).toHaveLength(1_000_035);
+    expect(output).toHaveLength(128_035);
     expect(output.endsWith('latest')).toBe(true);
+  });
+
+  it('bounds oversized command output when history first enters the store', () => {
+    const store = new CodexStore();
+    const hydrated = thread();
+    hydrated.turns = [
+      {
+        id: 'turn-hydrated',
+        status: 'completed',
+        itemsView: 'full',
+        items: [
+          {
+            id: 'command-hydrated',
+            kind: 'commandExecution',
+            output: `${'a'.repeat(128_050)}latest`,
+            summary: [],
+            reasoning: [],
+            content: [],
+            changes: []
+          }
+        ]
+      }
+    ];
+
+    store.upsertThreads([hydrated]);
+
+    const output =
+      store.getSnapshot().threads['thread-1'].turns[0].items[0].output ?? '';
+    expect(output).toMatch(/^\[Earlier command output truncated\]/);
+    expect(output).toHaveLength(128_035);
+    expect(output.endsWith('latest')).toBe(true);
+    expect(hydrated.turns[0].items[0].output).toHaveLength(128_056);
+  });
+
+  it('sorts the exceptional out-of-order event path before reducing it', () => {
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    store.queueEvent(
+      event({
+        sequence: 2,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-reordered',
+        itemId: 'agent-reordered',
+        delta: 'B'
+      })
+    );
+    store.queueEvent(
+      event({
+        sequence: 1,
+        kind: 'agentMessageDelta',
+        method: 'item/agentMessage/delta',
+        turnId: 'turn-reordered',
+        itemId: 'agent-reordered',
+        delta: 'A'
+      })
+    );
+    store.flushEvents();
+
+    expect(
+      store.getSnapshot().threads['thread-1'].turns[0].items[0].text
+    ).toBe('AB');
   });
 
   it('preserves separate streamed reasoning summary parts', () => {
@@ -369,6 +645,58 @@ describe('structured Codex event reduction', () => {
     expect(store.getSnapshot().activeThreadId).toBeNull();
   });
 
+  it('can release an idle session and its hydrated history independently', () => {
+    const store = new CodexStore();
+    const hydrated = thread();
+    hydrated.turns = [
+      {
+        id: 'turn-heavy',
+        status: 'completed',
+        itemsView: 'full',
+        items: [
+          {
+            id: 'command-heavy',
+            kind: 'commandExecution',
+            output: 'large output',
+            summary: [],
+            reasoning: [],
+            content: [],
+            changes: []
+          }
+        ]
+      }
+    ];
+    store.setSession({
+      thread: hydrated,
+      settings: {
+        requestedModel: null,
+        effectiveModel: null,
+        modelResolution: 'runtimeDefault',
+        requestedReasoningEffort: null,
+        effectiveReasoningEffort: null,
+        reasoningEffortResolution: 'runtimeDefault',
+        requestedServiceTier: null,
+        effectiveServiceTier: null,
+        serviceTierResolution: 'runtimeDefault',
+        permissionMode: 'fullAccess',
+        permissionProfile: 'fullAccess',
+        approvalPolicy: 'never',
+        sandboxPolicy: 'danger-full-access',
+        cwd: '/tmp/project'
+      },
+      instructionSources: []
+    });
+
+    expect(store.getSnapshot().threads['thread-1'].turns).toHaveLength(1);
+    expect(store.getSnapshot().sessions['thread-1'].thread.turns).toEqual([]);
+
+    store.clearSession('thread-1', true);
+
+    expect(store.getSnapshot().sessions).toEqual({});
+    expect(store.getSnapshot().threads['thread-1'].turns).toEqual([]);
+    expect(store.getSnapshot().threads['thread-1'].title).toBe('Structured thread');
+  });
+
   it('drops queued activity for a thread removed through the compatibility path', () => {
     const store = new CodexStore();
     store.upsertThreads([thread()]);
@@ -387,5 +715,53 @@ describe('structured Codex event reduction', () => {
     store.flushEvents();
 
     expect(store.getSnapshot().threads).toEqual({});
+  });
+
+  it('merges the immediate turn/start response without duplicating its turn', () => {
+    const store = new CodexStore();
+    store.upsertThreads([thread()]);
+    store.mergeTurnStartResponse('thread-1', {
+      id: 'turn-optimistic',
+      status: 'inProgress',
+      itemsView: 'full',
+      items: [
+        {
+          id: 'agent-early',
+          kind: 'agentMessage',
+          text: 'An event arrived first',
+          content: [],
+          summary: [],
+          reasoning: [],
+          changes: []
+        }
+      ]
+    });
+    store.mergeTurnStartResponse('thread-1', {
+      id: 'turn-optimistic',
+      status: 'inProgress',
+      itemsView: 'full',
+      items: [
+        {
+          id: 'user-1',
+          clientId: 'client-1',
+          kind: 'userMessage',
+          content: [{ kind: 'text', text: 'Run the tests' }],
+          summary: [],
+          reasoning: [],
+          changes: []
+        }
+      ]
+    });
+
+    const turns = store.getSnapshot().threads['thread-1'].turns;
+    expect(turns).toHaveLength(1);
+    expect(turns[0].items[0]).toMatchObject({
+      clientId: 'client-1',
+      kind: 'userMessage'
+    });
+    expect(turns[0].items[1]).toMatchObject({
+      id: 'agent-early',
+      text: 'An event arrived first'
+    });
   });
 });

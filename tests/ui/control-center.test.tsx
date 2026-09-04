@@ -50,8 +50,16 @@ const catalog: CodexRuntimeCatalog = {
     authenticationMode: 'chatgpt',
     planType: 'pro',
     requiresOpenaiAuth: true,
-    fiveHourLimit: { usedPercent: 20, windowDurationMins: 300 },
-    weeklyLimit: { usedPercent: 55, windowDurationMins: 10_080 }
+    fiveHourLimit: {
+      usedPercent: 20,
+      windowDurationMins: 300,
+      resetsAt: 1_786_048_200
+    },
+    weeklyLimit: {
+      usedPercent: 55,
+      windowDurationMins: 10_080,
+      resetsAt: 1_786_566_600
+    }
   },
   permissionProfiles: []
 };
@@ -156,6 +164,19 @@ function props() {
 }
 
 describe('ATController control center', () => {
+  it('opens Settings with prominent usage and exact reset times', () => {
+    render(<ControlCenterDialog {...props()} />);
+
+    expect(screen.getByRole('button', { name: 'Settings' })).toHaveClass('active');
+    expect(screen.getByText('Codex usage')).toBeInTheDocument();
+    expect(screen.getByText('80% left')).toBeInTheDocument();
+    expect(screen.getByText('45% left')).toBeInTheDocument();
+    expect(screen.getAllByText(/^Resets /)).toHaveLength(2);
+    expect(
+      screen.getByRole('progressbar', { name: '5-hour limit remaining' })
+    ).toHaveAttribute('aria-valuenow', '80');
+  });
+
   it('edits appearance, permissions, and composer behavior as one settings update', async () => {
     const user = userEvent.setup();
     const control = props();
@@ -183,6 +204,41 @@ describe('ATController control center', () => {
         commandEnterToSend: false,
         defaultServiceTier: 'priority'
       })
+    );
+  });
+
+  it('can override a configured Fast tier with Normal speed', async () => {
+    const user = userEvent.setup();
+    const control = props();
+    const fastConfiguredCatalog: CodexRuntimeCatalog = {
+      ...catalog,
+      configuredServiceTier: 'priority',
+      models: catalog.models.map((model) => ({
+        ...model,
+        serviceTiers: [{ id: 'priority', name: 'Fast', description: '' }],
+        defaultServiceTier: null
+      }))
+    };
+    render(
+      <ControlCenterDialog
+        {...control}
+        catalog={fastConfiguredCatalog}
+      />
+    );
+    const speed = screen.getByRole('combobox', {
+      name: 'Speed'
+    }) as HTMLSelectElement;
+
+    expect(speed).toHaveDisplayValue('Fast');
+    expect(Array.from(speed.options, (option) => option.text)).toEqual([
+      'Normal',
+      'Fast'
+    ]);
+    await user.selectOptions(speed, 'default');
+    await user.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    expect(control.onSaveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultServiceTier: 'default' })
     );
   });
 

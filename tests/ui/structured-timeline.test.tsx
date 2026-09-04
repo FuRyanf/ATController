@@ -3,12 +3,19 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  classifyMarkdownLink,
   ConversationTimeline,
   findLocalDevelopmentUrl,
   normalizeAgentMarkdown,
   tokenUsagePresentation
 } from '../../src/components/ConversationTimeline';
 import type { CodexApprovalRequest, CodexThread } from '../../src/types';
+import {
+  acceptPendingSubmission,
+  createPendingSubmission,
+  reconcilePendingSubmissions
+} from '../../src/lib/pendingSubmissions';
+import { CodexStore } from '../../src/stores/codexStore';
 
 function structuredThread(): CodexThread {
   return {
@@ -108,6 +115,198 @@ function structuredThread(): CodexThread {
 }
 
 describe('structured Codex timeline', () => {
+  it('keeps the submitted question above the completed answer until history supplies it', () => {
+    const initial = structuredThread();
+    const question = initial.turns[0].items[0];
+    const answer = initial.turns[0].items.at(-1)!;
+    initial.turns = [{
+      ...initial.turns[0], status: 'inProgress', items: [answer]
+    }];
+    const store = new CodexStore();
+    store.upsertThreads([initial]);
+    let pending = acceptPendingSubmission({
+      'thread-1': [createPendingSubmission('thread-1', 'client-1', 'turn', [
+        { type: 'text', text: 'Create hello.txt' }
+      ])]
+    }, 'thread-1', 'client-1', 'turn-1');
+    const callbacks = {
+      onRespondToApproval: vi.fn(), onRespondToUserInput: vi.fn(),
+      onCopy: vi.fn(), onOpenFile: vi.fn(), onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(), onOpenTerminal: vi.fn()
+    };
+    const timeline = () => <ConversationTimeline
+      thread={store.getSnapshot().threads['thread-1']}
+      pendingSubmissions={pending['thread-1']}
+      approvals={[]}
+      {...callbacks}
+    />;
+    const { rerender } = render(timeline());
+    const completed = {
+      sequence: 1, kind: 'turnCompleted', method: 'turn/completed',
+      threadId: 'thread-1', turnId: 'turn-1',
+      turn: { ...initial.turns[0], status: 'completed', itemsView: 'summary' }
+    };
+    store.queueEvent(completed);
+    store.flushEvents();
+    pending = reconcilePendingSubmissions(pending, completed);
+    rerender(timeline());
+
+    const prompt = screen.getByText('Create hello.txt');
+    const response = screen.getByText('Created the file and verified it.');
+    expect(prompt.closest('[data-turn-id]')).toHaveAttribute('data-turn-id', 'turn-1');
+    expect(prompt.compareDocumentPosition(response) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText('Sent to Codex')).not.toBeInTheDocument();
+
+    // A later history read has the actual user item, without an echoed clientId.
+    store.upsertThreads([{ ...initial, turns: [{
+      ...completed.turn, itemsView: 'full', items: [question, answer]
+    }] }]);
+    rerender(timeline());
+    expect(screen.getAllByText('Create hello.txt')).toHaveLength(1);
+    expect(screen.getByText('Create hello.txt').closest('[data-item-id]'))
+      .toHaveAttribute('data-item-id', 'user-1');
+  });
+
+  it('classifies only safe web URLs and project file links', () => {
+    expect(classifyMarkdownLink('https://example.com/docs?a=1')).toEqual({
+      kind: 'external',
+      url: 'https://example.com/docs?a=1'
+    });
+    expect(classifyMarkdownLink('/tmp/project/design%20notes.md#summary')).toEqual({
+      kind: 'projectFile',
+      path: '/tmp/project/design notes.md'
+    });
+    expect(classifyMarkdownLink('docs/conclusion.md')).toEqual({
+      kind: 'projectFile',
+      path: 'docs/conclusion.md'
+    });
+    expect(classifyMarkdownLink('javascript:alert(1)')).toEqual({
+      kind: 'unsupported'
+    });
+  });
+
+  it('opens an absolute Markdown file link on Command-click', () => {
+    const thread = structuredThread();
+    const agent = thread.turns[0].items.find(
+      (item) => item.kind === 'agentMessage'
+    )!;
+    agent.text =
+      'See [Current Master Control](/tmp/project/experiments/control/conclusion.md).';
+    const onOpenFile = vi.fn();
+    render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onRespondToApproval={vi.fn()}
+        onRespondToUserInput={vi.fn()}
+        onCopy={vi.fn()}
+        onOpenFile={onOpenFile}
+        onRevealPath={vi.fn()}
+        onRevertFile={vi.fn()}
+        onOpenTerminal={vi.fn()}
+      />
+    );
+
+    fireEvent.click(
+      screen.getByRole('link', { name: 'Current Master Control' }),
+      { metaKey: true }
+    );
+    expect(onOpenFile).toHaveBeenCalledWith(
+      '/tmp/project/experiments/control/conclusion.md'
+    );
+  });
+
+  it('defers Markdown parsing until a streamed agent message completes', () => {
+    const thread = structuredThread();
+    thread.turns = [
+      {
+        id: 'turn-live',
+        status: 'inProgress',
+        itemsView: 'full',
+        items: [
+          {
+            id: 'agent-live',
+            kind: 'agentMessage',
+            status: 'inProgress',
+            text: 'Read [the docs](https://example.com/docs)',
+            summary: [],
+            reasoning: [],
+            content: [],
+            changes: []
+          }
+        ]
+      }
+    ];
+    const callbacks = {
+      onRespondToApproval: vi.fn(),
+      onRespondToUserInput: vi.fn(),
+      onCopy: vi.fn(),
+      onOpenFile: vi.fn(),
+      onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(),
+      onOpenTerminal: vi.fn()
+    };
+    const { rerender } = render(
+      <ConversationTimeline thread={thread} approvals={[]} {...callbacks} />
+    );
+
+    expect(screen.queryByRole('link', { name: 'the docs' })).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Read [the docs](https://example.com/docs)')
+    ).toBeInTheDocument();
+
+    const completed = structuredThread();
+    completed.turns = [
+      {
+        ...thread.turns[0],
+        status: 'completed',
+        items: [{ ...thread.turns[0].items[0], status: 'completed' }]
+      }
+    ];
+    rerender(
+      <ConversationTimeline thread={completed} approvals={[]} {...callbacks} />
+    );
+
+    expect(screen.getByRole('link', { name: 'the docs' })).toBeInTheDocument();
+  });
+
+  it('refreshes completed-turn actions when callback props change', () => {
+    const thread = structuredThread();
+    const firstCopy = vi.fn();
+    const secondCopy = vi.fn();
+    const callbacks = {
+      onRespondToApproval: vi.fn(),
+      onRespondToUserInput: vi.fn(),
+      onOpenFile: vi.fn(),
+      onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(),
+      onOpenTerminal: vi.fn()
+    };
+    const { rerender } = render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onCopy={firstCopy}
+        {...callbacks}
+      />
+    );
+    rerender(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        onCopy={secondCopy}
+        {...callbacks}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy response as Markdown' }));
+    expect(firstCopy).not.toHaveBeenCalled();
+    expect(secondCopy).toHaveBeenCalledWith(
+      'Created the file and verified it.',
+      'Markdown response'
+    );
+  });
+
   it('uses the current context rather than cumulative thread tokens for context percentage', () => {
     expect(
       tokenUsagePresentation({
@@ -146,6 +345,63 @@ describe('structured Codex timeline', () => {
     );
     expect(screen.getByRole('status')).toHaveTextContent('Loading thread history');
     expect(screen.queryByText('Start with a task')).not.toBeInTheDocument();
+  });
+
+  it('renders an optimistic user bubble and its delivery state immediately', () => {
+    const thread = structuredThread();
+    thread.turns = [];
+    const callbacks = {
+      onRespondToApproval: vi.fn(),
+      onRespondToUserInput: vi.fn(),
+      onCopy: vi.fn(),
+      onOpenFile: vi.fn(),
+      onRevealPath: vi.fn(),
+      onRevertFile: vi.fn(),
+      onOpenTerminal: vi.fn()
+    };
+    const { rerender } = render(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        pendingSubmissions={[
+          {
+            clientId: 'client-1',
+            threadId: 'thread-1',
+            mode: 'turn',
+            status: 'sending',
+            text: 'Check the current implementation',
+            resources: [{ kind: 'file', label: 'notes.md' }],
+            submittedAt: 1
+          }
+        ]}
+        {...callbacks}
+      />
+    );
+
+    expect(screen.getByText('Check the current implementation')).toBeInTheDocument();
+    expect(screen.getByText('notes.md')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Sending to Codex…');
+    expect(screen.queryByText('Start with a task')).not.toBeInTheDocument();
+
+    rerender(
+      <ConversationTimeline
+        thread={thread}
+        approvals={[]}
+        pendingSubmissions={[
+          {
+            clientId: 'client-1',
+            threadId: 'thread-1',
+            mode: 'steer',
+            status: 'accepted',
+            text: 'Check the current implementation',
+            resources: [],
+            submittedAt: 1
+          }
+        ]}
+        {...callbacks}
+      />
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('Steer queued');
   });
 
   it('renders recent history first and progressively reveals long conversations', async () => {
@@ -374,6 +630,65 @@ describe('structured Codex timeline', () => {
     expect(openFile).toHaveBeenCalledWith('/tmp/project/hello.txt');
     expect(revealPath).toHaveBeenCalledWith('/tmp/project/hello.txt');
     expect(revertFile).toHaveBeenCalledWith('/tmp/project/hello.txt');
+  });
+
+  it('paces live Markdown presentation and reveals the completed response immediately', () => {
+    vi.useFakeTimers();
+    try {
+      const base = structuredThread();
+      const withAgentText = (
+        text: string,
+        status: 'inProgress' | 'completed'
+      ): CodexThread => ({
+        ...base,
+        turns: base.turns.map((turn) => ({
+          ...turn,
+          status,
+          items: turn.items.map((item) =>
+            item.kind === 'agentMessage' ? { ...item, status, text } : item
+          )
+        }))
+      });
+      const props = {
+        approvals: [],
+        onRespondToApproval: vi.fn(),
+        onRespondToUserInput: vi.fn(),
+        onCopy: vi.fn(),
+        onOpenFile: vi.fn(),
+        onRevealPath: vi.fn(),
+        onRevertFile: vi.fn(),
+        onOpenTerminal: vi.fn()
+      };
+      const { rerender } = render(
+        <ConversationTimeline
+          {...props}
+          thread={withAgentText('First streamed fragment', 'inProgress')}
+        />
+      );
+
+      rerender(
+        <ConversationTimeline
+          {...props}
+          thread={withAgentText('Second streamed fragment', 'inProgress')}
+        />
+      );
+      expect(screen.getByText('First streamed fragment')).toBeInTheDocument();
+      expect(screen.queryByText('Second streamed fragment')).toBeNull();
+
+      act(() => vi.advanceTimersByTime(48));
+      expect(screen.getByText('Second streamed fragment')).toBeInTheDocument();
+
+      rerender(
+        <ConversationTimeline
+          {...props}
+          thread={withAgentText('Final response', 'completed')}
+        />
+      );
+      expect(screen.getByText('Final response')).toBeInTheDocument();
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
   });
 
   it('offers local development-server URLs to the isolated browser', async () => {

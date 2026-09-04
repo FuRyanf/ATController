@@ -222,6 +222,7 @@ export interface CodexError {
 
 export interface CodexItem {
   id: string;
+  clientId?: string | null;
   kind: string;
   status?: string | null;
   phase?: string | null;
@@ -405,6 +406,23 @@ export type ComposerInput =
   | { type: 'skill'; name: string; path: string }
   | { type: 'plugin'; id: string; name: string };
 
+export interface PendingSubmissionResource {
+  kind: 'image' | 'file' | 'skill' | 'plugin';
+  label: string;
+}
+
+export interface PendingUserSubmission {
+  clientId: string;
+  threadId: string;
+  turnId?: string | null;
+  mode: 'turn' | 'steer';
+  status: 'sending' | 'accepted' | 'failed';
+  text: string;
+  resources: PendingSubmissionResource[];
+  submittedAt: number;
+  error?: string | null;
+}
+
 export interface CodexTokenUsage {
   totalTokens: number;
   inputTokens: number;
@@ -461,6 +479,7 @@ export interface CodexThreadUiMetadata {
   threadId: string;
   workspaceId: string;
   fallbackTitle: string;
+  sortOrder?: number | null;
   pinned: boolean;
   unread: boolean;
   archived: boolean;

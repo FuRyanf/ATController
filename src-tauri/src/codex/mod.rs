@@ -1,4 +1,5 @@
 pub mod diagnostics;
+mod event_dispatch;
 pub(crate) mod process;
 pub(crate) mod protocol;
 mod resume;
@@ -7,6 +8,7 @@ mod threads;
 mod transport;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use std::{future::Future, pin::Pin};
@@ -35,6 +37,7 @@ pub const EVENT_RUNTIME_STATE: &str = "codex:runtime-state";
 pub struct CodexRuntime {
     app: OnceLock<AppHandle>,
     browser: OnceLock<BrowserRuntime>,
+    event_sender: OnceLock<SyncSender<CodexEvent>>,
     connection: Mutex<Option<Arc<RpcConnection>>>,
     start_lock: Mutex<()>,
     diagnostics: Arc<diagnostics::DiagnosticsState>,
@@ -49,6 +52,7 @@ impl Default for CodexRuntime {
         Self {
             app: OnceLock::new(),
             browser: OnceLock::new(),
+            event_sender: OnceLock::new(),
             connection: Mutex::new(None),
             start_lock: Mutex::new(()),
             diagnostics: Arc::new(diagnostics::DiagnosticsState::default()),
@@ -62,6 +66,14 @@ impl Default for CodexRuntime {
 
 impl CodexRuntime {
     pub fn attach(&self, app: AppHandle) {
+        match event_dispatch::spawn(app.clone(), self.diagnostics.clone()) {
+            Ok(sender) => {
+                let _ = self.event_sender.set(sender);
+            }
+            Err(error) => self.diagnostics.push_protocol_error(&format!(
+                "Unable to start the Codex UI event dispatcher: {error}"
+            )),
+        }
         let _ = self.app.set(app);
     }
 
@@ -293,7 +305,9 @@ impl CodexRuntime {
             "mcpServerStatus/list",
             json!({
                 "limit": 100,
-                "detail": "full",
+                // Browser diagnostics only consumes server and tool metadata;
+                // skip resource inventory, which can invoke slow MCP calls.
+                "detail": "toolsAndAuthOnly",
                 "threadId": thread_id
             }),
             RequestOptions::idempotent(Duration::from_secs(90)),
@@ -478,7 +492,13 @@ impl CodexRuntime {
         if let Some(browser) = self.browser.get() {
             browser.observe_codex_event(&event);
         }
-        if let Some(app) = self.app.get() {
+        if let Some(sender) = self.event_sender.get() {
+            if let Err(error) = sender.send(event) {
+                self.diagnostics.push_protocol_error(&format!(
+                    "Unable to queue Codex event for the UI: {error}"
+                ));
+            }
+        } else if let Some(app) = self.app.get() {
             if let Err(error) = app.emit(EVENT_CODEX, &event) {
                 self.diagnostics
                     .push_protocol_error(&format!("Unable to emit Codex event: {error}"));

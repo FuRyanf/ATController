@@ -39,15 +39,20 @@ import type {
 export const events = {
   browserState: 'browser:state',
   codexEvent: 'codex:event',
+  codexEventBatch: 'codex:events',
   codexRuntimeState: 'codex:runtime-state',
   projectTerminalOutput: 'atcontroller://project-terminal-output',
   projectTerminalExit: 'atcontroller://project-terminal-exit'
 } as const;
 
 export const api = {
-  getBrowserDiagnostics: (threadId?: string | null) =>
+  getBrowserDiagnostics: (
+    threadId?: string | null,
+    probeRuntime = false
+  ) =>
     invoke<BrowserDiagnostics>('browser_get_diagnostics', {
-      threadId: threadId ?? null
+      threadId: threadId ?? null,
+      probeRuntime
     }),
   getBrowserSetupPlan: () =>
     invoke<BrowserSetupPlan>('browser_get_setup_plan'),
@@ -120,6 +125,8 @@ export const api = {
       threadId,
       preferences
     }),
+  unsubscribeCodexThread: (threadId: string) =>
+    invoke<string>('codex_unsubscribe_thread', { threadId }),
   forkCodexThread: (
     workspacePath: string,
     threadId: string,
@@ -143,12 +150,14 @@ export const api = {
   startCodexTurn: (
     workspacePath: string,
     threadId: string,
+    clientUserMessageId: string,
     inputs: ComposerInput[],
     preferences: ThreadPreferences
   ) =>
     invoke<CodexTurn>('codex_start_turn', {
       workspacePath,
       threadId,
+      clientUserMessageId,
       inputs,
       preferences
     }),
@@ -156,12 +165,14 @@ export const api = {
     workspacePath: string,
     threadId: string,
     turnId: string,
+    clientUserMessageId: string,
     inputs: ComposerInput[]
   ) =>
     invoke<void>('codex_steer_turn', {
       workspacePath,
       threadId,
       turnId,
+      clientUserMessageId,
       inputs
     }),
   interruptCodexTurn: (threadId: string, turnId: string) =>
@@ -182,6 +193,11 @@ export const api = {
     invoke<CodexThreadUiMetadata>('get_codex_thread_ui_metadata', { workspaceId, threadId }),
   saveCodexThreadUiMetadata: (metadata: CodexThreadUiMetadata) =>
     invoke<CodexThreadUiMetadata>('save_codex_thread_ui_metadata', { metadata }),
+  setCodexThreadOrder: (workspaceId: string, threadIds: string[]) =>
+    invoke<CodexThreadUiMetadata[]>('set_codex_thread_order', {
+      workspaceId,
+      threadIds
+    }),
   listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
   updateWorkspace: (workspaceId: string, update: WorkspaceUpdate) =>
@@ -257,10 +273,25 @@ export const onBrowserState = async (
 
 export const onCodexEvent = async (
   handler: (event: CodexEvent) => void
-): Promise<UnlistenFn> =>
-  listen<CodexEvent>(events.codexEvent, (event) => {
-    handler(event.payload);
-  });
+): Promise<UnlistenFn> => {
+  const unlisteners: UnlistenFn[] = [];
+  try {
+    unlisteners.push(
+      await listen<CodexEvent>(events.codexEvent, (event) => {
+        handler(event.payload);
+      })
+    );
+    unlisteners.push(
+      await listen<CodexEvent[]>(events.codexEventBatch, (event) => {
+        for (const payload of event.payload) handler(payload);
+      })
+    );
+  } catch (error) {
+    unlisteners.forEach((unlisten) => unlisten());
+    throw error;
+  }
+  return () => unlisteners.forEach((unlisten) => unlisten());
+};
 
 export const onCodexRuntimeState = async (
   handler: (diagnostics: CodexDiagnostics) => void

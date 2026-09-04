@@ -16,6 +16,12 @@ import { AppIcon } from './AppIcon';
 const TERMINAL_HEIGHT_KEY = 'atcontroller:project-terminal-height-v1';
 const DEFAULT_HEIGHT = 260;
 const MIN_HEIGHT = 150;
+const MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
+
+interface PendingTerminalOutput {
+  chunks: Uint8Array[];
+  byteLength: number;
+}
 
 interface ProjectTerminalShelfProps {
   open: boolean;
@@ -77,6 +83,17 @@ function exitLabel(exit: ProjectTerminalExit): string {
   return `Exited with code ${exit.exitCode ?? 'unknown'}`;
 }
 
+export function normalizeTerminalExternalLink(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:'
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function ProjectTerminalShelf({
   open,
   workspace,
@@ -88,6 +105,11 @@ export function ProjectTerminalShelf({
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sessionRef = useRef<ProjectTerminalSession | null>(null);
+  const pendingConnectionRef = useRef<symbol | null>(null);
+  const pendingOutputRef = useRef(
+    new Map<string, PendingTerminalOutput>()
+  );
+  const pendingExitRef = useRef(new Map<string, ProjectTerminalExit>());
   const workspaceIdRef = useRef<string | null>(workspace?.id ?? null);
   const openRef = useRef(open);
   const onErrorRef = useRef(onError);
@@ -137,6 +159,17 @@ export function ProjectTerminalShelf({
       fontSize: 12,
       lineHeight: 1.2,
       macOptionIsMeta: true,
+      linkHandler: {
+        activate(_event, value) {
+          const url = normalizeTerminalExternalLink(value);
+          if (!url) return;
+          void api.openExternalUrl(url).catch((error) => {
+            onErrorRef.current(
+              `Could not open terminal link in your browser: ${String(error)}`
+            );
+          });
+        }
+      },
       scrollback: 8_000,
       smoothScrollDuration: 0,
       theme: terminalTheme()
@@ -195,13 +228,26 @@ export function ProjectTerminalShelf({
       try {
         stopOutput = await apiModule.onProjectTerminalOutput((output) => {
           const active = sessionRef.current;
-          if (
-            output.workspaceId !== workspaceIdRef.current ||
-            (active && output.sessionId !== active.id)
-          ) {
+          if (output.workspaceId !== workspaceIdRef.current) return;
+          const bytes = decodeOutput(output);
+          if (active) {
+            if (output.sessionId === active.id) terminalRef.current?.write(bytes);
             return;
           }
-          terminalRef.current?.write(decodeOutput(output));
+          if (!pendingConnectionRef.current) return;
+          const pending = pendingOutputRef.current.get(output.sessionId) ?? {
+            chunks: [],
+            byteLength: 0
+          };
+          pending.chunks.push(bytes);
+          pending.byteLength += bytes.byteLength;
+          while (
+            pending.byteLength > MAX_PENDING_OUTPUT_BYTES &&
+            pending.chunks.length > 1
+          ) {
+            pending.byteLength -= pending.chunks.shift()?.byteLength ?? 0;
+          }
+          pendingOutputRef.current.set(output.sessionId, pending);
         });
         if (disposed) {
           releaseListener(stopOutput);
@@ -209,7 +255,15 @@ export function ProjectTerminalShelf({
         }
         stopExit = await apiModule.onProjectTerminalExit((exit) => {
           const active = sessionRef.current;
-          if (!active || exit.sessionId !== active.id) return;
+          if (!active || exit.sessionId !== active.id) {
+            if (
+              pendingConnectionRef.current &&
+              exit.workspaceId === workspaceIdRef.current
+            ) {
+              pendingExitRef.current.set(exit.sessionId, exit);
+            }
+            return;
+          }
           sessionRef.current = null;
           setSession(null);
           setStatus('exited');
@@ -261,6 +315,10 @@ export function ProjectTerminalShelf({
         sessionRef.current = null;
         setSession(null);
       }
+      const connection = Symbol('project-terminal-connection');
+      pendingConnectionRef.current = connection;
+      pendingOutputRef.current.clear();
+      pendingExitRef.current.clear();
       setStatus('connecting');
       terminalRef.current?.reset();
       terminalRef.current?.writeln(
@@ -275,8 +333,21 @@ export function ProjectTerminalShelf({
           terminal?.cols || 100,
           terminal?.rows || 24
         );
-        if (cancelled) {
+        if (cancelled || pendingConnectionRef.current !== connection) {
           await api.stopProjectTerminal(started.id).catch(() => undefined);
+          return;
+        }
+        const bufferedOutput = pendingOutputRef.current.get(started.id)?.chunks ?? [];
+        const bufferedExit = pendingExitRef.current.get(started.id);
+        pendingConnectionRef.current = null;
+        pendingOutputRef.current.clear();
+        pendingExitRef.current.clear();
+        for (const chunk of bufferedOutput) terminalRef.current?.write(chunk);
+        if (bufferedExit) {
+          setStatus('exited');
+          terminalRef.current?.writeln(
+            `\r\n\u001b[38;5;244m[Project Terminal: ${exitLabel(bufferedExit)}]\u001b[0m`
+          );
           return;
         }
         sessionRef.current = started;
@@ -287,6 +358,11 @@ export function ProjectTerminalShelf({
           terminalRef.current?.focus();
         });
       } catch (error) {
+        if (pendingConnectionRef.current === connection) {
+          pendingConnectionRef.current = null;
+          pendingOutputRef.current.clear();
+          pendingExitRef.current.clear();
+        }
         if (cancelled) return;
         setStatus('exited');
         const message = `Could not open Project Terminal: ${String(error)}`;
@@ -297,6 +373,11 @@ export function ProjectTerminalShelf({
     void connect();
     return () => {
       cancelled = true;
+      if (pendingConnectionRef.current) {
+        pendingConnectionRef.current = null;
+        pendingOutputRef.current.clear();
+        pendingExitRef.current.clear();
+      }
     };
   }, [
     open,
@@ -314,23 +395,43 @@ export function ProjectTerminalShelf({
 
   const beginResize = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
     const startY = event.clientY;
     const startHeight = height;
+    let currentHeight = startHeight;
+    let frame: number | null = null;
+    let finished = false;
     const move = (moveEvent: globalThis.PointerEvent) => {
       const maximum = Math.max(MIN_HEIGHT, Math.floor(window.innerHeight * 0.68));
-      setHeight(Math.min(maximum, Math.max(MIN_HEIGHT, startHeight + startY - moveEvent.clientY)));
-    };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      setHeight((current) => {
-        window.localStorage.setItem(TERMINAL_HEIGHT_KEY, String(current));
-        return current;
+      currentHeight = Math.min(
+        maximum,
+        Math.max(MIN_HEIGHT, startHeight + startY - moveEvent.clientY)
+      );
+      if (frame != null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        setHeight(currentHeight);
       });
     };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      window.removeEventListener('blur', finish);
+      target.removeEventListener('lostpointercapture', finish);
+      if (frame != null) window.cancelAnimationFrame(frame);
+      frame = null;
+      setHeight(currentHeight);
+      window.localStorage.setItem(TERMINAL_HEIGHT_KEY, String(currentHeight));
+    };
     window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+    window.addEventListener('blur', finish);
+    target.addEventListener('lostpointercapture', finish);
   };
 
   const terminate = async () => {

@@ -16,7 +16,7 @@ This document describes the production architecture of ATController.
 ```text
 React + TypeScript session UI
         ↕
-Typed Tauri commands and `codex:event` notifications
+Typed Tauri commands and bounded `codex:events` batches
         ↕
 Rust ATController domain and supervision layer
         ↕
@@ -326,15 +326,17 @@ Approval Request
 Runtime Process
 ```
 
-An event sequence is assigned by the long-lived Rust runtime and remains monotonic across process restarts. React queues events until the next animation frame, sorts by sequence, coalesces adjacent deltas for the same item, and reduces them without rebuilding unrelated threads. A frame is synchronously flushed at 2,048 pending events to keep the frontend queue bounded without dropping output.
+An event sequence is assigned by the long-lived Rust runtime and remains monotonic across process restarts. Rust collects notifications for at most 8 ms, coalesces adjacent text/output deltas for the same item, and sends batches of at most 128 events across the WebKit bridge. React queues those events until the next animation frame, sorts by sequence, coalesces any remaining adjacent deltas, and reduces at most 128 events per frame. The queue uses a moving head with periodic compaction, avoiding repeated front-array copies during large bursts without dropping output.
 
 Item events may arrive before the request response or before the turn payload. The reducer creates placeholders, appends deltas to only the matching item, and merges later authoritative objects. Repeated sequences and repeated item completion payloads are deduplicated.
 
-Store slices retain their object identity when an event does not change them, so generic notifications do not wake thread, approval, or usage subscribers. Full-history hydration merges turns in one indexed pass rather than repeatedly cloning growing arrays. The sidebar, header, composer, timeline, and inspector use narrow comparisons so draft typing and streamed transcript changes do not rerender unrelated surfaces.
+Store slices retain their object identity when an event does not change them, so generic notifications do not wake thread, approval, or usage subscribers. A lightweight navigation projection changes only for thread metadata or lifecycle state, keeping the application shell and project shelves asleep during transcript streaming. Drafts use a per-thread external store, so typing rerenders only the active composer and persistence occurs after a short idle interval. Full-history hydration merges turns in one indexed pass rather than repeatedly cloning growing arrays, and unchanged list refreshes preserve existing thread references.
 
-Completed turns are memoized and older blocks use CSS content visibility. Streaming output updates only the active item. Opening or restoring a thread pins it to the latest turn through deferred layout changes; a content resize continues following only while the reader remains at the bottom. Scrolling upward cancels the pin and shows **Jump to latest** instead of forcing the viewport back down.
+Completed turns are memoized and older blocks use CSS content visibility. Streaming output updates only the active item; Markdown parsing, command-output presentation, and inspector aggregation are deferred so they do not compete with input or pointer work. Opening or restoring a thread pins it to the latest turn through deferred layout changes; a content resize continues following only while the reader remains at the bottom. Scrolling upward cancels the pin and shows **Jump to latest** instead of forcing the viewport back down.
 
-Rendered live command output is capped at the latest one million characters per item with an explicit truncation marker. During history normalization, command output, diffs, inline data, and verbose tool details receive tighter per-item bounds before serialization across Tauri. A long conversation initially mounts only its newest 24 turns and reveals earlier pages without moving the reader’s viewport. These constraints keep pathological histories from exhausting the WebView while Codex-owned history and the working tree remain authoritative.
+Live turn, queued-message, and streaming-caret indicators are intentionally static. Animating their shadows or opacity kept WebKit's rendering timer active for the entire duration of a turn and forced continuous style resolution, layer updates, and painting on long timelines.
+
+Rendered live command output is capped at the latest 128,000 characters per item with an explicit truncation marker. During history normalization, command output, diffs, inline data, and verbose tool details receive per-item bounds before serialization across Tauri. High-frequency turn-diff notifications send only lifecycle metadata because Git is the inspector's source of truth. A long conversation initially mounts only its newest 24 turns and reveals earlier pages without moving the reader’s viewport. These constraints keep pathological histories from exhausting the WebView while Codex-owned history and the working tree remain authoritative.
 
 ## Permissions and approvals
 

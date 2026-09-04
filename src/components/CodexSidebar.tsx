@@ -4,19 +4,23 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent,
-  type PointerEvent as ReactPointerEvent
+  type KeyboardEvent
 } from 'react';
 
 import type {
   CodexApprovalRequest,
   CodexConnectionState,
+  CodexRateLimitWindowV2,
   CodexThread,
   CodexThreadUiMetadata,
   GitInfo,
   ProjectSortMode,
   Workspace
 } from '../types';
+import {
+  formatUsageRemaining,
+  formatUsageReset
+} from '../lib/usage';
 import { AppIcon } from './AppIcon';
 
 const SIDEBAR_SCROLL_KEY = 'atcontroller:project-shelf-scroll-v1';
@@ -44,6 +48,8 @@ interface CodexSidebarProps {
   filter: string;
   sortMode: ProjectSortMode;
   connectionState: CodexConnectionState;
+  fiveHourLimit?: CodexRateLimitWindowV2 | null;
+  weeklyLimit?: CodexRateLimitWindowV2 | null;
   collapsed: boolean;
   onSelectWorkspace: (workspaceId: string) => void;
   onToggleWorkspace: (workspaceId: string, expanded: boolean) => void;
@@ -185,7 +191,6 @@ const ThreadRow = memo(function ThreadRow({
     const bounds = target.getBoundingClientRect();
     onMenu(thread.id, bounds.left + 24, bounds.bottom - 4);
   };
-
   return (
     <button
       type="button"
@@ -195,7 +200,10 @@ const ThreadRow = memo(function ThreadRow({
       aria-label={`${title}, ${status.label}`}
       data-sidebar-row
       data-thread-id={thread.id}
-      className={`project-thread-row ${selected ? 'selected' : ''}`}
+      className={[
+        'project-thread-row',
+        selected ? 'selected' : ''
+      ].join(' ')}
       title={thread.preview || title}
       onClick={() => onSelect(workspaceId, thread.id)}
       onDoubleClick={() => onRename(thread.id)}
@@ -296,9 +304,9 @@ interface ProjectShelfProps {
   search: string;
   loading: boolean;
   runtimeFailed: boolean;
-  dragPlacement: { workspaceId: string; edge: 'before' | 'after' } | null;
-  draggable: boolean;
-  dragging: boolean;
+  showOrderControls: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
   onSelectWorkspace: (workspaceId: string) => void;
   onToggleWorkspace: (workspaceId: string, expanded: boolean) => void;
   onNewThread: (workspaceId?: string) => void;
@@ -309,10 +317,7 @@ interface ProjectShelfProps {
   onLocateWorkspace: (workspaceId: string) => void;
   onRemoveWorkspace: (workspaceId: string) => void;
   onCopyWorkspacePath: (workspaceId: string) => void;
-  onDragStart: (workspaceId: string) => void;
-  onDragMove: (workspaceId: string, clientY: number) => void;
-  onDrop: (workspaceId: string) => void;
-  onDragEnd: () => void;
+  onMove: (workspaceId: string, direction: -1 | 1) => void;
 }
 
 export function sidebarThreadStateEqual(
@@ -367,8 +372,9 @@ function areProjectShelfPropsEqual(
     previous.search !== next.search ||
     previous.loading !== next.loading ||
     previous.runtimeFailed !== next.runtimeFailed ||
-    previous.draggable !== next.draggable ||
-    previous.dragging !== next.dragging ||
+    previous.showOrderControls !== next.showOrderControls ||
+    previous.canMoveUp !== next.canMoveUp ||
+    previous.canMoveDown !== next.canMoveDown ||
     !equalSidebarThreadLists(previous.threads, next.threads)
   ) {
     return false;
@@ -388,15 +394,6 @@ function areProjectShelfPropsEqual(
   ) {
     return false;
   }
-  const previousDrop =
-    previous.dragPlacement?.workspaceId === previous.workspace.id
-      ? previous.dragPlacement.edge
-      : null;
-  const nextDrop =
-    next.dragPlacement?.workspaceId === next.workspace.id
-      ? next.dragPlacement.edge
-      : null;
-  if (previousDrop !== nextDrop) return false;
   return previous.threads.every(
     (thread) =>
       sidebarMetadataEqual(
@@ -418,9 +415,9 @@ const ProjectShelf = memo(function ProjectShelf({
   search,
   loading,
   runtimeFailed,
-  dragPlacement,
-  draggable,
-  dragging,
+  showOrderControls,
+  canMoveUp,
+  canMoveDown,
   onSelectWorkspace,
   onToggleWorkspace,
   onNewThread,
@@ -431,20 +428,10 @@ const ProjectShelf = memo(function ProjectShelf({
   onLocateWorkspace,
   onRemoveWorkspace,
   onCopyWorkspacePath,
-  onDragStart,
-  onDragMove,
-  onDrop,
-  onDragEnd
+  onMove
 }: ProjectShelfProps) {
   const [showAll, setShowAll] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
-  const pointerDragRef = useRef<{
-    pointerId: number;
-    originX: number;
-    originY: number;
-    active: boolean;
-  } | null>(null);
-  const suppressClickRef = useRef(false);
   const aggregate = useMemo(
     () => projectAggregate(threads, metadata, waitingThreadIds),
     [metadata, threads, waitingThreadIds]
@@ -458,11 +445,10 @@ const ProjectShelf = memo(function ProjectShelf({
     () =>
       [...matchingThreads].sort(
         (left, right) =>
-          Number(Boolean(metadata[right.id]?.pinned)) -
-            Number(Boolean(metadata[left.id]?.pinned)) ||
-          (right.recencyAt ?? right.updatedAt) - (left.recencyAt ?? left.updatedAt)
+          (right.recencyAt ?? right.updatedAt) -
+          (left.recencyAt ?? left.updatedAt)
       ),
-    [matchingThreads, metadata]
+    [matchingThreads]
   );
   const running = sorted.filter(
     (thread) => !thread.archived && (waitingThreadIds.has(thread.id) || isRunning(thread))
@@ -480,56 +466,6 @@ const ProjectShelf = memo(function ProjectShelf({
   const openProjectMenu = (target: HTMLElement) => {
     const bounds = target.getBoundingClientRect();
     onOpenProjectMenu(workspace.id, bounds.left + 24, bounds.bottom + 3);
-  };
-  const beginPointerDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (
-      !draggable ||
-      event.button !== 0 ||
-      (event.target instanceof Element &&
-        event.target.closest('[data-project-no-drag]'))
-    ) {
-      return;
-    }
-    pointerDragRef.current = {
-      pointerId: event.pointerId,
-      originX: event.clientX,
-      originY: event.clientY,
-      active: false
-    };
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-  };
-  const movePointerDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = pointerDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    if (
-      !drag.active &&
-      Math.hypot(event.clientX - drag.originX, event.clientY - drag.originY) >= 5
-    ) {
-      drag.active = true;
-      suppressClickRef.current = true;
-      onDragStart(workspace.id);
-    }
-    if (!drag.active) return;
-    event.preventDefault();
-    onDragMove(workspace.id, event.clientY);
-  };
-  const finishPointerDrag = (
-    event: ReactPointerEvent<HTMLDivElement>,
-    cancelled: boolean
-  ) => {
-    const drag = pointerDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    pointerDragRef.current = null;
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    if (!drag.active) return;
-    event.preventDefault();
-    if (cancelled) onDragEnd();
-    else onDrop(workspace.id);
-    window.setTimeout(() => {
-      suppressClickRef.current = false;
-    }, 0);
   };
 
   const handleProjectKey = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -564,26 +500,12 @@ const ProjectShelf = memo(function ProjectShelf({
       className={[
         'project-shelf',
         selected ? 'selected' : '',
-        workspace.isAvailable ? '' : 'unavailable',
-        dragPlacement?.workspaceId === workspace.id
-          ? `drop-${dragPlacement.edge}`
-          : '',
-        dragging ? 'dragging' : ''
+        workspace.isAvailable ? '' : 'unavailable'
       ].join(' ')}
       data-project-shelf={workspace.id}
     >
       <div
-        className={`project-shelf-header ${draggable ? 'reorderable' : ''}`}
-        data-project-drag-row={workspace.id}
-        onPointerDown={beginPointerDrag}
-        onPointerMove={movePointerDrag}
-        onPointerUp={(event) => finishPointerDrag(event, false)}
-        onPointerCancel={(event) => finishPointerDrag(event, true)}
-        onClickCapture={(event) => {
-          if (!suppressClickRef.current) return;
-          event.preventDefault();
-          event.stopPropagation();
-        }}
+        className={`project-shelf-header ${showOrderControls ? 'reorderable' : ''}`}
         onContextMenu={(event) => {
           event.preventDefault();
           onOpenProjectMenu(workspace.id, event.clientX, event.clientY);
@@ -656,6 +578,36 @@ const ProjectShelf = memo(function ProjectShelf({
             ) : null}
           </span>
         </button>
+        {showOrderControls ? (
+          <span className="project-order-controls">
+            <button
+              type="button"
+              className="project-order-button up"
+              aria-label={`Move ${workspace.name} up`}
+              title="Move project up"
+              disabled={!canMoveUp}
+              onClick={(event) => {
+                event.stopPropagation();
+                onMove(workspace.id, -1);
+              }}
+            >
+              <AppIcon name="arrowDown" size={13} />
+            </button>
+            <button
+              type="button"
+              className="project-order-button"
+              aria-label={`Move ${workspace.name} down`}
+              title="Move project down"
+              disabled={!canMoveDown}
+              onClick={(event) => {
+                event.stopPropagation();
+                onMove(workspace.id, 1);
+              }}
+            >
+              <AppIcon name="arrowDown" size={13} />
+            </button>
+          </span>
+        ) : null}
         <button
           type="button"
           className="icon-button subtle project-menu-button"
@@ -668,7 +620,11 @@ const ProjectShelf = memo(function ProjectShelf({
       </div>
 
       {expanded ? (
-        <div className="project-shelf-threads" role="group" aria-label={`${workspace.name} threads`}>
+        <div
+          className="project-shelf-threads"
+          role="group"
+          aria-label={`${workspace.name} threads`}
+        >
           {!workspace.isAvailable ? (
             <div className="missing-project-actions">
               <p>The saved folder can’t be found.</p>
@@ -784,6 +740,8 @@ function CodexSidebarComponent({
   filter,
   sortMode,
   connectionState,
+  fiveHourLimit,
+  weeklyLimit,
   collapsed,
   onSelectWorkspace,
   onToggleWorkspace,
@@ -802,16 +760,6 @@ function CodexSidebarComponent({
   onOpenDiagnostics,
   onToggleCollapsed
 }: CodexSidebarProps) {
-  const [draggedWorkspaceId, setDraggedWorkspaceId] = useState<string | null>(null);
-  const [dragPlacement, setDragPlacement] = useState<{
-    workspaceId: string;
-    edge: 'before' | 'after';
-  } | null>(null);
-  const draggedWorkspaceIdRef = useRef<string | null>(null);
-  const dragPlacementRef = useRef<{
-    workspaceId: string;
-    edge: 'before' | 'after';
-  } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const search = normalizedSearchText(filter);
@@ -874,85 +822,23 @@ function CodexSidebarComponent({
     if (Number.isFinite(stored)) scroll.scrollTop = stored;
   }, []);
 
-  const clearProjectDrag = () => {
-    draggedWorkspaceIdRef.current = null;
-    dragPlacementRef.current = null;
-    setDraggedWorkspaceId(null);
-    setDragPlacement(null);
-  };
-
-  const startProjectDrag = (workspaceId: string) => {
-    draggedWorkspaceIdRef.current = workspaceId;
-    dragPlacementRef.current = null;
-    setDraggedWorkspaceId(workspaceId);
-    setDragPlacement(null);
-  };
-
-  const moveProjectDrag = (workspaceId: string, clientY: number) => {
-    if (draggedWorkspaceIdRef.current !== workspaceId || sortMode !== 'custom') {
-      return;
-    }
-    const source = workspaces.find((candidate) => candidate.id === workspaceId);
-    const scroll = scrollRef.current;
-    if (!source || !scroll) return;
-    const rows = [
-      ...scroll.querySelectorAll<HTMLElement>('[data-project-drag-row]')
-    ]
-      .map((row) => ({
-        workspaceId: row.dataset.projectDragRow ?? '',
-        centerY: (() => {
-          const bounds = row.getBoundingClientRect();
-          return bounds.top + bounds.height / 2;
-        })()
-      }))
-      .filter((row) => {
-        const candidate = workspaces.find(
-          (workspace) => workspace.id === row.workspaceId
-        );
-        return candidate && candidate.isPinned === source.isPinned;
-      });
-    if (!rows.length) return;
-    const next =
-      rows.find((row) => clientY < row.centerY) ??
-      ({ workspaceId: rows[rows.length - 1].workspaceId, edge: 'after' } as const);
-    const placement =
-      'edge' in next
-        ? next
-        : ({ workspaceId: next.workspaceId, edge: 'before' } as const);
-    if (
-      dragPlacementRef.current?.workspaceId === placement.workspaceId &&
-      dragPlacementRef.current.edge === placement.edge
-    ) {
-      return;
-    }
-    dragPlacementRef.current = placement;
-    setDragPlacement(placement);
-  };
-
-  const dropProject = (
-    targetId: string,
-    edge: 'before' | 'after',
-    sourceId = draggedWorkspaceIdRef.current
-  ) => {
-    clearProjectDrag();
-    if (!sourceId || sourceId === targetId || sortMode !== 'custom') return;
-    const source = workspaces.find((workspace) => workspace.id === sourceId);
-    const target = workspaces.find((workspace) => workspace.id === targetId);
-    if (!source || !target || source.isPinned !== target.isPinned) return;
-    const order = orderedWorkspaces.map((workspace) => workspace.id);
-    const withoutSource = order.filter((id) => id !== sourceId);
-    const targetIndex = withoutSource.indexOf(targetId);
-    withoutSource.splice(targetIndex + (edge === 'after' ? 1 : 0), 0, sourceId);
-    onReorderWorkspaces(withoutSource);
-  };
-
-  const finishProjectDrag = (workspaceId: string) => {
-    const placement = dragPlacementRef.current;
-    if (draggedWorkspaceIdRef.current !== workspaceId || !placement) {
-      clearProjectDrag();
-      return;
-    }
-    dropProject(placement.workspaceId, placement.edge, workspaceId);
+  const moveProject = (workspaceId: string, direction: -1 | 1) => {
+    if (search) return;
+    const source = orderedWorkspaces.find(
+      (workspace) => workspace.id === workspaceId
+    );
+    if (!source) return;
+    const peers = orderedWorkspaces.filter(
+      (workspace) => workspace.isPinned === source.isPinned
+    );
+    const peerIndex = peers.findIndex((workspace) => workspace.id === workspaceId);
+    const target = peers[peerIndex + direction];
+    if (!target) return;
+    const next = [...orderedWorkspaces];
+    const sourceIndex = next.findIndex((workspace) => workspace.id === source.id);
+    const targetIndex = next.findIndex((workspace) => workspace.id === target.id);
+    [next[sourceIndex], next[targetIndex]] = [next[targetIndex], next[sourceIndex]];
+    onReorderWorkspaces(next.map((workspace) => workspace.id));
   };
 
   if (collapsed) {
@@ -1067,47 +953,64 @@ function CodexSidebarComponent({
             <span>Try a project name, path, thread title, preview, or identifier.</span>
           </div>
         ) : (
-          visibleWorkspaces.map((workspace) => (
-            <ProjectShelf
-              key={workspace.id}
-              workspace={workspace}
-              threads={threadsByWorkspace[workspace.id] ?? []}
-              metadata={metadata}
-              waitingThreadIds={waitingThreadIds}
-              gitInfo={gitInfoByWorkspace[workspace.id] ?? null}
-              selectedWorkspaceId={selectedWorkspaceId}
-              selectedThreadId={selectedThreadId}
-              search={search}
-              loading={loadingWorkspaceIds.has(workspace.id)}
-              runtimeFailed={
-                connectionState === 'failed' || connectionState === 'degraded'
-              }
-              dragPlacement={dragPlacement}
-              draggable={sortMode === 'custom' && !search}
-              dragging={draggedWorkspaceId === workspace.id}
-              onSelectWorkspace={onSelectWorkspace}
-              onToggleWorkspace={onToggleWorkspace}
-              onNewThread={onNewThread}
-              onSelectThread={onSelectThread}
-              onRenameThread={onRenameThread}
-              onOpenThreadMenu={onOpenThreadMenu}
-              onOpenProjectMenu={onOpenProjectMenu}
-              onLocateWorkspace={onLocateWorkspace}
-              onRemoveWorkspace={onRemoveWorkspace}
-              onCopyWorkspacePath={onCopyWorkspacePath}
-              onDragStart={startProjectDrag}
-              onDragMove={moveProjectDrag}
-              onDrop={finishProjectDrag}
-              onDragEnd={clearProjectDrag}
-            />
-          ))
+          visibleWorkspaces.map((workspace) => {
+            const peers = orderedWorkspaces.filter(
+              (candidate) => candidate.isPinned === workspace.isPinned
+            );
+            const peerIndex = peers.findIndex(
+              (candidate) => candidate.id === workspace.id
+            );
+            return (
+              <ProjectShelf
+                key={workspace.id}
+                workspace={workspace}
+                threads={threadsByWorkspace[workspace.id] ?? []}
+                metadata={metadata}
+                waitingThreadIds={waitingThreadIds}
+                gitInfo={gitInfoByWorkspace[workspace.id] ?? null}
+                selectedWorkspaceId={selectedWorkspaceId}
+                selectedThreadId={selectedThreadId}
+                search={search}
+                loading={loadingWorkspaceIds.has(workspace.id)}
+                runtimeFailed={
+                  connectionState === 'failed' || connectionState === 'degraded'
+                }
+                showOrderControls={
+                  !search && peers.length > 1
+                }
+                canMoveUp={peerIndex > 0}
+                canMoveDown={peerIndex >= 0 && peerIndex < peers.length - 1}
+                onSelectWorkspace={onSelectWorkspace}
+                onToggleWorkspace={onToggleWorkspace}
+                onNewThread={onNewThread}
+                onSelectThread={onSelectThread}
+                onRenameThread={onRenameThread}
+                onOpenThreadMenu={onOpenThreadMenu}
+                onOpenProjectMenu={onOpenProjectMenu}
+                onLocateWorkspace={onLocateWorkspace}
+                onRemoveWorkspace={onRemoveWorkspace}
+                onCopyWorkspacePath={onCopyWorkspacePath}
+                onMove={moveProject}
+              />
+            );
+          })
         )}
       </div>
 
       <footer className="sidebar-footer">
-        <button type="button" onClick={onOpenSettings}>
+        <button
+          type="button"
+          aria-label="Settings and Codex usage"
+          title={`5-hour: ${formatUsageRemaining(fiveHourLimit)} · ${formatUsageReset(fiveHourLimit)}\nWeekly: ${formatUsageRemaining(weeklyLimit)} · ${formatUsageReset(weeklyLimit)}`}
+          onClick={onOpenSettings}
+        >
           <AppIcon name="gear" />
           <span>Settings</span>
+          <span className="sidebar-usage-label">
+            5h {formatUsageRemaining(fiveHourLimit).replace(' left', '')}
+            <i aria-hidden="true" />
+            W {formatUsageRemaining(weeklyLimit).replace(' left', '')}
+          </span>
         </button>
         <button type="button" onClick={onOpenDiagnostics}>
           <span className={`runtime-dot ${connectionState}`} />
@@ -1146,6 +1049,8 @@ function areCodexSidebarPropsEqual(
     previous.filter !== next.filter ||
     previous.sortMode !== next.sortMode ||
     previous.connectionState !== next.connectionState ||
+    previous.fiveHourLimit !== next.fiveHourLimit ||
+    previous.weeklyLimit !== next.weeklyLimit ||
     previous.collapsed !== next.collapsed ||
     !equalWorkspaceReferences(previous.workspaces, next.workspaces)
   ) {

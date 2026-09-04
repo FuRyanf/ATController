@@ -2,6 +2,8 @@ import {
   Children,
   isValidElement,
   memo,
+  useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -13,20 +15,25 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { api } from '../lib/api';
+import { unacknowledgedSubmissions } from '../lib/pendingSubmissions';
 import type {
   BrowserActivity,
   CodexApprovalRequest,
   CodexFileChange,
   CodexItem,
+  PendingUserSubmission,
   CodexThread,
   CodexTokenUsage,
   CodexTurn
 } from '../types';
 import { AppIcon } from './AppIcon';
 
+const EMPTY_SUBMISSIONS: PendingUserSubmission[] = [];
+
 interface ConversationTimelineProps {
   thread: CodexThread;
   approvals: CodexApprovalRequest[];
+  pendingSubmissions?: PendingUserSubmission[];
   usage?: CodexTokenUsage;
   recovering?: boolean;
   onRespondToApproval: (
@@ -50,6 +57,8 @@ const EARLIER_TURN_PAGE_SIZE = 24;
 const THREAD_FIND_HIGHLIGHT = 'atcontroller-thread-find';
 const THREAD_FIND_ACTIVE_HIGHLIGHT = 'atcontroller-thread-find-active';
 const MAX_THREAD_FIND_MATCHES = 2_000;
+const LIVE_CONTENT_RENDER_INTERVAL_MS = 48;
+const MARKDOWN_PLUGINS = [remarkGfm];
 const LOCAL_DEVELOPMENT_URL =
   /https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(?::\d{1,5})?(?:\/[^\s"'<>]*)?/gi;
 
@@ -234,33 +243,84 @@ export function normalizeAgentMarkdown(text: string): string {
   return writingBlock ? writingBlock[1].trim() : text;
 }
 
-function MarkdownContent({
+export type MarkdownLinkTarget =
+  | { kind: 'external'; url: string }
+  | { kind: 'projectFile'; path: string }
+  | { kind: 'unsupported' };
+
+export function classifyMarkdownLink(href?: string): MarkdownLinkTarget {
+  if (!href) return { kind: 'unsupported' };
+  if (/^https?:\/\//i.test(href)) {
+    try {
+      const url = new URL(href);
+      return url.protocol === 'http:' || url.protocol === 'https:'
+        ? { kind: 'external', url: url.toString() }
+        : { kind: 'unsupported' };
+    } catch {
+      return { kind: 'unsupported' };
+    }
+  }
+  if (/^file:/i.test(href)) {
+    try {
+      const url = new URL(href);
+      if (url.protocol !== 'file:' || (url.hostname && url.hostname !== 'localhost')) {
+        return { kind: 'unsupported' };
+      }
+      return { kind: 'projectFile', path: decodeURIComponent(url.pathname) };
+    } catch {
+      return { kind: 'unsupported' };
+    }
+  }
+  if (
+    href.startsWith('#') ||
+    href.startsWith('//') ||
+    /^[a-z][a-z0-9+.-]*:/i.test(href)
+  ) {
+    return { kind: 'unsupported' };
+  }
+  const path = href.split(/[?#]/, 1)[0];
+  if (!path) return { kind: 'unsupported' };
+  try {
+    return { kind: 'projectFile', path: decodeURIComponent(path) };
+  } catch {
+    return { kind: 'unsupported' };
+  }
+}
+
+const MarkdownContent = memo(function MarkdownContent({
   text,
-  onCopy
+  onCopy,
+  onOpenFile
 }: {
   text: string;
   onCopy: ConversationTimelineProps['onCopy'];
+  onOpenFile: ConversationTimelineProps['onOpenFile'];
 }) {
   const components = useMemo<Components>(
     () => ({
       a({ children, href, node: _node, ...props }) {
-        const external = Boolean(href && /^https?:\/\//i.test(href));
+        const target = classifyMarkdownLink(href);
+        const clickable = target.kind !== 'unsupported';
         return (
           <a
             {...props}
-            href={external ? href : undefined}
-            rel={external ? 'noreferrer' : undefined}
+            href={target.kind === 'external' ? target.url : clickable ? '#' : undefined}
+            rel={target.kind === 'external' ? 'noreferrer' : undefined}
+            aria-disabled={!clickable || undefined}
             title={
-              external
-                ? props.title
-                : href
-                  ? `${href} (link type not opened by ATController)`
-                  : props.title
+              props.title ??
+              (target.kind === 'projectFile'
+                ? `${target.path} · Click or Command-click to open`
+                : target.kind === 'unsupported' && href
+                  ? `${href} (unsupported link type)`
+                  : undefined)
             }
             onClick={(event) => {
               event.preventDefault();
-              if (external && href) {
-                void api.openExternalUrl(href).catch(() => undefined);
+              if (target.kind === 'external') {
+                void api.openExternalUrl(target.url).catch(() => undefined);
+              } else if (target.kind === 'projectFile') {
+                onOpenFile(target.path);
               }
             }}
           >
@@ -301,19 +361,107 @@ function MarkdownContent({
         );
       }
     }),
-    [onCopy]
+    [onCopy, onOpenFile]
   );
 
   return (
     <div className="markdown-content">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={MARKDOWN_PLUGINS}
         components={components}
         skipHtml
       >
         {normalizeAgentMarkdown(text)}
       </ReactMarkdown>
     </div>
+  );
+});
+
+/**
+ * Structured deltas can arrive faster than WebKit can usefully paint them.
+ * Keep the authoritative value in the store while limiting expensive live
+ * content presentation to roughly 20 frames per second. Completion always
+ * renders the final value immediately.
+ */
+function useThrottledLiveText(value: string, live: boolean): string {
+  const [presented, setPresented] = useState(value);
+  const latest = useRef(value);
+  const timer = useRef<number | null>(null);
+  const lastPresentationAt = useRef(Date.now());
+
+  useEffect(() => {
+    latest.current = value;
+    if (!live) {
+      if (timer.current != null) window.clearTimeout(timer.current);
+      timer.current = null;
+      lastPresentationAt.current = Date.now();
+      setPresented((current) => (current === value ? current : value));
+      return;
+    }
+    if (timer.current != null || presented === value) return;
+    const elapsed = Date.now() - lastPresentationAt.current;
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      lastPresentationAt.current = Date.now();
+      const next = latest.current;
+      setPresented((current) => (current === next ? current : next));
+    }, Math.max(0, LIVE_CONTENT_RENDER_INTERVAL_MS - elapsed));
+  }, [live, presented, value]);
+
+  useEffect(
+    () => () => {
+      if (timer.current != null) window.clearTimeout(timer.current);
+    },
+    []
+  );
+
+  return live ? presented : value;
+}
+
+function AgentMessage({
+  item,
+  onCopy,
+  onOpenFile
+}: {
+  item: CodexItem;
+  onCopy: ConversationTimelineProps['onCopy'];
+  onOpenFile: ConversationTimelineProps['onOpenFile'];
+}) {
+  const text = item.text || '…';
+  const liveText = useThrottledLiveText(text, item.status === 'inProgress');
+  const deferredText = useDeferredValue(liveText);
+  const displayedText = item.status === 'inProgress' ? deferredText : text;
+  const markdown = useMemo(
+    () =>
+      item.status === 'inProgress'
+        ? ''
+        : normalizeAgentMarkdown(item.text ?? ''),
+    [item.status, item.text]
+  );
+  return (
+    <article
+      className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`}
+      data-item-id={item.id}
+    >
+      {item.status === 'inProgress' ? (
+        <TextContent text={displayedText} />
+      ) : (
+        <MarkdownContent text={text} onCopy={onCopy} onOpenFile={onOpenFile} />
+      )}
+      {item.status !== 'inProgress' && markdown.trim() ? (
+        <div className="timeline-agent-message-actions" data-thread-find-ignore>
+          <button
+            type="button"
+            aria-label="Copy response as Markdown"
+            title="Copy response as Markdown"
+            onClick={() => onCopy(markdown, 'Markdown response')}
+          >
+            <AppIcon name="copy" size={12} />
+            <span>Copy Markdown</span>
+          </button>
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -346,6 +494,58 @@ function UserMessage({ item }: { item: CodexItem }) {
   );
 }
 
+function PendingUserMessage({
+  submission,
+  settled = false
+}: {
+  submission: PendingUserSubmission;
+  settled?: boolean;
+}) {
+  const statusLabel =
+    submission.status === 'failed'
+      ? 'Delivery not confirmed'
+      : submission.status === 'accepted'
+        ? submission.mode === 'steer'
+          ? 'Steer queued'
+          : 'Sent to Codex'
+        : submission.mode === 'steer'
+          ? 'Queueing steer…'
+          : 'Sending to Codex…';
+  return (
+    <article
+      className={`timeline-user-message pending-submission ${submission.status}`}
+      data-client-message-id={submission.clientId}
+    >
+      {submission.text ? <TextContent text={submission.text} /> : null}
+      {submission.resources.length ? (
+        <div className="timeline-message-attachments">
+          {submission.resources.map((resource, index) => (
+            <span key={`${resource.kind}-${resource.label}-${index}`}>
+              <AppIcon
+                name={
+                  resource.kind === 'image' || resource.kind === 'file'
+                    ? 'attachment'
+                    : 'code'
+                }
+              />
+              {resource.label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {!settled || submission.status === 'failed' ? <footer
+        className="pending-submission-status"
+        role="status"
+        aria-live="polite"
+        title={submission.error || undefined}
+      >
+        <span aria-hidden="true" />
+        {statusLabel}
+      </footer> : null}
+    </article>
+  );
+}
+
 function ReasoningItem({ item }: { item: CodexItem }) {
   const [expanded, setExpanded] = useState(false);
   const summary = item.summary.join('\n') || 'Codex is reasoning about the next step.';
@@ -353,7 +553,7 @@ function ReasoningItem({ item }: { item: CodexItem }) {
   return (
     <details className="activity-disclosure reasoning-card" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
-        <span className={`activity-pulse ${item.status === 'inProgress' ? 'live' : ''}`} />
+        <span className={`activity-indicator ${item.status === 'inProgress' ? 'live' : ''}`} />
         <span>{summary}</span>
         <span className="disclosure-action">{expanded ? 'Hide reasoning' : 'Show reasoning'}</span>
       </summary>
@@ -416,13 +616,27 @@ function CommandItem({
   const [fullCommand, setFullCommand] = useState(false);
   const running = item.status === 'inProgress';
   const output = item.output ?? '';
+  const liveOutput = useThrottledLiveText(output, running);
+  const deferredOutput = useDeferredValue(liveOutput);
+  const renderedOutput = running ? deferredOutput : output;
   const displayedOutput =
-    !expanded && output.length > 12_000
-      ? `… earlier output hidden …\n${output.slice(-12_000)}`
-      : output;
+    !expanded && renderedOutput.length > 12_000
+      ? `… earlier output hidden …\n${renderedOutput.slice(-12_000)}`
+      : renderedOutput;
   const command = item.command || 'Command details unavailable';
   const commandIsLong = command.length > 160 || command.includes('\n');
-  const localDevelopmentUrl = findLocalDevelopmentUrl(`${output}\n${command}`);
+  const detectedLocalDevelopmentUrl = useMemo(() => {
+    const boundedOutput =
+      renderedOutput.length <= 24_000
+        ? renderedOutput
+        : `${renderedOutput.slice(0, 4_096)}\n${renderedOutput.slice(-16_384)}`;
+    return findLocalDevelopmentUrl(`${command}\n${boundedOutput}`);
+  }, [command, renderedOutput]);
+  const retainedLocalDevelopmentUrl = useRef<string | null>(null);
+  if (detectedLocalDevelopmentUrl) {
+    retainedLocalDevelopmentUrl.current = detectedLocalDevelopmentUrl;
+  }
+  const localDevelopmentUrl = retainedLocalDevelopmentUrl.current;
   return (
     <article className={`activity-card command-card ${running ? 'running' : ''}`} data-item-id={item.id}>
       <header>
@@ -931,15 +1145,7 @@ function GenericItem({ item }: { item: CodexItem }) {
   );
 }
 
-function TimelineItem({
-  item,
-  onCopy,
-  onOpenFile,
-  onRevealPath,
-  onRevertFile,
-  onOpenTerminal,
-  onOpenBrowser
-}: Pick<
+type TimelineItemProps = Pick<
   ConversationTimelineProps,
   | 'onCopy'
   | 'onOpenFile'
@@ -947,35 +1153,28 @@ function TimelineItem({
   | 'onRevertFile'
   | 'onOpenTerminal'
   | 'onOpenBrowser'
-> & { item: CodexItem }) {
+> & { item: CodexItem };
+
+function TimelineItemComponent({
+  item,
+  onCopy,
+  onOpenFile,
+  onRevealPath,
+  onRevertFile,
+  onOpenTerminal,
+  onOpenBrowser
+}: TimelineItemProps) {
   switch (item.kind) {
     case 'userMessage':
       return <UserMessage item={item} />;
     case 'agentMessage':
-      {
-        const markdown = item.text ? normalizeAgentMarkdown(item.text) : '';
-        return (
-          <article
-            className={`timeline-agent-message ${item.status === 'inProgress' ? 'streaming' : ''}`}
-            data-item-id={item.id}
-          >
-            <MarkdownContent text={item.text || '…'} onCopy={onCopy} />
-            {item.status !== 'inProgress' && markdown.trim() ? (
-              <div className="timeline-agent-message-actions" data-thread-find-ignore>
-                <button
-                  type="button"
-                  aria-label="Copy response as Markdown"
-                  title="Copy response as Markdown"
-                  onClick={() => onCopy(markdown, 'Markdown response')}
-                >
-                  <AppIcon name="copy" size={12} />
-                  <span>Copy Markdown</span>
-                </button>
-              </div>
-            ) : null}
-          </article>
-        );
-      }
+      return (
+        <AgentMessage
+          item={item}
+          onCopy={onCopy}
+          onOpenFile={onOpenFile}
+        />
+      );
     case 'reasoning':
       return <ReasoningItem item={item} />;
     case 'plan':
@@ -1018,9 +1217,22 @@ function TimelineItem({
   }
 }
 
+const TimelineItem = memo(
+  TimelineItemComponent,
+  (previous, next) =>
+    previous.item === next.item &&
+    previous.onCopy === next.onCopy &&
+    previous.onOpenFile === next.onOpenFile &&
+    previous.onRevealPath === next.onRevealPath &&
+    previous.onRevertFile === next.onRevertFile &&
+    previous.onOpenTerminal === next.onOpenTerminal &&
+    previous.onOpenBrowser === next.onOpenBrowser
+);
+
 function TurnBlockComponent({
   turn,
   approvals,
+  pendingSubmissions = EMPTY_SUBMISSIONS,
   onRespondToApproval,
   onRespondToUserInput,
   onCopy,
@@ -1040,6 +1252,13 @@ function TurnBlockComponent({
   );
   return (
     <section className={`turn-block ${turn.status}`} data-turn-id={turn.id}>
+      {pendingSubmissions.filter((submission) => submission.mode === 'turn').map((submission) => (
+        <PendingUserMessage
+          key={submission.clientId}
+          submission={submission}
+          settled={turn.status !== 'inProgress'}
+        />
+      ))}
       {turn.items.map((item) => (
         <div className="timeline-item-wrap" key={item.id}>
           <TimelineItem
@@ -1059,6 +1278,13 @@ function TurnBlockComponent({
             />
           ) : null}
         </div>
+      ))}
+      {pendingSubmissions.filter((submission) => submission.mode === 'steer').map((submission) => (
+        <PendingUserMessage
+          key={submission.clientId}
+          submission={submission}
+          settled={turn.status !== 'inProgress'}
+        />
       ))}
       {remainingApprovals.map((approval) => (
         <ApprovalCard
@@ -1089,13 +1315,27 @@ const TurnBlock = memo(
   TurnBlockComponent,
   (previous, next) =>
     previous.turn === next.turn &&
+    (previous.pendingSubmissions === next.pendingSubmissions ||
+      ((previous.pendingSubmissions?.length ?? 0) === (next.pendingSubmissions?.length ?? 0) &&
+        (previous.pendingSubmissions ?? EMPTY_SUBMISSIONS).every(
+          (submission, index) => submission === next.pendingSubmissions?.[index]
+        ))) &&
     previous.approvals.length === next.approvals.length &&
-    previous.approvals.every((approval, index) => approval === next.approvals[index])
+    previous.approvals.every((approval, index) => approval === next.approvals[index]) &&
+    previous.onRespondToApproval === next.onRespondToApproval &&
+    previous.onRespondToUserInput === next.onRespondToUserInput &&
+    previous.onCopy === next.onCopy &&
+    previous.onOpenFile === next.onOpenFile &&
+    previous.onRevealPath === next.onRevealPath &&
+    previous.onRevertFile === next.onRevertFile &&
+    previous.onOpenTerminal === next.onOpenTerminal &&
+    previous.onOpenBrowser === next.onOpenBrowser
 );
 
 function ConversationTimelineComponent({
   thread,
   approvals,
+  pendingSubmissions = EMPTY_SUBMISSIONS,
   usage,
   recovering = false,
   onRespondToApproval,
@@ -1111,8 +1351,8 @@ function ConversationTimelineComponent({
   const contentRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const followingRef = useRef(true);
+  const scrollFrameRef = useRef<number | null>(null);
   const visibleTurnLimitBeforeFindRef = useRef(INITIAL_VISIBLE_TURNS);
-  const [following, setFollowing] = useState(true);
   const [unseenBelow, setUnseenBelow] = useState(false);
   const [visibleTurnLimit, setVisibleTurnLimit] = useState(INITIAL_VISIBLE_TURNS);
   const [findOpen, setFindOpen] = useState(false);
@@ -1126,20 +1366,21 @@ function ConversationTimelineComponent({
     () => thread.turns.slice(firstVisibleTurnIndex),
     [firstVisibleTurnIndex, thread.turns]
   );
-  const contentSignature = useMemo(
-    () =>
-      `${thread.turns.length}:${
-        latestTurn?.items.reduce(
-          (total, item) =>
-            total +
-            (item.text?.length ?? 0) +
-            (item.output?.length ?? 0) +
-            item.changes.length,
-          latestTurn.items.length
-        ) ?? 0
-      }`,
-    [latestTurn, thread.turns.length]
-  );
+  const scheduleFollowScroll = useCallback(() => {
+    if (!followingRef.current || scrollFrameRef.current != null) return;
+    // The sentinel also keeps synchronous requestAnimationFrame test doubles
+    // from leaving a stale frame id behind.
+    scrollFrameRef.current = -1;
+    const frame = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const element = scrollRef.current;
+      if (!element || !followingRef.current) return;
+      const bottom = element.scrollHeight;
+      if (element.scrollTop !== bottom) element.scrollTop = bottom;
+      setUnseenBelow((current) => (current ? false : current));
+    });
+    if (scrollFrameRef.current != null) scrollFrameRef.current = frame;
+  }, []);
 
   const closeFind = () => {
     clearThreadFindHighlights(contentRef.current);
@@ -1249,7 +1490,6 @@ function ConversationTimelineComponent({
     return () => clearThreadFindHighlights(root);
   }, [
     activeFindIndex,
-    contentSignature,
     findOpen,
     findQuery,
     findRevision,
@@ -1257,74 +1497,54 @@ function ConversationTimelineComponent({
   ]);
 
   useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
-    if (following) {
-      element.scrollTop = element.scrollHeight;
-      setUnseenBelow(false);
+    if (followingRef.current) {
+      scheduleFollowScroll();
     } else {
-      setUnseenBelow(true);
+      setUnseenBelow((current) => (current ? current : true));
     }
-  }, [contentSignature, following]);
+  }, [latestTurn, pendingSubmissions, scheduleFollowScroll]);
 
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
+    if (scrollFrameRef.current != null && scrollFrameRef.current >= 0) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+    }
+    scrollFrameRef.current = null;
     followingRef.current = true;
     element.scrollTop = element.scrollHeight;
-    setFollowing(true);
     setUnseenBelow(false);
-
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      if (!followingRef.current) return;
-      element.scrollTop = element.scrollHeight;
-      secondFrame = window.requestAnimationFrame(() => {
-        if (followingRef.current) {
-          element.scrollTop = element.scrollHeight;
-        }
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      window.cancelAnimationFrame(secondFrame);
-    };
-  }, [recovering, thread.id]);
+    scheduleFollowScroll();
+  }, [recovering, scheduleFollowScroll, thread.id]);
 
   useEffect(() => {
     const element = scrollRef.current;
     const content = contentRef.current;
     if (!element || !content || typeof ResizeObserver === 'undefined') return;
-    let frame = 0;
     const observer = new ResizeObserver(() => {
-      if (!followingRef.current) return;
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        if (followingRef.current) {
-          element.scrollTop = element.scrollHeight;
-          setUnseenBelow(false);
-        }
-      });
+      scheduleFollowScroll();
     });
     observer.observe(content);
-    return () => {
-      observer.disconnect();
-      window.cancelAnimationFrame(frame);
-    };
-  }, [thread.id]);
+    return () => observer.disconnect();
+  }, [scheduleFollowScroll, thread.id]);
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current != null && scrollFrameRef.current >= 0) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+      scrollFrameRef.current = null;
+    },
+    []
+  );
 
   useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
     clearThreadFindHighlights(contentRef.current);
     setFindOpen(false);
     setFindQuery('');
     setFindMatchCount(0);
     setActiveFindIndex(0);
     visibleTurnLimitBeforeFindRef.current = INITIAL_VISIBLE_TURNS;
-    followingRef.current = true;
-    setFollowing(true);
-    setUnseenBelow(false);
     setVisibleTurnLimit(INITIAL_VISIBLE_TURNS);
   }, [thread.id]);
 
@@ -1342,18 +1562,46 @@ function ConversationTimelineComponent({
     }
     return grouped;
   }, [threadApprovals]);
-  const knownTurnIds = useMemo(
-    () => new Set(thread.turns.map((turn) => turn.id)),
-    [thread.turns]
+  const localSubmissions = useMemo(() => {
+    const byTurn = new Map<string, PendingUserSubmission[]>();
+    const unbound: PendingUserSubmission[] = [];
+    if (!pendingSubmissions.length) return { byTurn, unbound };
+    const turnIds = new Set(thread.turns.map((turn) => turn.id));
+    for (const submission of unacknowledgedSubmissions(pendingSubmissions, thread)) {
+      if (submission.turnId && turnIds.has(submission.turnId)) {
+        const existing = byTurn.get(submission.turnId);
+        if (existing) existing.push(submission);
+        else byTurn.set(submission.turnId, [submission]);
+      } else {
+        unbound.push(submission);
+      }
+    }
+    return { byTurn, unbound };
+  }, [pendingSubmissions, thread.id, thread.turns]);
+  const unassociatedApprovals = useMemo(
+    () => {
+      if (
+        threadApprovals.length === 0 ||
+        threadApprovals.every((approval) => !approval.turnId)
+      ) {
+        return threadApprovals;
+      }
+      const knownTurnIds = new Set(thread.turns.map((turn) => turn.id));
+      return threadApprovals.filter(
+        (approval) => !approval.turnId || !knownTurnIds.has(approval.turnId)
+      );
+    },
+    [thread.turns, threadApprovals]
   );
-  const unassociatedApprovals = threadApprovals.filter(
-    (approval) => !approval.turnId || !knownTurnIds.has(approval.turnId)
-  );
-  const runningItems =
-    latestTurn?.status === 'inProgress'
-      ? latestTurn.items.filter((item) => item.status === 'inProgress')
-      : [];
-  const runningItem = runningItems.length ? runningItems[runningItems.length - 1] : undefined;
+  let runningItem: CodexItem | undefined;
+  if (latestTurn?.status === 'inProgress') {
+    for (let index = latestTurn.items.length - 1; index >= 0; index -= 1) {
+      if (latestTurn.items[index].status === 'inProgress') {
+        runningItem = latestTurn.items[index];
+        break;
+      }
+    }
+  }
   const usagePresentation = usage ? tokenUsagePresentation(usage) : null;
 
   return (
@@ -1430,18 +1678,19 @@ function ConversationTimelineComponent({
           const element = event.currentTarget;
           const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 72;
           followingRef.current = atBottom;
-          setFollowing(atBottom);
-          if (atBottom) setUnseenBelow(false);
+          if (atBottom) {
+            setUnseenBelow((current) => (current ? false : current));
+          }
         }}
       >
         <div ref={contentRef} className="conversation-column">
-          {thread.turns.length === 0 && recovering ? (
+          {thread.turns.length === 0 && pendingSubmissions.length === 0 && recovering ? (
             <div className="timeline-empty timeline-recovering" role="status">
               <span className="timeline-history-spinner" aria-hidden="true" />
               <h2>Loading thread history</h2>
               <p>Reading this conversation from the local Codex runtime…</p>
             </div>
-          ) : thread.turns.length === 0 ? (
+          ) : thread.turns.length === 0 && pendingSubmissions.length === 0 ? (
             <div className="timeline-empty">
               <span className="empty-kicker">Ready</span>
               <h2>Start with a task</h2>
@@ -1475,6 +1724,7 @@ function ConversationTimelineComponent({
                 <TurnBlock
                   key={turn.id}
                   turn={turn}
+                  pendingSubmissions={localSubmissions.byTurn.get(turn.id) ?? EMPTY_SUBMISSIONS}
                   approvals={approvalsByTurn.get(turn.id) ?? []}
                   onRespondToApproval={onRespondToApproval}
                   onRespondToUserInput={onRespondToUserInput}
@@ -1488,6 +1738,12 @@ function ConversationTimelineComponent({
               ))}
             </>
           )}
+          {localSubmissions.unbound.map((submission) => (
+            <PendingUserMessage
+              key={submission.clientId}
+              submission={submission}
+            />
+          ))}
           {unassociatedApprovals.map((approval) => (
             <ApprovalCard
               key={String(approval.requestId)}
@@ -1505,7 +1761,7 @@ function ConversationTimelineComponent({
       </div>
       {runningItem ? (
         <div className="current-action">
-          <span className="activity-pulse live" />
+          <span className="activity-indicator live" />
           <span>
             {runningItem.kind === 'commandExecution'
               ? runningItem.command || 'Running command'
@@ -1518,11 +1774,9 @@ function ConversationTimelineComponent({
           type="button"
           className="jump-to-latest"
           onClick={() => {
-            const element = scrollRef.current;
             followingRef.current = true;
-            if (element) element.scrollTop = element.scrollHeight;
-            setFollowing(true);
             setUnseenBelow(false);
+            scheduleFollowScroll();
           }}
         >
           <AppIcon name="arrowDown" />

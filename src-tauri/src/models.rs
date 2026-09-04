@@ -145,6 +145,8 @@ pub struct CodexThreadUiMetadata {
     #[serde(default)]
     pub fallback_title: String,
     #[serde(default)]
+    pub sort_order: Option<i64>,
+    #[serde(default)]
     pub pinned: bool,
     #[serde(default)]
     pub unread: bool,
@@ -175,6 +177,7 @@ impl CodexThreadUiMetadata {
             thread_id,
             workspace_id,
             fallback_title: String::new(),
+            sort_order: None,
             pinned: false,
             unread: false,
             archived: false,
@@ -192,6 +195,9 @@ impl CodexThreadUiMetadata {
 
     pub fn normalized(mut self) -> Self {
         self.fallback_title = self.fallback_title.trim().chars().take(200).collect();
+        self.sort_order = self
+            .sort_order
+            .filter(|sort_order| (0..=1_000_000).contains(sort_order));
         self.draft = self.draft.chars().take(200_000).collect();
         self.prompt_history = self
             .prompt_history

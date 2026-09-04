@@ -8,7 +8,7 @@ mod models;
 mod project_terminal;
 mod storage;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::{Manager, State};
@@ -38,10 +38,15 @@ struct AppState {
 async fn browser_get_diagnostics(
     state: State<'_, AppState>,
     thread_id: Option<String>,
+    probe_runtime: Option<bool>,
 ) -> Result<BrowserDiagnostics, String> {
     state
         .browser
-        .diagnostics(state.codex.clone(), thread_id)
+        .diagnostics(
+            state.codex.clone(),
+            thread_id,
+            probe_runtime.unwrap_or(false),
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -176,10 +181,21 @@ fn get_codex_thread_ui_metadata(
 }
 
 #[tauri::command]
-fn save_codex_thread_ui_metadata(
+async fn save_codex_thread_ui_metadata(
     metadata: CodexThreadUiMetadata,
 ) -> Result<CodexThreadUiMetadata, String> {
-    storage::save_codex_thread_ui_metadata(metadata).map_err(|error| error.to_string())
+    spawn_blocking_command("Thread metadata save", move || {
+        storage::save_codex_thread_ui_metadata(metadata).map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+fn set_codex_thread_order(
+    workspace_id: String,
+    thread_ids: Vec<String>,
+) -> Result<Vec<CodexThreadUiMetadata>, String> {
+    storage::set_codex_thread_order(&workspace_id, thread_ids).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -322,6 +338,19 @@ async fn codex_resume_thread(
 }
 
 #[tauri::command]
+async fn codex_unsubscribe_thread(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<String, String> {
+    state
+        .codex
+        .clone()
+        .unsubscribe_thread(thread_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn codex_fork_thread(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -389,13 +418,20 @@ async fn codex_start_turn(
     state: State<'_, AppState>,
     workspace_path: String,
     thread_id: String,
+    client_user_message_id: String,
     inputs: Vec<ComposerInput>,
     preferences: ThreadPreferences,
 ) -> Result<CodexTurn, String> {
     state
         .codex
         .clone()
-        .start_turn(workspace_path, thread_id, inputs, preferences)
+        .start_turn(
+            workspace_path,
+            thread_id,
+            client_user_message_id,
+            inputs,
+            preferences,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -406,12 +442,19 @@ async fn codex_steer_turn(
     workspace_path: String,
     thread_id: String,
     turn_id: String,
+    client_user_message_id: String,
     inputs: Vec<ComposerInput>,
 ) -> Result<(), String> {
     state
         .codex
         .clone()
-        .steer_turn(workspace_path, thread_id, turn_id, inputs)
+        .steer_turn(
+            workspace_path,
+            thread_id,
+            turn_id,
+            client_user_message_id,
+            inputs,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -580,53 +623,87 @@ fn resolve_registered_workspace_path(path: &str) -> Result<String, String> {
     Ok(requested.to_string_lossy().to_string())
 }
 
-#[tauri::command]
-fn get_git_info(workspace_path: String) -> Result<Option<GitInfo>, String> {
-    let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
-    git_tools::get_git_info(&workspace_path).map_err(|error| error.to_string())
+async fn spawn_blocking_command<T, F>(label: &'static str, operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| format!("{label} task failed: {error}"))?
 }
 
 #[tauri::command]
-fn git_list_branches(workspace_path: String) -> Result<Vec<GitBranchEntry>, String> {
-    let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
-    git_tools::list_branches(&workspace_path).map_err(|error| error.to_string())
+async fn get_git_info(workspace_path: String) -> Result<Option<GitInfo>, String> {
+    spawn_blocking_command("Git info", move || {
+        let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
+        git_tools::get_git_info(&workspace_path).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn git_workspace_status(workspace_path: String) -> Result<GitWorkspaceStatus, String> {
-    let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
-    git_tools::workspace_status(&workspace_path).map_err(|error| error.to_string())
+async fn git_list_branches(workspace_path: String) -> Result<Vec<GitBranchEntry>, String> {
+    spawn_blocking_command("Git branch list", move || {
+        let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
+        git_tools::list_branches(&workspace_path).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn git_workspace_diff(workspace_path: String, file_path: Option<String>) -> Result<String, String> {
-    let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
-    git_tools::workspace_diff(&workspace_path, file_path.as_deref())
-        .map_err(|error| error.to_string())
+async fn git_workspace_status(workspace_path: String) -> Result<GitWorkspaceStatus, String> {
+    spawn_blocking_command("Git workspace status", move || {
+        let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
+        git_tools::workspace_status(&workspace_path).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn git_revert_file(workspace_path: String, file_path: String) -> Result<bool, String> {
-    let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
-    git_tools::revert_file(&workspace_path, &file_path)
-        .map(|_| true)
-        .map_err(|error| error.to_string())
+async fn git_workspace_diff(
+    workspace_path: String,
+    file_path: Option<String>,
+) -> Result<String, String> {
+    spawn_blocking_command("Git workspace diff", move || {
+        let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
+        git_tools::workspace_diff(&workspace_path, file_path.as_deref())
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn git_checkout_branch(workspace_path: String, branch_name: String) -> Result<bool, String> {
-    let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
-    git_tools::checkout_branch(&workspace_path, &branch_name)
-        .map(|_| true)
-        .map_err(|error| error.to_string())
+async fn git_revert_file(workspace_path: String, file_path: String) -> Result<bool, String> {
+    spawn_blocking_command("Git file revert", move || {
+        let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
+        git_tools::revert_file(&workspace_path, &file_path)
+            .map(|_| true)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn git_create_branch(workspace_path: String, branch_name: String) -> Result<bool, String> {
-    let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
-    git_tools::create_branch(&workspace_path, &branch_name)
-        .map(|_| true)
-        .map_err(|error| error.to_string())
+async fn git_checkout_branch(workspace_path: String, branch_name: String) -> Result<bool, String> {
+    spawn_blocking_command("Git branch checkout", move || {
+        let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
+        git_tools::checkout_branch(&workspace_path, &branch_name)
+            .map(|_| true)
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn git_create_branch(workspace_path: String, branch_name: String) -> Result<bool, String> {
+    spawn_blocking_command("Git branch creation", move || {
+        let workspace_path = resolve_registered_workspace_path(&workspace_path)?;
+        git_tools::create_branch(&workspace_path, &branch_name)
+            .map(|_| true)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -758,27 +835,91 @@ fn open_codex_configuration() -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn open_external_url(url: String) -> Result<(), String> {
+const GOOGLE_CHROME_APPLICATION: &str = "/Applications/Google Chrome.app";
+
+fn validate_external_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim();
     if trimmed.len() > 4_096 || trimmed.chars().any(char::is_control) {
         return Err("URL is invalid or too long".to_string());
     }
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+    let parsed = tauri::Url::parse(trimmed).map_err(|_| "URL is invalid".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("Only http(s) URLs are allowed".to_string());
     }
+    Ok(parsed.to_string())
+}
 
+fn external_open_arguments(url: &str, chrome_available: bool) -> Vec<String> {
+    if chrome_available {
+        vec![
+            "-a".to_string(),
+            "Google Chrome".to_string(),
+            url.to_string(),
+        ]
+    } else {
+        vec![url.to_string()]
+    }
+}
+
+fn run_system_open(arguments: &[String]) -> Result<bool, String> {
     std::process::Command::new("/usr/bin/open")
-        .arg(trimmed)
+        .args(arguments)
         .status()
+        .map(|status| status.success())
         .map_err(|error| error.to_string())
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err("Failed to open URL".to_string())
+}
+
+fn launch_external_url(url: &str) -> Result<(), String> {
+    let url = validate_external_url(url)?;
+    let chrome_available = Path::new(GOOGLE_CHROME_APPLICATION).is_dir();
+    if chrome_available && run_system_open(&external_open_arguments(&url, true))? {
+        return Ok(());
+    }
+
+    if run_system_open(&external_open_arguments(&url, false))? {
+        Ok(())
+    } else {
+        Err("Failed to open URL".to_string())
+    }
+}
+
+fn is_internal_app_navigation(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" | "asset" | "customprotocol" => true,
+        "http" | "https" if url.host_str() == Some("tauri.localhost") => true,
+        "http"
+            if cfg!(debug_assertions)
+                && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+                && url.port() == Some(1420) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn external_navigation_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("external-navigation")
+        .on_navigation(|webview, url| {
+            if is_internal_app_navigation(url) {
+                return true;
             }
+            if webview.label() == "main" && matches!(url.scheme(), "http" | "https") {
+                let target = url.to_string();
+                std::thread::spawn(move || {
+                    if let Err(error) = launch_external_url(&target) {
+                        eprintln!("Could not redirect external navigation to the browser: {error}");
+                    }
+                });
+            }
+            false
         })
+        .build()
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    launch_external_url(&url)
 }
 
 #[tauri::command]
@@ -810,7 +951,7 @@ fn write_text_to_clipboard(text: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn project_terminal_start(
+async fn project_terminal_start(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     workspace_id: String,
@@ -818,10 +959,13 @@ fn project_terminal_start(
     cols: u16,
     rows: u16,
 ) -> Result<ProjectTerminalSessionInfo, String> {
-    state
-        .project_terminal
-        .start(app, &workspace_id, cwd.as_deref(), cols, rows)
-        .map_err(|error| error.to_string())
+    let manager = state.project_terminal.clone();
+    spawn_blocking_command("Project Terminal start", move || {
+        manager
+            .start(app, &workspace_id, cwd.as_deref(), cols, rows)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -835,36 +979,46 @@ fn project_terminal_list(
 }
 
 #[tauri::command]
-fn project_terminal_write(
+async fn project_terminal_write(
     state: State<'_, AppState>,
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    state
-        .project_terminal
-        .write(&session_id, &data)
-        .map_err(|error| error.to_string())
+    let manager = state.project_terminal.clone();
+    spawn_blocking_command("Project Terminal write", move || {
+        manager
+            .write(&session_id, &data)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn project_terminal_resize(
+async fn project_terminal_resize(
     state: State<'_, AppState>,
     session_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    state
-        .project_terminal
-        .resize(&session_id, cols, rows)
-        .map_err(|error| error.to_string())
+    let manager = state.project_terminal.clone();
+    spawn_blocking_command("Project Terminal resize", move || {
+        manager
+            .resize(&session_id, cols, rows)
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn project_terminal_stop(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state
-        .project_terminal
-        .stop(&session_id)
-        .map_err(|error| error.to_string())
+async fn project_terminal_stop(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let manager = state.project_terminal.clone();
+    spawn_blocking_command("Project Terminal stop", move || {
+        manager.stop(&session_id).map_err(|error| error.to_string())
+    })
+    .await
 }
 
 fn main() {
@@ -881,6 +1035,7 @@ fn main() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(external_navigation_plugin())
         .enable_macos_default_menu(true)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -961,6 +1116,7 @@ fn main() {
             codex_read_thread,
             codex_start_thread,
             codex_resume_thread,
+            codex_unsubscribe_thread,
             codex_fork_thread,
             codex_rename_thread,
             codex_archive_thread,
@@ -978,6 +1134,7 @@ fn main() {
             list_codex_thread_ui_metadata,
             get_codex_thread_ui_metadata,
             save_codex_thread_ui_metadata,
+            set_codex_thread_order,
             list_workspaces,
             add_workspace,
             set_workspace_order,
@@ -1025,7 +1182,9 @@ fn main() {
 
 #[cfg(test)]
 mod command_tests {
-    use super::shell_quote;
+    use super::{
+        external_open_arguments, is_internal_app_navigation, shell_quote, validate_external_url,
+    };
 
     #[test]
     fn project_shell_commands_escape_spaces_and_single_quotes() {
@@ -1033,5 +1192,41 @@ mod command_tests {
             shell_quote("/tmp/Project's workspace"),
             "'/tmp/Project'\\''s workspace'"
         );
+    }
+
+    #[test]
+    fn external_urls_are_validated_and_chrome_is_preferred() {
+        assert_eq!(
+            validate_external_url(" https://github.com/login?from=terminal ").unwrap(),
+            "https://github.com/login?from=terminal"
+        );
+        assert!(validate_external_url("javascript:alert(1)").is_err());
+        assert!(validate_external_url("file:///tmp/private").is_err());
+        assert!(validate_external_url("https://example.com/\nattack").is_err());
+
+        assert_eq!(
+            external_open_arguments("https://github.com/login", true),
+            vec!["-a", "Google Chrome", "https://github.com/login"]
+        );
+        assert_eq!(
+            external_open_arguments("https://github.com/login", false),
+            vec!["https://github.com/login"]
+        );
+    }
+
+    #[test]
+    fn only_application_origins_can_replace_the_main_webview() {
+        assert!(is_internal_app_navigation(
+            &tauri::Url::parse("tauri://localhost/index.html").unwrap()
+        ));
+        assert!(is_internal_app_navigation(
+            &tauri::Url::parse("http://tauri.localhost/index.html").unwrap()
+        ));
+        assert!(!is_internal_app_navigation(
+            &tauri::Url::parse("https://github.com/login").unwrap()
+        ));
+        assert!(!is_internal_app_navigation(
+            &tauri::Url::parse("javascript:alert(1)").unwrap()
+        ));
     }
 }

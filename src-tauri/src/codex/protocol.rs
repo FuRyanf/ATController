@@ -8,9 +8,13 @@ use serde_json::{json, Value};
 
 use super::process;
 
-const MAX_HISTORY_TEXT_CHARS: usize = 1_000_000;
-const MAX_HISTORY_COMMAND_OUTPUT_CHARS: usize = 512_000;
-const MAX_HISTORY_DIFF_CHARS: usize = 1_000_000;
+// Large app-server histories can contain many megabytes of repeated command
+// output and diffs. Keep enough tail context for diagnosis and copying without
+// transferring pathological payloads into WebKit's layout and accessibility
+// trees, where they can multiply into hundreds of megabytes.
+const MAX_HISTORY_TEXT_CHARS: usize = 256_000;
+const MAX_HISTORY_COMMAND_OUTPUT_CHARS: usize = 128_000;
+const MAX_HISTORY_DIFF_CHARS: usize = 256_000;
 const MAX_HISTORY_JSON_CHARS: usize = 16_000;
 const HISTORY_TRUNCATION_MARKER: &str = "\n[Earlier content truncated by ATController]\n";
 
@@ -201,6 +205,7 @@ pub struct BrowserActivity {
 #[serde(rename_all = "camelCase")]
 pub struct CodexItem {
     pub id: String,
+    pub client_id: Option<String>,
     pub kind: String,
     pub status: Option<String>,
     pub phase: Option<String>,
@@ -678,6 +683,7 @@ pub fn normalize_item(value: &Value) -> Result<CodexItem> {
     let id = optional_string(value, "id").unwrap_or_else(|| format!("unknown-{kind}"));
     let mut item = CodexItem {
         id,
+        client_id: optional_string(value, "clientId"),
         kind: kind.clone(),
         status: value.get("status").map(value_label),
         phase: value
@@ -1351,17 +1357,12 @@ pub fn normalize_notification(sequence: u64, method: &str, params: &Value) -> Co
         | "item/commandExecution/outputDelta"
         | "item/fileChange/outputDelta" => {
             event.delta = optional_string(params, "delta");
-            if method.contains("reasoning") {
-                event.data = Some(params.clone());
-            }
         }
         "item/mcpToolCall/progress" => {
             event.delta = optional_string(params, "message");
-            event.data = Some(params.clone());
         }
         "item/reasoning/summaryPartAdded" => {
             event.delta = Some(String::new());
-            event.data = Some(params.clone());
         }
         "item/fileChange/patchUpdated" => {
             event.item = Some(CodexItem {
@@ -1408,7 +1409,18 @@ pub fn normalize_notification(sequence: u64, method: &str, params: &Value) -> Co
                 ..CodexItem::default()
             });
         }
-        "turn/diff/updated" | "serverRequest/resolved" => event.data = Some(params.clone()),
+        // Git remains the source of truth for the inspector. The app server's
+        // full turn diff can be very large, and sending a duplicate across the
+        // WebKit bridge on every patch update creates avoidable serialization
+        // and garbage-collection pressure.
+        "turn/diff/updated" => {}
+        "serverRequest/resolved" => {
+            event.data = params
+                .get("requestId")
+                .cloned()
+                .map(|request_id| json!({ "requestId": request_id }));
+        }
+        "account/updated" | "account/rateLimits/updated" | "account/login/completed" => {}
         "error" => {
             event.error = params.get("error").map(normalize_error);
             if let Some(error) = event.error.as_mut() {
@@ -1533,6 +1545,7 @@ fn event_kind(method: &str) -> &'static str {
         "item/reasoning/summaryPartAdded" => "reasoningSummaryPartAdded",
         "item/reasoning/textDelta" => "reasoningDelta",
         "item/commandExecution/outputDelta" => "commandOutputDelta",
+        "item/fileChange/outputDelta" => "fileChangeOutputDelta",
         "item/fileChange/patchUpdated" => "fileChangeUpdated",
         "item/mcpToolCall/progress" => "mcpToolCallProgress",
         "turn/diff/updated" => "turnDiffUpdated",
@@ -1735,12 +1748,31 @@ fn normalize_rate_limits(
 ) -> (Option<CodexRateLimitWindow>, Option<CodexRateLimitWindow>) {
     const FIVE_HOURS: i64 = 300;
     const WEEK: i64 = 10_080;
-    let snapshots = result
-        .get("rateLimitsByLimitId")
-        .and_then(Value::as_object)
-        .map(|limits| limits.values().collect::<Vec<_>>())
-        .filter(|limits| !limits.is_empty())
-        .unwrap_or_else(|| result.get("rateLimits").into_iter().collect());
+
+    // Newer runtimes report independent model and reserve buckets alongside
+    // the general Codex allowance. Those buckets can use the same 5-hour or
+    // weekly durations, so selecting solely by duration can display an unused
+    // model bucket as 100% remaining. Restrict the aggregate UI to the known
+    // general Codex buckets and retain the legacy single-snapshot fallback.
+    let mut snapshots = Vec::new();
+    if let Some(limits) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
+        for limit_id in ["codex", "burst"] {
+            if let Some(snapshot) = limits.get(limit_id) {
+                snapshots.push(snapshot);
+            }
+        }
+        for snapshot in limits.values() {
+            let limit_id = snapshot.get("limitId").and_then(Value::as_str);
+            if matches!(limit_id, Some("codex" | "burst"))
+                && !snapshots.iter().any(|known| std::ptr::eq(*known, snapshot))
+            {
+                snapshots.push(snapshot);
+            }
+        }
+    }
+    if snapshots.is_empty() {
+        snapshots.extend(result.get("rateLimits"));
+    }
     let windows = snapshots
         .into_iter()
         .flat_map(|snapshot| [snapshot.get("primary"), snapshot.get("secondary")])
@@ -1920,9 +1952,63 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        build_wire_inputs, normalize_item, normalize_notification, normalize_plugins,
-        normalize_rate_limits, normalize_server_request, ComposerInput,
+        build_wire_inputs, normalize_catalog, normalize_item, normalize_notification,
+        normalize_plugins, normalize_rate_limits, normalize_server_request, ComposerInput,
     };
+
+    #[test]
+    fn normalizes_astra_for_runtime_model_selection() {
+        let catalog = normalize_catalog(
+            &json!({
+                "data": [{
+                    "id": "gpt-6-astra",
+                    "model": "gpt-6-astra",
+                    "displayName": "GPT-6-Astra",
+                    "description": "Our most capable model for complex, demanding work.",
+                    "hidden": false,
+                    "isDefault": true,
+                    "defaultReasoningEffort": "medium",
+                    "supportedReasoningEfforts": [
+                        { "reasoningEffort": "low", "description": "Lighter reasoning" },
+                        { "reasoningEffort": "medium", "description": "Balanced reasoning" },
+                        { "reasoningEffort": "high", "description": "Greater reasoning depth" },
+                        { "reasoningEffort": "xhigh", "description": "Extra high reasoning depth" },
+                        { "reasoningEffort": "max", "description": "Maximum reasoning depth" },
+                        { "reasoningEffort": "ultra", "description": "Maximum reasoning with delegation" }
+                    ],
+                    "serviceTiers": [{
+                        "id": "priority",
+                        "name": "Fast",
+                        "description": "Increased speed"
+                    }],
+                    "defaultServiceTier": null,
+                    "inputModalities": ["text", "image"]
+                }]
+            }),
+            &json!({ "account": { "type": "chatgpt", "planType": "pro" } }),
+            &json!({}),
+            &json!({ "data": [] }),
+            &json!({ "config": {} }),
+        )
+        .expect("Astra catalog entry should normalize");
+
+        let astra = &catalog.models[0];
+        assert_eq!(astra.id, "gpt-6-astra");
+        assert_eq!(astra.model, "gpt-6-astra");
+        assert_eq!(astra.display_name, "GPT-6-Astra");
+        assert!(astra.is_default);
+        assert_eq!(astra.default_reasoning_effort, "medium");
+        assert_eq!(
+            astra
+                .reasoning_efforts
+                .iter()
+                .map(|effort| effort.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(astra.service_tiers[0].id, "priority");
+        assert_eq!(astra.input_modalities, vec!["text", "image"]);
+    }
 
     #[test]
     fn normalizes_structured_command_items() {
@@ -1944,6 +2030,19 @@ mod tests {
     }
 
     #[test]
+    fn preserves_client_user_message_ids_for_optimistic_reconciliation() {
+        let item = normalize_item(&json!({
+            "type": "userMessage",
+            "id": "item-user-1",
+            "clientId": "atcontroller-message-1",
+            "content": [{"type": "text", "text": "Run the tests", "text_elements": []}]
+        }))
+        .expect("user message should normalize");
+        assert_eq!(item.client_id.as_deref(), Some("atcontroller-message-1"));
+        assert_eq!(item.content[0].text.as_deref(), Some("Run the tests"));
+    }
+
+    #[test]
     fn bounds_verbose_history_payloads_before_the_tauri_boundary() {
         let command = normalize_item(&json!({
             "type": "commandExecution",
@@ -1954,7 +2053,7 @@ mod tests {
         let output = command
             .output
             .expect("command output should remain available");
-        assert!(output.len() < 520_000);
+        assert!(output.len() < 136_000);
         assert!(output.contains("Earlier content truncated"));
 
         let tool = normalize_item(&json!({
@@ -2088,6 +2187,32 @@ mod tests {
     }
 
     #[test]
+    fn high_frequency_notifications_keep_only_ui_relevant_payloads() {
+        let diff = normalize_notification(
+            9,
+            "turn/diff/updated",
+            &json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "large duplicate diff"
+            }),
+        );
+        assert_eq!(diff.kind, "turnDiffUpdated");
+        assert!(diff.data.is_none());
+
+        let resolved = normalize_notification(
+            10,
+            "serverRequest/resolved",
+            &json!({
+                "threadId": "thread-1",
+                "requestId": 42,
+                "largeUnusedPayload": "not forwarded"
+            }),
+        );
+        assert_eq!(resolved.data.unwrap(), json!({ "requestId": 42 }));
+    }
+
+    #[test]
     fn rate_limit_windows_are_selected_by_duration() {
         let (five_hour, weekly) = normalize_rate_limits(&json!({
             "rateLimitsByLimitId": {
@@ -2097,6 +2222,34 @@ mod tests {
         }));
         assert_eq!(five_hour.unwrap().used_percent, 12.5);
         assert_eq!(weekly.unwrap().used_percent, 33.0);
+    }
+
+    #[test]
+    fn rate_limit_windows_ignore_model_specific_and_reserve_buckets() {
+        let (five_hour, weekly) = normalize_rate_limits(&json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": { "usedPercent": 1.0, "windowDurationMins": 10080 }
+            },
+            "rateLimitsByLimitId": {
+                "base_model_inference": {
+                    "limitId": "base_model_inference",
+                    "primary": { "usedPercent": 0.0, "windowDurationMins": 10080 }
+                },
+                "codex": {
+                    "limitId": "codex",
+                    "primary": { "usedPercent": 1.0, "windowDurationMins": 10080 }
+                },
+                "codex_bengalfox": {
+                    "limitId": "codex_bengalfox",
+                    "primary": { "usedPercent": 0.0, "windowDurationMins": 300 },
+                    "secondary": { "usedPercent": 0.0, "windowDurationMins": 10080 }
+                }
+            }
+        }));
+
+        assert!(five_hour.is_none());
+        assert_eq!(weekly.unwrap().used_percent, 1.0);
     }
 
     #[test]

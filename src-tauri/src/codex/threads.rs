@@ -14,6 +14,8 @@ use super::rpc::RequestOptions;
 use super::CodexRuntime;
 use crate::storage;
 
+const NORMAL_SERVICE_TIER_ID: &str = "default";
+
 impl CodexRuntime {
     pub async fn list_threads(
         self: &std::sync::Arc<Self>,
@@ -238,6 +240,25 @@ impl CodexRuntime {
         Ok(session)
     }
 
+    pub async fn unsubscribe_thread(
+        self: &std::sync::Arc<Self>,
+        thread_id: String,
+    ) -> Result<String> {
+        validate_id(&thread_id, "thread id")?;
+        let result = self
+            .request(
+                "thread/unsubscribe",
+                json!({ "threadId": thread_id }),
+                RequestOptions::idempotent(Duration::from_secs(15)),
+            )
+            .await?;
+        result
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("thread/unsubscribe response is missing status"))
+    }
+
     pub async fn fork_thread(
         self: &std::sync::Arc<Self>,
         workspace_path: String,
@@ -352,26 +373,25 @@ impl CodexRuntime {
         self: &std::sync::Arc<Self>,
         workspace_path: String,
         thread_id: String,
+        client_user_message_id: String,
         inputs: Vec<ComposerInput>,
         preferences: ThreadPreferences,
     ) -> Result<CodexTurn> {
         let workspace_path = process::validate_workspace_path(&workspace_path)?;
         validate_id(&thread_id, "thread id")?;
+        validate_id(&client_user_message_id, "client user message id")?;
         self.validate_preferences(&workspace_path, &preferences)
             .await?;
         self.validate_composer_inputs(&workspace_path, &inputs)
             .await?;
         let input = protocol::build_wire_inputs(&workspace_path, inputs)?;
-        let mut params = json!({
-            "threadId": thread_id,
-            "input": input,
-            "cwd": workspace_path,
-            "approvalPolicy": preferences.permission_mode.approval_policy(),
-            "sandboxPolicy": sandbox_policy(preferences.permission_mode, &workspace_path)
-        });
-        optional_insert(&mut params, "model", preferences.model.clone());
-        optional_insert(&mut params, "effort", preferences.reasoning_effort.clone());
-        optional_insert(&mut params, "serviceTier", preferences.service_tier.clone());
+        let params = turn_start_params(
+            &workspace_path,
+            &thread_id,
+            &client_user_message_id,
+            input,
+            &preferences,
+        );
         let result = self
             .request(
                 "turn/start",
@@ -397,21 +417,19 @@ impl CodexRuntime {
         workspace_path: String,
         thread_id: String,
         turn_id: String,
+        client_user_message_id: String,
         inputs: Vec<ComposerInput>,
     ) -> Result<()> {
         let workspace_path = process::validate_workspace_path(&workspace_path)?;
         validate_id(&thread_id, "thread id")?;
         validate_id(&turn_id, "turn id")?;
+        validate_id(&client_user_message_id, "client user message id")?;
         self.validate_composer_inputs(&workspace_path, &inputs)
             .await?;
         let input = protocol::build_wire_inputs(&workspace_path, inputs)?;
         self.request(
             "turn/steer",
-            json!({
-                "threadId": thread_id,
-                "expectedTurnId": turn_id,
-                "input": input
-            }),
+            turn_steer_params(&thread_id, &turn_id, &client_user_message_id, input),
             RequestOptions {
                 timeout: Duration::from_secs(30),
                 idempotent: false,
@@ -506,10 +524,11 @@ impl CodexRuntime {
             }
         }
         if let Some(service_tier) = &preferences.service_tier {
-            if !model
-                .service_tiers
-                .iter()
-                .any(|tier| tier.id == *service_tier)
+            if service_tier != NORMAL_SERVICE_TIER_ID
+                && !model
+                    .service_tiers
+                    .iter()
+                    .any(|tier| tier.id == *service_tier)
             {
                 return Err(anyhow!(
                     "Service tier `{service_tier}` is unsupported by {}",
@@ -590,6 +609,41 @@ fn thread_open_params(
         params["sessionStartSource"] = Value::String(source.to_string());
     }
     params
+}
+
+fn turn_start_params(
+    workspace_path: &str,
+    thread_id: &str,
+    client_user_message_id: &str,
+    input: Vec<Value>,
+    preferences: &ThreadPreferences,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "clientUserMessageId": client_user_message_id,
+        "input": input,
+        "cwd": workspace_path,
+        "approvalPolicy": preferences.permission_mode.approval_policy(),
+        "sandboxPolicy": sandbox_policy(preferences.permission_mode, workspace_path)
+    });
+    optional_insert(&mut params, "model", preferences.model.clone());
+    optional_insert(&mut params, "effort", preferences.reasoning_effort.clone());
+    optional_insert(&mut params, "serviceTier", preferences.service_tier.clone());
+    params
+}
+
+fn turn_steer_params(
+    thread_id: &str,
+    turn_id: &str,
+    client_user_message_id: &str,
+    input: Vec<Value>,
+) -> Value {
+    json!({
+        "threadId": thread_id,
+        "expectedTurnId": turn_id,
+        "clientUserMessageId": client_user_message_id,
+        "input": input
+    })
 }
 
 fn sandbox_policy(permission: PermissionMode, workspace_path: &str) -> Value {
@@ -839,7 +893,10 @@ fn permission_mode_label(permission: PermissionMode) -> &'static str {
 mod tests {
     use serde_json::json;
 
-    use super::{sandbox_policy, thread_open_params};
+    use super::{
+        sandbox_policy, thread_open_params, turn_start_params, turn_steer_params,
+        NORMAL_SERVICE_TIER_ID,
+    };
     use crate::codex::protocol::{PermissionMode, ThreadPreferences};
 
     #[test]
@@ -876,5 +933,53 @@ mod tests {
             sandbox_policy(PermissionMode::FullAccess, "/tmp/project"),
             json!({"type":"dangerFullAccess"})
         );
+    }
+
+    #[test]
+    fn normal_speed_uses_codex_default_tier_override() {
+        let preferences = ThreadPreferences {
+            service_tier: Some(NORMAL_SERVICE_TIER_ID.to_string()),
+            ..ThreadPreferences::default()
+        };
+        let thread = thread_open_params("/tmp/project", &preferences, None);
+        let turn = turn_start_params(
+            "/tmp/project",
+            "thread-1",
+            "client-message-1",
+            vec![json!({"type":"text","text":"hello","text_elements":[]})],
+            &preferences,
+        );
+
+        assert_eq!(thread["serviceTier"], NORMAL_SERVICE_TIER_ID);
+        assert_eq!(turn["serviceTier"], NORMAL_SERVICE_TIER_ID);
+    }
+
+    #[test]
+    fn turn_requests_carry_the_client_user_message_id() {
+        let preferences = ThreadPreferences {
+            permission_mode: PermissionMode::FullAccess,
+            model: Some("runtime-model".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            service_tier: Some("priority".to_string()),
+        };
+        let start = turn_start_params(
+            "/tmp/project",
+            "thread-1",
+            "client-message-1",
+            vec![json!({"type":"text","text":"hello","text_elements":[]})],
+            &preferences,
+        );
+        assert_eq!(start["clientUserMessageId"], "client-message-1");
+        assert_eq!(start["threadId"], "thread-1");
+        assert_eq!(start["effort"], "high");
+
+        let steer = turn_steer_params(
+            "thread-1",
+            "turn-1",
+            "client-message-2",
+            vec![json!({"type":"text","text":"continue","text_elements":[]})],
+        );
+        assert_eq!(steer["clientUserMessageId"], "client-message-2");
+        assert_eq!(steer["expectedTurnId"], "turn-1");
     }
 }
